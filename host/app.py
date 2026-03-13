@@ -152,6 +152,20 @@ class ControlState:
         self.hardware = HardwareBridge()
         self.hardware.start()
         self.last_solution = self.kinematics.solve(self.pose)
+        self.last_calibration: dict[str, Any] | None = None
+
+    def _calibration_zero_offsets(self) -> list[float]:
+        return [-90.0 * sign for sign in self.kinematics.geometry.motor_signs]
+
+    def _wait_for_fresh_telemetry(self, timeout: float = 1.5) -> dict[str, Any]:
+        deadline = time.time() + timeout
+        latest = self.hardware.state()
+        while time.time() < deadline:
+            latest = self.hardware.state()
+            if latest.get("connected") and not latest.get("stale") and latest.get("ready"):
+                return latest
+            time.sleep(0.05)
+        return latest
 
     def actual_solution(self, telemetry: dict[str, Any]) -> dict[str, Any]:
         servo_angles = [float(motor.get("deg", 0.0)) for motor in telemetry.get("motors", [])[:6]]
@@ -179,6 +193,7 @@ class ControlState:
                 "zeroOffsetsDeg": self.kinematics.geometry.zero_offsets_deg,
                 "motorSigns": self.kinematics.geometry.motor_signs,
             },
+            "calibration": self.last_calibration,
             "sequence": self.sequence,
         }
 
@@ -219,15 +234,24 @@ class ControlState:
         elif command == "stop":
             self.hardware.stop()
         elif command == "calibrate":
-            calibration_pose = self.kinematics.calibration_pose()
-            self.pose = calibration_pose
-            self.kinematics.geometry.home_z = calibration_pose.z
-            calibration_solution = self.kinematics.solve(self.pose)
-            self.kinematics.geometry.zero_offsets_deg = [
-                -angle for angle in calibration_solution["servo_angles_deg"]
-            ]
-            self.last_solution = self.kinematics.solve(self.pose)
+            before = self._wait_for_fresh_telemetry()
             self.hardware.calibrate_all()
+            time.sleep(0.35)
+            after = self._wait_for_fresh_telemetry()
+
+            calibration_pose = self.kinematics.calibration_pose()
+            self.kinematics.geometry.zero_offsets_deg = self._calibration_zero_offsets()
+            self.kinematics.geometry.home_z = calibration_pose.z
+            self.pose = calibration_pose
+            self.last_solution = self.kinematics.solve(self.pose)
+            self.last_calibration = {
+                "timestamp": time.time(),
+                "calibrationPose": calibration_pose.to_dict(),
+                "beforeServoDeg": [float(motor.get("deg", 0.0)) for motor in before.get("motors", [])[:6]],
+                "beforeRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in before.get("motors", [])[:6]],
+                "afterServoDeg": [float(motor.get("deg", 0.0)) for motor in after.get("motors", [])[:6]],
+                "afterRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in after.get("motors", [])[:6]],
+            }
         elif command == "apply_pose":
             if self.last_solution["reachable"]:
                 self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])
