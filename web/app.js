@@ -212,6 +212,7 @@ async function sendCommand(command, extra = {}) {
     "disable_all",
     "stop",
     "calibrate",
+    "all_up_reference",
     "apply_pose",
   ]);
   if (hardwareCommands.has(command) && !hardwareAvailable()) {
@@ -311,6 +312,8 @@ function renderHardwareAccess() {
   $("#applyBtn").title = available ? "" : "Hardware offline";
   $("#calibrateBtn").disabled = !available;
   $("#calibrateBtn").title = available ? "" : "Hardware offline";
+  $("#allUpReferenceBtn").disabled = !available;
+  $("#allUpReferenceBtn").title = available ? "" : "Hardware offline";
   $("#manualPrepBtn").disabled = !available;
   $("#manualPrepBtn").title = available ? "" : "Hardware offline";
 
@@ -338,7 +341,11 @@ function renderFeedback() {
     text = feedback.message || "已更新";
     if (feedback.succeeded === false) {
       className += " status-danger";
-    } else if (feedback.type?.includes("calibrate") || feedback.type === "zero_motor") {
+    } else if (
+      feedback.type?.includes("calibrate") ||
+      feedback.type === "zero_motor" ||
+      feedback.type === "all_up_reference"
+    ) {
       className += " status-ok";
     } else {
       className += " status-warn";
@@ -660,6 +667,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
+  $("#allUpReferenceBtn").addEventListener("click", () => sendCommand("all_up_reference"));
   $("#durationInput").addEventListener("change", onDurationChange);
   $("#controlViewBtn").addEventListener("click", () => {
     viewMode = "control";

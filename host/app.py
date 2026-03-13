@@ -185,6 +185,12 @@ class ControlState:
             )
         return Pose(**self.pose.to_dict())
 
+    def _all_up_reference_pose(self) -> Pose:
+        return self.kinematics.calibration_pose()
+
+    def _all_up_reference_motor_angles(self) -> list[float]:
+        return [90.0] * 6
+
     def _wait_for_fresh_telemetry(self, timeout: float = 1.5) -> dict[str, Any]:
         deadline = time.time() + timeout
         latest = self.hardware.state()
@@ -475,6 +481,32 @@ class ControlState:
             self.last_feedback = {
                 "type": "calibrate_all",
                 "message": "已將當前姿態設為校正基準",
+                "timestamp": time.time(),
+            }
+        elif command == "all_up_reference":
+            before = self._wait_for_fresh_telemetry()
+            self.hardware.calibrate_all()
+            time.sleep(0.35)
+            after = self._wait_for_fresh_telemetry()
+            reference_pose = self._all_up_reference_pose()
+            reference_motor_angles = self._all_up_reference_motor_angles()
+            self.kinematics.geometry.zero_offsets_deg = self._zero_offsets_from_reference_motor_angles(reference_motor_angles)
+            self.kinematics.geometry.calibration_z = reference_pose.z
+            self.kinematics.geometry.home_z = reference_pose.z
+            self.pose = reference_pose
+            self.last_solution = self.kinematics.solve(self.pose)
+            self.last_calibration = {
+                "timestamp": time.time(),
+                "calibrationPose": reference_pose.to_dict(),
+                "referenceMotorAnglesDeg": reference_motor_angles,
+                "beforeServoDeg": [float(motor.get("deg", 0.0)) for motor in before.get("motors", [])[:6]],
+                "beforeRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in before.get("motors", [])[:6]],
+                "afterServoDeg": [float(motor.get("deg", 0.0)) for motor in after.get("motors", [])[:6]],
+                "afterRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in after.get("motors", [])[:6]],
+            }
+            self.last_feedback = {
+                "type": "all_up_reference",
+                "message": "已將全部向上設為校正基準",
                 "timestamp": time.time(),
             }
         elif command == "zero_motor":
