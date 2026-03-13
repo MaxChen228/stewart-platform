@@ -1,3 +1,6 @@
+import * as THREE from "https://esm.sh/three@0.179.1";
+import { OrbitControls } from "https://esm.sh/three@0.179.1/examples/jsm/controls/OrbitControls.js";
+
 const poseSpec = [
   { key: "roll", label: "ROLL", min: -30, max: 30, step: 0.5, unit: "deg" },
   { key: "pitch", label: "PITCH", min: -30, max: 30, step: 0.5, unit: "deg" },
@@ -19,6 +22,19 @@ const geometrySpec = [
 ];
 
 let state = null;
+let scene;
+let camera;
+let renderer;
+let controls;
+let platformGroup;
+let baseLoop;
+let platformLoop;
+let needsCameraFit = true;
+const crankLines = [];
+const rodLines = [];
+const basePoints = [];
+const crankPoints = [];
+const platformPoints = [];
 
 function $(selector) {
   return document.querySelector(selector);
@@ -101,6 +117,7 @@ async function onGeometryChange() {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  needsCameraFit = true;
   render();
 }
 
@@ -257,128 +274,157 @@ function makeMetric(label, value) {
   return row;
 }
 
-function project(point, width, height, rotation) {
-  const [x, y, z] = rotatePoint(point, rotation);
-  const scale = Math.min(width, height) * 0.85 / 420;
-  const perspective = 1 + z / 900;
-  return {
-    x: width / 2 + x * scale / perspective,
-    y: height / 2 - y * scale / perspective,
-    z,
-  };
+function toVector3(point) {
+  return new THREE.Vector3(point[0], point[1], point[2]);
 }
 
-function rotatePoint(point, rotation) {
-  const [x, y, z] = point;
-  const ay = rotation.y;
-  const ax = rotation.x;
+function makeLoop(color, width) {
+  const material = new THREE.LineBasicMaterial({ color, linewidth: width });
+  const geometry = new THREE.BufferGeometry();
+  const loop = new THREE.LineLoop(geometry, material);
+  platformGroup.add(loop);
+  return loop;
+}
 
-  const x1 = x * Math.cos(ay) + z * Math.sin(ay);
-  const z1 = -x * Math.sin(ay) + z * Math.cos(ay);
-  const y2 = y * Math.cos(ax) - z1 * Math.sin(ax);
-  const z2 = y * Math.sin(ax) + z1 * Math.cos(ax);
+function makeLine(color) {
+  const material = new THREE.LineBasicMaterial({ color });
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+  ]);
+  const line = new THREE.Line(geometry, material);
+  platformGroup.add(line);
+  return line;
+}
 
-  return [x1, y2, z2];
+function makePoint(color, radius) {
+  const geometry = new THREE.SphereGeometry(radius, 18, 18);
+  const material = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.72,
+    metalness: 0.0,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  platformGroup.add(mesh);
+  return mesh;
+}
+
+function initScene() {
+  const viewport = $("#sceneViewport");
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color("#f8f7f4");
+  scene.fog = new THREE.Fog("#f8f7f4", 500, 1200);
+
+  camera = new THREE.PerspectiveCamera(40, 1, 0.1, 3000);
+  camera.up.set(0, 0, 1);
+  camera.position.set(320, -320, 260);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  viewport.appendChild(renderer.domElement);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.target.set(0, 0, 90);
+  controls.minDistance = 180;
+  controls.maxDistance = 900;
+  controls.screenSpacePanning = true;
+
+  const ambient = new THREE.AmbientLight("#fcfbfa", 1.3);
+  scene.add(ambient);
+
+  const keyLight = new THREE.DirectionalLight("#ffffff", 1.0);
+  keyLight.position.set(220, 320, 160);
+  scene.add(keyLight);
+
+  const fillLight = new THREE.DirectionalLight("#e6b300", 0.35);
+  fillLight.position.set(-180, 140, -140);
+  scene.add(fillLight);
+
+  const grid = new THREE.GridHelper(900, 18, 0xdbd6cd, 0xe8e4db);
+  grid.rotateX(Math.PI / 2);
+  grid.position.z = -0.5;
+  scene.add(grid);
+
+  const axes = new THREE.AxesHelper(120);
+  axes.material.transparent = true;
+  axes.material.opacity = 0.35;
+  scene.add(axes);
+
+  platformGroup = new THREE.Group();
+  scene.add(platformGroup);
+
+  baseLoop = makeLoop("#2a2520", 2);
+  platformLoop = makeLoop("#4a6b8c", 4);
+
+  for (let i = 0; i < 6; i += 1) {
+    crankLines.push(makeLine("#d35400"));
+    rodLines.push(makeLine("#2a2520"));
+    basePoints.push(makePoint("#2a2520", 5.5));
+    crankPoints.push(makePoint("#e6b300", 5.2));
+    platformPoints.push(makePoint("#4a6b8c", 5.8));
+  }
+
+  resizeScene();
+  animateScene();
+}
+
+function fitCameraToPlatform(points) {
+  if (!points.length) return;
+
+  const box = new THREE.Box3().setFromPoints(points);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z, 180) * 0.8;
+  const distance = radius / Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+
+  controls.target.copy(center);
+  camera.position.copy(
+    center.clone().add(new THREE.Vector3(distance * 0.95, -distance * 0.95, distance * 0.72))
+  );
+  camera.near = Math.max(0.1, distance / 200);
+  camera.far = distance * 12;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function setLinePoints(line, start, end) {
+  line.geometry.setFromPoints([start, end]);
+}
+
+function updateLoop(loop, points) {
+  loop.geometry.setFromPoints(points);
 }
 
 function renderCanvas() {
-  const canvas = $("#platformCanvas");
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width * devicePixelRatio;
-  canvas.height = rect.height * devicePixelRatio;
-  const ctx = canvas.getContext("2d");
-  ctx.scale(devicePixelRatio, devicePixelRatio);
+  if (!state || !scene) return;
 
-  ctx.fillStyle = "#f8f7f4";
-  ctx.fillRect(0, 0, rect.width, rect.height);
+  const reachable = state.solution.reachable;
+  platformLoop.material.color.set(reachable ? "#4a6b8c" : "#c0392b");
 
-  drawGrid(ctx, rect.width, rect.height);
+  const base = state.solution.base_points.map(toVector3);
+  const crank = state.solution.crank_points.map(toVector3);
+  const platform = state.solution.platform_points_world.map(toVector3);
 
-  const rotation = { x: -0.55, y: 0.7 };
-  const base = state.solution.base_points.map((point) => project(point, rect.width, rect.height, rotation));
-  const platform = state.solution.platform_points_world.map((point) => project(point, rect.width, rect.height, rotation));
-  const crank = state.solution.crank_points.map((point) => project(point, rect.width, rect.height, rotation));
+  updateLoop(baseLoop, base);
+  updateLoop(platformLoop, platform);
 
-  drawPolygon(ctx, base, "#2a252066", 2.5);
-  drawPolygon(ctx, platform, state.solution.reachable ? "#4a6b8c" : "#c0392b", 5);
-
-  base.forEach((point, index) => {
-    const crankPoint = crank[index];
-    const platformPoint = platform[index];
-    drawLine(ctx, point, crankPoint, "#d35400", 3.5);
-    drawLine(ctx, crankPoint, platformPoint, state.solution.reachable ? "#2a2520" : "#c0392b", 4);
-    drawPoint(ctx, point, "#2a2520");
-    drawPoint(ctx, crankPoint, "#e6b300");
-    drawPoint(ctx, platformPoint, state.solution.reachable ? "#4a6b8c" : "#c0392b");
-    drawLabel(ctx, `M${index + 1}`, platformPoint);
-  });
-}
-
-function drawGrid(ctx, width, height) {
-  ctx.save();
-  ctx.strokeStyle = "#e8e4db";
-  ctx.lineWidth = 1.5;
-  for (let x = 0; x <= width; x += 48) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
+  for (let i = 0; i < 6; i += 1) {
+    basePoints[i].position.copy(base[i]);
+    crankPoints[i].position.copy(crank[i]);
+    platformPoints[i].position.copy(platform[i]);
+    platformPoints[i].material.color.set(reachable ? "#4a6b8c" : "#c0392b");
+    rodLines[i].material.color.set(reachable ? "#2a2520" : "#c0392b");
+    setLinePoints(crankLines[i], base[i], crank[i]);
+    setLinePoints(rodLines[i], crank[i], platform[i]);
   }
-  for (let y = 0; y <= height; y += 48) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
+
+  if (needsCameraFit) {
+    fitCameraToPlatform([...base, ...crank, ...platform]);
+    needsCameraFit = false;
   }
-  ctx.restore();
-}
-
-function drawPolygon(ctx, points, strokeStyle, width) {
-  ctx.save();
-  ctx.strokeStyle = strokeStyle;
-  ctx.lineWidth = width;
-  ctx.beginPath();
-  points.forEach((point, index) => {
-    if (!index) ctx.moveTo(point.x, point.y);
-    else ctx.lineTo(point.x, point.y);
-  });
-  ctx.closePath();
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawLine(ctx, a, b, strokeStyle, width) {
-  ctx.save();
-  ctx.strokeStyle = strokeStyle;
-  ctx.lineWidth = width;
-  ctx.beginPath();
-  ctx.moveTo(a.x, a.y);
-  ctx.lineTo(b.x, b.y);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawPoint(ctx, point, fillStyle) {
-  ctx.save();
-  ctx.fillStyle = fillStyle;
-  ctx.strokeStyle = "#2a2520";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(point.x, point.y, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawLabel(ctx, label, point) {
-  ctx.save();
-  ctx.font = "700 14px 'Noto Sans TC'";
-  ctx.lineWidth = 6;
-  ctx.strokeStyle = "#fcfbfa";
-  ctx.strokeText(label, point.x + 8, point.y - 8);
-  ctx.fillStyle = "#2a2520";
-  ctx.fillText(label, point.x + 8, point.y - 8);
-  ctx.restore();
 }
 
 function render() {
@@ -399,10 +445,31 @@ async function refresh() {
   render();
 }
 
-window.addEventListener("resize", renderCanvas);
+function resizeScene() {
+  if (!renderer || !camera) return;
+  const viewport = $("#sceneViewport");
+  const width = viewport.clientWidth;
+  const height = viewport.clientHeight;
+  camera.aspect = width / Math.max(height, 1);
+  camera.updateProjectionMatrix();
+  renderer.setSize(width, height, false);
+}
+
+function animateScene() {
+  requestAnimationFrame(animateScene);
+  if (!renderer || !scene || !camera) return;
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+window.addEventListener("resize", () => {
+  resizeScene();
+  renderCanvas();
+});
 
 document.addEventListener("DOMContentLoaded", async () => {
   initControls();
+  initScene();
   document.querySelectorAll("[data-mode]").forEach((button) => {
     button.addEventListener("click", () => setMode(button.dataset.mode));
   });
@@ -412,6 +479,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#applyBtn").addEventListener("click", applyPose);
   $("#homeBtn").addEventListener("click", async () => {
     await sendCommand("home");
+    needsCameraFit = true;
     render();
   });
   $("#liveSendToggle").addEventListener("change", () => setMode(state.mode));
