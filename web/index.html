@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stewart Platform Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark">STEWART PLATFORM</div>
+        <div class="brand-sub">SIMULATION / HARDWARE CONTROL SURFACE</div>
+      </div>
+      <div class="status-strip">
+        <span class="chip" id="modeChip">SIM</span>
+        <span class="chip" id="reachChip">REACHABLE</span>
+        <span class="chip" id="linkChip">HW OFFLINE</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="ui-card">
+          <div class="card-head">
+            <h2>SESSION</h2>
+            <span class="micro-label">IO STATE</span>
+          </div>
+          <div class="mode-grid">
+            <button class="chip-button is-active" data-mode="SIM">SIM</button>
+            <button class="chip-button" data-mode="SIM+HW">SIM+HW</button>
+          </div>
+          <label class="toggle-row">
+            <span>Live Send</span>
+            <input type="checkbox" id="liveSendToggle">
+          </label>
+          <div class="session-meta" id="sessionMeta"></div>
+          <div class="button-row">
+            <button class="action-button" data-command="enable_all">Enable All</button>
+            <button class="action-button" data-command="disable_all">Disable All</button>
+            <button class="action-button danger" data-command="stop">E-Stop</button>
+          </div>
+        </section>
+
+        <section class="ui-card">
+          <div class="card-head">
+            <h2>POSE</h2>
+            <span class="micro-label">INPUT</span>
+          </div>
+          <div id="poseControls" class="pose-stack"></div>
+          <div class="button-row">
+            <button class="action-button" id="homeBtn">Home</button>
+            <button class="action-button primary" id="applyBtn">Apply Pose</button>
+          </div>
+        </section>
+
+        <section class="ui-card">
+          <div class="card-head">
+            <h2>SOLVE</h2>
+            <span class="micro-label">THEORY</span>
+          </div>
+          <div class="solve-state">
+            <div class="solve-status" id="solveStatus">REACHABLE</div>
+            <div class="solve-issues" id="solveIssues">No constraint issues.</div>
+          </div>
+          <div class="matrix-grid" id="solveMatrix"></div>
+        </section>
+
+        <section class="ui-card">
+          <div class="card-head">
+            <h2>HARDWARE</h2>
+            <span class="micro-label">FEEDBACK</span>
+          </div>
+          <div class="matrix-grid" id="hardwareMatrix"></div>
+        </section>
+
+        <section class="ui-card">
+          <div class="card-head">
+            <h2>MOTION</h2>
+            <span class="micro-label">KEYFRAMES</span>
+          </div>
+          <div class="button-row">
+            <button class="action-button" data-command="record_keyframe">Record</button>
+            <button class="action-button" data-command="clear_keyframes">Clear</button>
+          </div>
+          <div class="sequence-list" id="sequenceList"></div>
+        </section>
+
+        <section class="ui-card collapsible open">
+          <div class="card-head">
+            <h2>GEOMETRY</h2>
+            <button class="micro-button" id="geometryToggle">COLLAPSE</button>
+          </div>
+          <div class="geometry-grid" id="geometryGrid"></div>
+        </section>
+      </aside>
+
+      <section class="canvas-panel">
+        <canvas id="platformCanvas"></canvas>
+        <div class="canvas-overlay overlay-top-left" id="poseOverlay"></div>
+        <div class="canvas-overlay overlay-top-right" id="summaryOverlay"></div>
+        <div class="canvas-overlay overlay-bottom-right" id="errorOverlay"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
