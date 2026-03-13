@@ -49,6 +49,9 @@ struct MotorState {
     bool configKnown;
     uint8_t configMask;
     unsigned long lastConfigSeen;
+    bool protectActive;
+    int16_t angleError;
+    uint8_t statusCode;  // 0xF1 response
 };
 
 MotorState motors[NUM_MOTORS];
@@ -114,6 +117,55 @@ void enableMotor(uint8_t id, bool en) {
     uint8_t buf[8]; uint8_t len;
     canReceive(id, buf, &len, 50);
     motors[id - 1].enabled = en;
+}
+
+bool setHoldCurrent(uint8_t id, uint8_t ratio) {
+    // ratio: 0-8 → holdPct = ratio*10+10 → 10%-90%
+    uint8_t data[3] = {0x9B, ratio, 0x00};
+    canSend(id, data, 3);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) return false;
+    return rxLen >= 3 && buf[0] == 0x9B && buf[1] != 0x00;
+}
+
+bool setProtect(uint8_t id, bool enable) {
+    uint8_t data[3] = {0x88, (uint8_t)(enable ? 0x01 : 0x00), 0x00};
+    canSend(id, data, 3);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) return false;
+    return rxLen >= 3 && buf[0] == 0x88 && buf[1] != 0x00;
+}
+
+bool releaseProtection(uint8_t id) {
+    uint8_t data[2] = {0x3D, 0x00};
+    canSend(id, data, 2);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) return false;
+    return rxLen >= 2 && buf[0] == 0x3D;
+}
+
+bool readProtectState(uint8_t id, bool *active) {
+    uint8_t data[2] = {0x3E, 0x00};
+    canSend(id, data, 2);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) return false;
+    if (rxLen >= 2 && buf[0] == 0x3E) {
+        *active = buf[1] != 0x00;
+        return true;
+    }
+    return false;
+}
+
+bool readAngleError(uint8_t id, int16_t *error) {
+    uint8_t data[2] = {0x39, 0x00};
+    canSend(id, data, 2);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) return false;
+    if (rxLen >= 4 && buf[0] == 0x39) {
+        *error = (int16_t)((buf[1] << 8) | buf[2]);
+        return true;
+    }
+    return false;
 }
 
 bool setWorkingCurrent(uint8_t id, uint16_t currentMa, bool saveToFlash) {
@@ -351,6 +403,44 @@ void handleSerial() {
             speedMode(id, 100, 5, false);
             motors[id - 1].moving = true;
         }
+    } else if (cmd.startsWith("SET_HOLD_CURRENT:")) {
+        // SET_HOLD_CURRENT:{ratio}  ratio 0-8 → 10%-90%
+        uint8_t ratio = (uint8_t)constrain(cmd.substring(17).toInt(), 0, 8);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            setHoldCurrent(i + 1, ratio);
+            delay(10);
+        }
+    } else if (cmd.startsWith("SET_PROTECT:")) {
+        bool en = cmd.substring(12).toInt() == 1;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            setProtect(i + 1, en);
+            delay(10);
+        }
+    } else if (cmd == "RELEASE_PROTECT") {
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            releaseProtection(i + 1);
+            delay(10);
+        }
+    } else if (cmd == "READ_PROTECT") {
+        Serial.print("{\"protect\":[");
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            if (i) Serial.print(",");
+            bool active = false;
+            bool ok = readProtectState(i + 1, &active);
+            Serial.printf("{\"id\":%d,\"ok\":%s,\"active\":%s}", i + 1,
+                ok ? "true" : "false", active ? "true" : "false");
+        }
+        Serial.println("]}");
+    } else if (cmd == "READ_ANGLE_ERR") {
+        Serial.print("{\"angleError\":[");
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            if (i) Serial.print(",");
+            int16_t err = 0;
+            bool ok = readAngleError(i + 1, &err);
+            Serial.printf("{\"id\":%d,\"ok\":%s,\"ticks\":%d}", i + 1,
+                ok ? "true" : "false", (int)err);
+        }
+        Serial.println("]}");
     }
 }
 

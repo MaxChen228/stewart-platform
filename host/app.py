@@ -164,6 +164,21 @@ class HardwareBridge:
     def set_work_current_all(self, current_ma: int) -> bool:
         return self.send_line(f"SET_CURRENT:{current_ma}")
 
+    def set_hold_current_all(self, ratio: int) -> bool:
+        return self.send_line(f"SET_HOLD_CURRENT:{ratio}")
+
+    def set_protect_all(self, enable: bool) -> bool:
+        return self.send_line(f"SET_PROTECT:{1 if enable else 0}")
+
+    def release_protect_all(self) -> bool:
+        return self.send_line("RELEASE_PROTECT")
+
+    def read_protect(self) -> bool:
+        return self.send_line("READ_PROTECT")
+
+    def read_angle_error(self) -> bool:
+        return self.send_line("READ_ANGLE_ERR")
+
 
 class ControlState:
     def __init__(self) -> None:
@@ -181,6 +196,7 @@ class ControlState:
             "positionSpeed": 180,
             "positionAccel": 12,
             "workCurrentMa": 0,
+            "holdCurrentRatio": -1,  # -1 = not set yet
         }
         self._state_lock = threading.RLock()
         self._trajectory_generation = 0
@@ -279,6 +295,8 @@ class ControlState:
                 self.motor_settings["positionAccel"] = max(0, min(255, int(float(motor_settings["positionAccel"]))))
             if "workCurrentMa" in motor_settings:
                 self.motor_settings["workCurrentMa"] = max(0, min(3000, int(float(motor_settings["workCurrentMa"]))))
+            if "holdCurrentRatio" in motor_settings:
+                self.motor_settings["holdCurrentRatio"] = max(-1, min(8, int(float(motor_settings["holdCurrentRatio"]))))
         self.motion_state = {"active": False, "progress": 1.0, "durationMs": self.motion_duration_ms}
 
     def _persist_runtime_state(self) -> None:
@@ -478,6 +496,17 @@ class ControlState:
             self.motor_settings["workCurrentMa"] = current_ma
             self.hardware.set_work_current_all(current_ma)
             changed_parts.append(f"ma={current_ma}")
+        hold_current_ratio = payload.get("holdCurrentRatio")
+        if hold_current_ratio is not None:
+            ratio = max(0, min(8, int(float(hold_current_ratio))))
+            self.motor_settings["holdCurrentRatio"] = ratio
+            self.hardware.set_hold_current_all(ratio)
+            hold_pct = ratio * 10 + 10
+            changed_parts.append(f"hold={hold_pct}%")
+        protect_enable = payload.get("protectEnable")
+        if protect_enable is not None:
+            self.hardware.set_protect_all(bool(protect_enable))
+            changed_parts.append(f"protect={'on' if protect_enable else 'off'}")
         if changed_parts:
             self.last_feedback = {
                 "type": "motor_settings",
@@ -498,6 +527,15 @@ class ControlState:
         elif command == "stop":
             self.hardware.stop()
             self.last_feedback = {"type": "stop", "message": "已送出急停", "timestamp": time.time()}
+        elif command == "release_protect":
+            self.hardware.release_protect_all()
+            self.last_feedback = {"type": "release_protect", "message": "已解除堵轉保護", "timestamp": time.time()}
+        elif command == "read_protect":
+            self.hardware.read_protect()
+            self.last_feedback = {"type": "read_protect", "message": "已請求讀取保護狀態（查看 serial log）", "timestamp": time.time()}
+        elif command == "read_angle_error":
+            self.hardware.read_angle_error()
+            self.last_feedback = {"type": "read_angle_error", "message": "已請求讀取角度誤差（查看 serial log）", "timestamp": time.time()}
         elif command == "calibrate":
             before = self._wait_for_fresh_telemetry()
             before_actual = self.actual_solution(before)
