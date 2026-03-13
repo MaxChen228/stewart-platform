@@ -51,19 +51,31 @@
             <span class="micro-label">STATUS</span>
           </div>
           <div class="motor-summary" id="motorSummary"></div>
+          <div class="calibration-panel">
+            <div class="calibration-copy">
+              <div class="micro-label">MANUAL CALIBRATION</div>
+              <p>先按 Disable All 手動調整，再做全部或單顆校正。</p>
+            </div>
+            <div class="button-row">
+              <button class="action-button" id="manualPrepBtn" data-command="disable_all">Prepare Manual</button>
+              <button class="action-button primary" id="calibrateBtn">Calibrate All</button>
+            </div>
+            <div class="feedback-strip" id="feedbackStrip">等待操作</div>
+          </div>
           <div class="motor-grid" id="motorGrid"></div>
           <div class="button-row triple-row">
             <button class="action-button" data-command="enable_all">Enable All</button>
             <button class="action-button" data-command="disable_all">Disable All</button>
             <button class="action-button danger" data-command="stop">E-Stop</button>
           </div>
-          <div class="button-row single-row">
-            <button class="action-button primary" id="calibrateBtn">Calibrate</button>
-          </div>
         </section>
       </aside>
 
       <section class="canvas-panel">
+        <div class="canvas-toolbar">
+          <button class="chip-button is-active" id="controlViewBtn" type="button">Control View</button>
+          <button class="chip-button" id="geometryViewBtn" type="button">Geometry Mode</button>
+        </div>
         <div id="sceneViewport"></div>
       </section>
     </main>

@@ -32,6 +32,7 @@ let platformLoop;
 let actualPlatformLoop;
 let needsCameraFit = true;
 let calibrationFeedback = null;
+let viewMode = "control";
 const crankLines = [];
 const rodLines = [];
 const basePoints = [];
@@ -41,6 +42,11 @@ const actualCrankLines = [];
 const actualRodLines = [];
 const actualCrankPoints = [];
 const actualPlatformPoints = [];
+const baseLabels = [];
+const crankLabels = [];
+const platformLabels = [];
+let baseGuideLoop;
+let platformGuideLoop;
 
 function hardwareAvailable() {
   return Boolean(state?.hardware?.connected && !state?.hardware?.stale && state?.hardware?.ready);
@@ -55,6 +61,34 @@ function el(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function createLabelSprite(text, color = "#2a2520") {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 96;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "rgba(252,251,250,0.92)";
+  ctx.strokeStyle = "rgba(219,214,205,0.95)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(10, 10, 236, 76, 18);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.font = "700 30px JetBrains Mono";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 128, 48);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(26, 9.75, 1);
+  sprite.visible = false;
+  platformGroup.add(sprite);
+  return sprite;
 }
 
 async function api(path, options = {}) {
@@ -172,6 +206,11 @@ async function sendCommand(command, extra = {}) {
     calibrationFeedback = {
       updatedAt: Date.now(),
     };
+  } else if (command === "zero_motor") {
+    calibrationFeedback = {
+      updatedAt: Date.now(),
+      motorId: extra.motorId,
+    };
   }
   render();
 }
@@ -233,6 +272,8 @@ function renderHardwareAccess() {
   $("#applyBtn").title = available ? "" : "Hardware offline";
   $("#calibrateBtn").disabled = !available;
   $("#calibrateBtn").title = available ? "" : "Hardware offline";
+  $("#manualPrepBtn").disabled = !available;
+  $("#manualPrepBtn").title = available ? "" : "Hardware offline";
 
   document.querySelectorAll("[data-command]").forEach((button) => {
     const command = button.dataset.command;
@@ -246,6 +287,29 @@ function renderHardwareAccess() {
     }
   });
 
+}
+
+function renderFeedback() {
+  const strip = $("#feedbackStrip");
+  const feedback = state.feedback;
+  const ageMs = feedback?.timestamp ? (Date.now() - feedback.timestamp * 1000) : Number.POSITIVE_INFINITY;
+  let text = "等待操作";
+  let className = "feedback-strip";
+  if (feedback && ageMs < 12000) {
+    text = feedback.message || "已更新";
+    if (feedback.succeeded === false) {
+      className += " status-danger";
+    } else if (feedback.type?.includes("calibrate") || feedback.type === "zero_motor") {
+      className += " status-ok";
+    } else {
+      className += " status-warn";
+    }
+  } else if (!hardwareAvailable()) {
+    text = "硬體離線，校正功能停用";
+    className += " status-danger";
+  }
+  strip.className = className;
+  strip.textContent = text;
 }
 
 function renderMotorStatus() {
@@ -266,7 +330,12 @@ function renderMotorStatus() {
     const stateClass = motor.on ? "metric-ok" : "metric-danger";
     const enabledClass = motor.enabled ? "metric-ok" : "metric-warn";
     const errorClass = Math.abs(error) < 1 ? "metric-ok" : (Math.abs(error) < 3 ? "metric-warn" : "metric-danger");
+    const feedback = state.feedback;
+    const highlighted = feedback?.type === "zero_motor" && feedback?.motorId === motor.id && (Date.now() - feedback.timestamp * 1000) < 12000;
     const card = el("div", "motor-card");
+    if (highlighted) {
+      card.classList.add(feedback?.succeeded === false ? "motor-card-error" : "motor-card-success");
+    }
     card.innerHTML = `
       <strong>M${motor.id}</strong>
       <div class="motor-row"><span>State</span><span class="${stateClass}">${motor.on ? "ONLINE" : "OFFLINE"}</span></div>
@@ -274,8 +343,13 @@ function renderMotorStatus() {
       <div class="motor-row"><span>Actual</span><span>${actual.toFixed(1)} deg</span></div>
       <div class="motor-row"><span>Target</span><span>${target.toFixed(1)} deg</span></div>
       <div class="motor-row"><span>Error</span><span class="${errorClass}">${error.toFixed(1)} deg</span></div>
+      <button class="mini-action" data-zero-motor="${motor.id}" ${hardwareAvailable() ? "" : "disabled"}>Zero M${motor.id}</button>
     `;
     grid.appendChild(card);
+  });
+
+  grid.querySelectorAll("[data-zero-motor]").forEach((button) => {
+    button.addEventListener("click", () => sendCommand("zero_motor", { motorId: Number(button.dataset.zeroMotor) }));
   });
 }
 
@@ -287,6 +361,15 @@ function makeLoop(color, width) {
   const material = new THREE.LineBasicMaterial({ color, linewidth: width, transparent: true });
   const geometry = new THREE.BufferGeometry();
   const loop = new THREE.LineLoop(geometry, material);
+  platformGroup.add(loop);
+  return loop;
+}
+
+function makeGuideLoop(color, opacity = 1) {
+  const material = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
+  const geometry = new THREE.BufferGeometry();
+  const loop = new THREE.LineLoop(geometry, material);
+  loop.visible = false;
   platformGroup.add(loop);
   return loop;
 }
@@ -367,6 +450,8 @@ function initScene() {
   platformLoop = makeLoop("#4a6b8c", 4);
   actualPlatformLoop = makeLoop("#c0392b", 4);
   actualPlatformLoop.material.opacity = 0.8;
+  baseGuideLoop = makeGuideLoop("#2a2520", 0.35);
+  platformGuideLoop = makeGuideLoop("#4a6b8c", 0.5);
 
   for (let i = 0; i < 6; i += 1) {
     crankLines.push(makeLine("#d35400"));
@@ -378,6 +463,9 @@ function initScene() {
     actualRodLines.push(makeLine("#c0392b", 0.65));
     actualCrankPoints.push(makePoint("#d35400", 4.4, 0.55));
     actualPlatformPoints.push(makePoint("#c0392b", 5.0, 0.75));
+    baseLabels.push(createLabelSprite(`B${i + 1}`, "#2a2520"));
+    crankLabels.push(createLabelSprite(`M${i + 1}`, "#d35400"));
+    platformLabels.push(createLabelSprite(`P${i + 1}`, "#4a6b8c"));
   }
 
   resizeScene();
@@ -429,24 +517,36 @@ function renderCanvas() {
   const actualPlatformSource = actualValid ? state.actualSolution.platform_points_world : state.solution.platform_points_world;
   const actualCrank = actualCrankSource.map(toVector3);
   const actualPlatform = actualPlatformSource.map(toVector3);
+  const geometryMode = viewMode === "geometry";
 
   updateLoop(baseLoop, base);
   updateLoop(platformLoop, platform);
   updateLoop(actualPlatformLoop, actualPlatform);
-  actualPlatformLoop.visible = actualValid;
+  actualPlatformLoop.visible = actualValid && !geometryMode;
+  baseGuideLoop.visible = geometryMode;
+  platformGuideLoop.visible = geometryMode;
+  updateLoop(baseGuideLoop, base);
+  updateLoop(platformGuideLoop, platform);
 
   for (let i = 0; i < 6; i += 1) {
     basePoints[i].position.copy(base[i]);
     crankPoints[i].position.copy(crank[i]);
     platformPoints[i].position.copy(platform[i]);
-    platformPoints[i].material.color.set(reachable ? "#4a6b8c" : "#c0392b");
+    basePoints[i].material.color.set(geometryMode ? "#2a2520" : "#2a2520");
+    platformPoints[i].material.color.set(geometryMode ? "#4a6b8c" : (reachable ? "#4a6b8c" : "#c0392b"));
     rodLines[i].material.color.set(reachable ? "#2a2520" : "#c0392b");
     setLinePoints(crankLines[i], base[i], crank[i]);
     setLinePoints(rodLines[i], crank[i], platform[i]);
-    actualCrankPoints[i].visible = actualValid;
-    actualPlatformPoints[i].visible = actualValid;
-    actualCrankLines[i].visible = actualValid;
-    actualRodLines[i].visible = actualValid;
+    baseLabels[i].visible = geometryMode;
+    crankLabels[i].visible = geometryMode;
+    platformLabels[i].visible = geometryMode;
+    baseLabels[i].position.copy(base[i].clone().add(new THREE.Vector3(0, 0, 16)));
+    crankLabels[i].position.copy(crank[i].clone().add(new THREE.Vector3(0, 0, 16)));
+    platformLabels[i].position.copy(platform[i].clone().add(new THREE.Vector3(0, 0, 16)));
+    actualCrankPoints[i].visible = actualValid && !geometryMode;
+    actualPlatformPoints[i].visible = actualValid && !geometryMode;
+    actualCrankLines[i].visible = actualValid && !geometryMode;
+    actualRodLines[i].visible = actualValid && !geometryMode;
     if (actualValid) {
       actualCrankPoints[i].position.copy(actualCrank[i]);
       actualPlatformPoints[i].position.copy(actualPlatform[i]);
@@ -468,6 +568,7 @@ function render() {
   renderChips();
   renderHardwareAccess();
   renderMotorStatus();
+  renderFeedback();
   renderCanvas();
 }
 
@@ -511,6 +612,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
+  $("#controlViewBtn").addEventListener("click", () => {
+    viewMode = "control";
+    $("#controlViewBtn").classList.add("is-active");
+    $("#geometryViewBtn").classList.remove("is-active");
+    renderCanvas();
+  });
+  $("#geometryViewBtn").addEventListener("click", () => {
+    viewMode = "geometry";
+    $("#geometryViewBtn").classList.add("is-active");
+    $("#controlViewBtn").classList.remove("is-active");
+    renderCanvas();
+  });
   $("#geometryToggle").addEventListener("click", () => {
     $("#geometryGrid").classList.toggle("hidden");
     $("#geometryToggle").textContent = $("#geometryGrid").classList.contains("hidden") ? "EXPAND" : "COLLAPSE";

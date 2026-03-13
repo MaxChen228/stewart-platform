@@ -172,6 +172,54 @@ input {
   gap: 8px;
 }
 
+.calibration-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--border-light);
+  background: var(--bg);
+  border-radius: 2px;
+}
+
+.calibration-copy p {
+  margin: 8px 0 0;
+  color: var(--ink-light);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.feedback-strip {
+  margin-top: 12px;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-base);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--sub);
+  background: rgba(252, 251, 250, 0.85);
+}
+
+.feedback-strip.status-ok {
+  color: var(--contra);
+  background: rgba(74, 107, 140, 0.1);
+  border-color: transparent;
+}
+
+.feedback-strip.status-warn {
+  color: var(--dual);
+  background: rgba(211, 84, 0, 0.1);
+  border-color: transparent;
+}
+
+.feedback-strip.status-danger {
+  color: var(--dev);
+  background: rgba(192, 57, 43, 0.1);
+  border-color: transparent;
+}
+
 .button-row {
   margin-top: 16px;
 }
@@ -435,6 +483,16 @@ input {
   padding: 12px;
 }
 
+.motor-card-success {
+  border-color: rgba(74, 107, 140, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(74, 107, 140, 0.12);
+}
+
+.motor-card-error {
+  border-color: rgba(192, 57, 43, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(192, 57, 43, 0.12);
+}
+
 .motor-card strong {
   display: block;
   margin-bottom: 10px;
@@ -452,10 +510,38 @@ input {
   line-height: 1.8;
 }
 
+.mini-action {
+  margin-top: 10px;
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--border-base);
+  background: var(--surface);
+  border-radius: 999px;
+  color: var(--ink);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
 .canvas-panel {
   position: relative;
   flex: 1;
   overflow: hidden;
+}
+
+.canvas-toolbar {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-base);
+  background: rgba(252, 251, 250, 0.88);
+  backdrop-filter: blur(8px);
+  border-radius: 999px;
 }
 
 #sceneViewport {

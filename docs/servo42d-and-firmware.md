@@ -60,6 +60,39 @@ Important distinction:
 
 These cannot be treated as interchangeable scaling domains.
 
+## What The Encoder Actually Means In This Project
+
+The encoder data in this project must be understood in four layers:
+
+1. `raw encoder count / raw angle`
+   - this comes from the motor telemetry
+   - currently derived from `0x30` carry + single-turn value
+   - this is the closest thing to the motor's native accumulated position signal
+
+2. `logical angle`
+   - this is what the firmware reports as `deg`
+   - it is computed as:
+   - `logical angle = raw angle - zeroOffsetDeg`
+   - this is not a factory-defined world angle
+
+3. `calibration zero`
+   - this is the project-defined reference
+   - when `CALIBRATE` is executed, the current physical posture becomes logical zero
+   - in other words, zero is assigned by workflow, not discovered automatically by the motor
+
+4. `motor internal zero`
+   - the SERVO42D protocol also exposes commands such as `0x92 set zero point`
+   - this is a motor-side persistent reference concept
+   - the project currently does not use motor internal zero as its primary truth model
+
+Practical consequence:
+
+- the encoder does not magically know "this is mechanically vertical-up"
+- it only knows its measured accumulated position
+- the project must still define what physical posture should count as logical zero
+
+This is why a machine that has drifted away from its reference can still report a perfectly meaningful encoder value, while no longer being at the intended physical posture.
+
 ## Telemetry Fields In Use
 
 Current firmware emits:

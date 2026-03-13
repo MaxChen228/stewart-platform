@@ -57,6 +57,31 @@ Incorrect meaning:
 
 The project originally mixed these two meanings, which created large mismatches between target and actual states.
 
+## Why Recalibration Still Needs A Physical Reference
+
+Even though the motors have encoder feedback, that does not mean the system automatically knows the user's intended physical zero posture.
+
+What the encoder can tell us:
+
+- how far the motor has moved relative to its measured reference
+- whether the motor has drifted away from the last calibrated logical zero
+
+What the encoder cannot tell us by itself:
+
+- whether the current posture is the "true" mechanical vertical-up posture the operator wants
+
+Therefore:
+
+- if the platform has drifted away from the desired physical reference
+- and the operator wants to redefine the true vertical-up posture
+- a physical reference is still needed
+
+In this project, that physical reference is currently:
+
+- the operator manually placing all six cranks at the intended vertical-up pose
+
+Only after that can `CALIBRATE` legitimately redefine logical zero.
+
 ## Operations Scripts
 
 ### `ops.py`

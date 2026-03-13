@@ -142,6 +142,9 @@ class HardwareBridge:
     def calibrate_all(self) -> bool:
         return self.send_line("CALIBRATE")
 
+    def zero_motor(self, motor_id: int) -> bool:
+        return self.send_line(f"ZERO:{motor_id}")
+
 
 class ControlState:
     def __init__(self) -> None:
@@ -152,6 +155,7 @@ class ControlState:
         self.sequence: list[dict[str, float]] = []
         self.hardware = HardwareBridge()
         self.last_calibration: dict[str, Any] | None = None
+        self.last_feedback: dict[str, Any] | None = None
         self._load_runtime_state()
         self.hardware.start()
         self.last_solution = self.kinematics.solve(self.pose)
@@ -210,12 +214,16 @@ class ControlState:
         calibration = payload.get("lastCalibration")
         if isinstance(calibration, dict):
             self.last_calibration = calibration
+        feedback = payload.get("lastFeedback")
+        if isinstance(feedback, dict):
+            self.last_feedback = feedback
 
     def _persist_runtime_state(self) -> None:
         payload = {
             "geometry": self.kinematics.geometry.to_dict(),
             "pose": self.pose.to_dict(),
             "lastCalibration": self.last_calibration,
+            "lastFeedback": self.last_feedback,
         }
         STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -247,6 +255,7 @@ class ControlState:
                 "motorSigns": self.kinematics.geometry.motor_signs,
             },
             "calibration": self.last_calibration,
+            "feedback": self.last_feedback,
             "sequence": self.sequence,
         }
 
@@ -285,10 +294,13 @@ class ControlState:
         payload = payload or {}
         if command == "enable_all":
             self.hardware.enable_all(True)
+            self.last_feedback = {"type": "enable_all", "message": "已使能全部馬達", "timestamp": time.time()}
         elif command == "disable_all":
             self.hardware.enable_all(False)
+            self.last_feedback = {"type": "disable_all", "message": "已失能全部馬達，可手動調整", "timestamp": time.time()}
         elif command == "stop":
             self.hardware.stop()
+            self.last_feedback = {"type": "stop", "message": "已送出急停", "timestamp": time.time()}
         elif command == "calibrate":
             before = self._wait_for_fresh_telemetry()
             self.hardware.calibrate_all()
@@ -311,9 +323,27 @@ class ControlState:
                 "afterServoDeg": [float(motor.get("deg", 0.0)) for motor in after.get("motors", [])[:6]],
                 "afterRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in after.get("motors", [])[:6]],
             }
+            self.last_feedback = {"type": "calibrate_all", "message": "已完成全部校正", "timestamp": time.time()}
+        elif command == "zero_motor":
+            motor_id = int(payload.get("motorId", 0))
+            motors_before = self._wait_for_fresh_telemetry().get("motors", [])
+            if 1 <= motor_id <= 6 and len(motors_before) >= motor_id:
+                before_seq = int(motors_before[motor_id - 1].get("zeroSeq", 0))
+                self.hardware.zero_motor(motor_id)
+                time.sleep(0.2)
+                motors_after = self._wait_for_fresh_telemetry().get("motors", [])
+                after_seq = int(motors_after[motor_id - 1].get("zeroSeq", 0)) if len(motors_after) >= motor_id else before_seq
+                self.last_feedback = {
+                    "type": "zero_motor",
+                    "motorId": motor_id,
+                    "succeeded": after_seq > before_seq,
+                    "message": f"M{motor_id} 校正完成" if after_seq > before_seq else f"M{motor_id} 校正未確認",
+                    "timestamp": time.time(),
+                }
         elif command == "apply_pose":
             if self.last_solution["reachable"]:
                 self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])
+                self.last_feedback = {"type": "apply_pose", "message": "已送出姿態目標", "timestamp": time.time()}
         elif command == "record_keyframe":
             self.sequence.append(self.pose.to_dict())
         elif command == "clear_keyframes":
@@ -322,6 +352,7 @@ class ControlState:
             self.pose = self.kinematics.operating_home_pose()
             self.kinematics.geometry.home_z = self.pose.z
             self.last_solution = self.kinematics.solve(self.pose)
+            self.last_feedback = {"type": "home", "message": "已切換到 Home 工作位", "timestamp": time.time()}
         self._persist_runtime_state()
         return self.snapshot()
 

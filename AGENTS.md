@@ -57,6 +57,7 @@ SPI:
 更多細節見：
 
 - [docs/servo42d-and-firmware.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/servo42d-and-firmware.md)
+- [docs/calibration-and-operations.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/calibration-and-operations.md)
 
 ## 校正與 Home 概念
 

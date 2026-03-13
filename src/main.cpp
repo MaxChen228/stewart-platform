@@ -210,6 +210,11 @@ void handleSerial() {
         }
     } else if (cmd == "CALIBRATE") {
         calibrateAllMotors();
+    } else if (cmd.startsWith("ZERO:")) {
+        int id = cmd.substring(5).toInt();
+        if (id >= 1 && id <= NUM_MOTORS) {
+            zeroMotor(id);
+        }
     } else if (cmd.startsWith("SPIN:")) {
         int id = cmd.substring(5).toInt();
         if (id >= 1 && id <= NUM_MOTORS) {
