@@ -1,61 +1,141 @@
-# Stewart Platform - ESP32 CAN Bus 6DOF Controller
+# Stewart Platform - ESP32 CAN 6DOF Controller
 
-## 硬體架構
+## 溝通與工作原則
 
-- **MCU**: ESP32 DevKit V1 (Arduino framework, PlatformIO)
-- **CAN**: MCP2515 + TJA1050 模組 (8MHz crystal, 500Kbps)
-  - SPI: GPIO18=SCK, GPIO23=MOSI, GPIO19=MISO, GPIO5=CS, GPIO4=INT
-- **馬達**: 6× MKS SERVO42D 閉環步進馬達 (CAN ID 1~6)
-  - 工作模式: SR_vFOC (0x05)，必須用此模式才能接受運動指令
-  - 編碼器: 16384 counts/rev
-  - 終端電阻: 第1顆和第6顆各接 120Ω
-- **電源**: 24V PSU 供馬達，ESP32 由 USB 獨立供電
+- 用繁體中文溝通
+- 先做、先驗證、再報告
+- 優先把重複操作固化成腳本，而不是反覆手動執行
+- 如果修改 `src/main.cpp`，必須明確提醒「需要重新燒錄 ESP32」
+- 燒錄前必須關閉 Serial Monitor / 任何占用 serial port 的程式
 
-## CAN 協議 (SERVO42D)
+## 專案目的
 
-- CAN 2.0A, 標準 11-bit ID, 500Kbps
-- CRC 計算: `CRC = (CAN_ID + Byte1 + ... + Byte(n-1)) & 0xFF` — 必須包含 CAN ID
-- 關鍵指令:
-  - `0x30` 讀取編碼器 (回傳 carry + encoder value)
-  - `0xF3` 使能/失能馬達
-  - `0xF6` 速度模式
-  - `0xFD` 相對位置模式 (用於精確定位)
-  - `0x80~0x82` 讀取配置
+此專案的目標不是單純做一個 dashboard，而是建立一套：
+
+- `pose -> IK -> target actuator -> hardware move -> actual actuator -> actual pose`
+
+的完整 Stewart Platform 控制與驗證鏈。
 
 ## 專案結構
 
-- `src/main.cpp` — ESP32 韌體 (掃描馬達、JSON狀態輸出、接受Serial指令)
-- `dashboard.py` — Python USB Serial dashboard (localhost:8080, 自動重連)
-- `platformio.ini` — PlatformIO 配置 (esp32dev, mcp_can library)
+- `src/main.cpp`
+  - ESP32 韌體
+  - CAN 命令執行、encoder telemetry、硬體校正
+- `host/kinematics.py`
+  - 共用幾何、IK、actual FK
+- `host/app.py`
+  - serial bridge、HTTP API、runtime state、校正持久化
+- `web/*`
+  - 操作 UI 與 3D 視覺化
+- `ops.py`
+  - bring-up / calibrate / validate / goto-cal / watch
+- `dashboard_ctl.py`
+  - start / stop / restart / status
 
-## 目標
+## 硬體摘要
 
-實現 6DOF 反向運動學控制: 輸入 (roll, pitch, yaw, x, y, z) → 計算 6 個曲柄角度 → SERVO42D 位置模式移動到目標。
+- MCU: `ESP32 DevKit V1`
+- CAN: `MCP2515 + TJA1050`, `500 kbps`, `8 MHz crystal`
+- Motor: `6x MKS SERVO42D`
+- Power: motors `24V`, ESP32 by USB
 
-## IK 公式 (rotary crank-rod 拓撲)
+SPI:
 
-參考 `/Users/chenliangyu/Desktop/Development/Physics-Sim/stewart_platform/Matlab Code/StewartPlatform.m`
+- `GPIO18 = SCK`
+- `GPIO23 = MOSI`
+- `GPIO19 = MISO`
+- `GPIO5 = CS`
+- `GPIO4 = INT`
 
-```
-Q(i) = Rz(yaw) * Ry(pitch) * Rx(roll) * P(i) + [x; y; z]
-L = |Q(i) - B(i)|² - (upper_leg² - lower_leg²)
-M = 2 * lower_leg * (Qz - Bz)
-N = 2 * lower_leg * (cos(θi)*(Qx - Bx) + sin(θi)*(Qy - By))
-angle(i) = asin(L / √(M² + N²)) - atan(N/M)
-```
+## SERVO42D 關鍵事實
 
-幾何參數 (待量測填入):
-- `base_radius` — 基座圓心到馬達軸心距離
-- `base_angle` — 基座同一對馬達之間的夾角
-- `platform_radius` — 平台圓心到球頭接點距離
-- `platform_angle` — 平台同一對接點之間的夾角
-- `lower_leg` — 曲柄臂長 (馬達軸到連桿鉸接點)
-- `upper_leg` — 連桿長度 (鉸接點到平台球頭)
-- `stepper_plane_angles` — 6 個馬達的旋轉平面角度
+- CRC 必須包含 CAN ID
+- encoder telemetry 與 motion pulse 不是同一個單位系統
+- `0xFD` relative position mode 目前已驗證要用專案內現行方向位與 `3200 pulses/rev`
+- 目前 project 仍以 host 為 IK 真相來源，firmware 只做 motion executor + telemetry
 
-## 注意事項
+更多細節見：
 
-- 用繁體中文溝通
-- VS Code IntelliSense 的 clang 錯誤可忽略，PlatformIO 編譯正常
-- CAN bus 佈線: 雙絞線，電源線遠離信號線，避免接觸不良
-- 燒錄前必須關閉 Serial Monitor，否則 port busy
+- [docs/servo42d-and-firmware.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/servo42d-and-firmware.md)
+
+## 校正與 Home 概念
+
+這是本專案最重要的操作知識：
+
+- `Calibrate` 不是工作原點
+- `Calibrate` = 六顆曲柄全朝上，用來建立 encoder reference
+- `Home` = 穩定工作位，不應該等於 calibration 高點
+
+目前已知：
+
+- calibration height 約為 `222.239`
+- operating home height 約為 `143.174`
+
+更多細節見：
+
+- [docs/calibration-and-operations.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/calibration-and-operations.md)
+
+## 穩定性結論
+
+目前已知重要經驗：
+
+- 全朝上姿態在理論模型裡是唯一解
+- 但它是近奇異 / 壞條件點
+- 不適合當正常工作點
+- 結構剛性不足、幾何誤差、保持力不足、閉鏈耦合，都會在這附近被放大
+
+更多細節見：
+
+- [docs/stability-and-known-issues.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/stability-and-known-issues.md)
+
+## 架構與資料模型
+
+不要混淆這三層：
+
+1. `theory pose`
+2. `target actuator`
+3. `actual actuator`
+
+模擬與真機必須透過這三層明確分開，否則會出現「看起來同步，實際是假同步」。
+
+更多細節見：
+
+- [docs/architecture.md](/Users/chenliangyu/Documents/PlatformIO/Projects/stewart-platform/docs/architecture.md)
+
+## 目前預設幾何
+
+- `base_radius = 152`
+- `base_angle = 18.92`
+- `platform_radius = 103`
+- `platform_angle = 28.07`
+- `lower_leg = 65`
+- `upper_leg = 165`
+- `stepper_plane_angles = [-90, 90, 30, 210, -210, -30]`
+- `motor_signs = [1, -1, 1, -1, 1, -1]`
+- `servo_pulses_per_rev = 3200`
+
+這些值是目前工程上的工作值，不代表已完成最終量測定版。
+
+## 參考運動學
+
+rotary crank-rod IK 公式仍以：
+
+- `/Users/chenliangyu/Desktop/Development/Physics-Sim/stewart_platform/Matlab Code/StewartPlatform.m`
+
+為主要參考來源。
+
+## 開發時優先事項
+
+當問題很多時，優先順序應該是：
+
+1. 先確認 runtime state / calibration state 是否一致
+2. 再確認 target actuator 與 actual actuator 是否一致
+3. 再確認幾何是否合理
+4. 最後才調 UI 細節
+
+## 操作提醒
+
+- 日常運動從 `Home` 附近開始，不要停在 calibration 高點工作
+- 如果 dashboard 重啟，先確認 runtime state 沒丟失
+- 如果動到 firmware，先重新燒錄再驗證
+- 若懷疑結構柔性主導問題，優先驗證底座與上平台剛性
