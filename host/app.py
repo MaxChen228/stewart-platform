@@ -153,14 +153,22 @@ class ControlState:
         self.hardware.start()
         self.last_solution = self.kinematics.solve(self.pose)
 
+    def actual_solution(self, telemetry: dict[str, Any]) -> dict[str, Any]:
+        servo_angles = [float(motor.get("deg", 0.0)) for motor in telemetry.get("motors", [])[:6]]
+        if len(servo_angles) < 6:
+            servo_angles.extend([0.0] * (6 - len(servo_angles)))
+        return self.kinematics.solve_from_servo_angles(servo_angles, initial_pose=self.pose)
+
     def snapshot(self) -> dict[str, Any]:
+        hardware_state = self.hardware.state()
         return {
             "mode": self.mode,
             "liveSend": self.live_send,
             "pose": self.pose.to_dict(),
             "geometry": self.kinematics.geometry.to_dict(),
             "solution": self.last_solution,
-            "hardware": self.hardware.state(),
+            "actualSolution": self.actual_solution(hardware_state),
+            "hardware": hardware_state,
             "sequence": self.sequence,
         }
 

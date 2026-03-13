@@ -29,6 +29,7 @@ let controls;
 let platformGroup;
 let baseLoop;
 let platformLoop;
+let actualPlatformLoop;
 let needsCameraFit = true;
 let calibrationFeedback = null;
 const crankLines = [];
@@ -36,6 +37,10 @@ const rodLines = [];
 const basePoints = [];
 const crankPoints = [];
 const platformPoints = [];
+const actualCrankLines = [];
+const actualRodLines = [];
+const actualCrankPoints = [];
+const actualPlatformPoints = [];
 
 function hardwareAvailable() {
   return Boolean(state?.hardware?.connected && !state?.hardware?.stale && state?.hardware?.ready);
@@ -345,6 +350,7 @@ function renderOverlays() {
       <div>MODE</div><div>${state.mode}</div>
       <div>LINK</div><div>${state.hardware.connected ? "ONLINE" : "OFFLINE"}</div>
       <div>SOLVE</div><div>${state.solution.reachable ? "OK" : "LIMIT"}</div>
+      <div>ACTUAL</div><div>${state.actualSolution?.converged ? "TRACKED" : "UNSOLVED"}</div>
       <div>LIVE</div><div>${state.liveSend ? "ON" : "OFF"}</div>
     </div>
   `;
@@ -354,7 +360,7 @@ function renderOverlays() {
     const actual = motor.deg || 0;
     return `<div>M${motor.id}: ${(actual - target).toFixed(2)} deg</div>`;
   }).join("");
-  $("#errorOverlay").innerHTML = `<div class="overlay-title">TARGET VS ACTUAL</div>${errorLines}`;
+  $("#errorOverlay").innerHTML = `<div class="overlay-title">TARGET VS ACTUAL</div><div>Pose residual: ${(state.actualSolution?.residualNorm ?? 0).toFixed(3)}</div>${errorLines}`;
 }
 
 function makeMetric(label, value) {
@@ -369,15 +375,15 @@ function toVector3(point) {
 }
 
 function makeLoop(color, width) {
-  const material = new THREE.LineBasicMaterial({ color, linewidth: width });
+  const material = new THREE.LineBasicMaterial({ color, linewidth: width, transparent: true });
   const geometry = new THREE.BufferGeometry();
   const loop = new THREE.LineLoop(geometry, material);
   platformGroup.add(loop);
   return loop;
 }
 
-function makeLine(color) {
-  const material = new THREE.LineBasicMaterial({ color });
+function makeLine(color, opacity = 1) {
+  const material = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
   const geometry = new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(),
     new THREE.Vector3(),
@@ -387,12 +393,14 @@ function makeLine(color) {
   return line;
 }
 
-function makePoint(color, radius) {
+function makePoint(color, radius, opacity = 1) {
   const geometry = new THREE.SphereGeometry(radius, 18, 18);
   const material = new THREE.MeshStandardMaterial({
     color,
     roughness: 0.72,
     metalness: 0.0,
+    transparent: opacity < 1,
+    opacity,
   });
   const mesh = new THREE.Mesh(geometry, material);
   platformGroup.add(mesh);
@@ -448,6 +456,8 @@ function initScene() {
 
   baseLoop = makeLoop("#2a2520", 2);
   platformLoop = makeLoop("#4a6b8c", 4);
+  actualPlatformLoop = makeLoop("#c0392b", 4);
+  actualPlatformLoop.material.opacity = 0.8;
 
   for (let i = 0; i < 6; i += 1) {
     crankLines.push(makeLine("#d35400"));
@@ -455,6 +465,10 @@ function initScene() {
     basePoints.push(makePoint("#2a2520", 5.5));
     crankPoints.push(makePoint("#e6b300", 5.2));
     platformPoints.push(makePoint("#4a6b8c", 5.8));
+    actualCrankLines.push(makeLine("#d35400", 0.45));
+    actualRodLines.push(makeLine("#c0392b", 0.65));
+    actualCrankPoints.push(makePoint("#d35400", 4.4, 0.55));
+    actualPlatformPoints.push(makePoint("#c0392b", 5.0, 0.75));
   }
 
   resizeScene();
@@ -497,9 +511,20 @@ function renderCanvas() {
   const base = state.solution.base_points.map(toVector3);
   const crank = state.solution.crank_points.map(toVector3);
   const platform = state.solution.platform_points_world.map(toVector3);
+  const actualValid = Boolean(
+    state.actualSolution?.converged &&
+    Number.isFinite(state.actualSolution?.residualNorm) &&
+    state.actualSolution.residualNorm < 100.0
+  );
+  const actualCrankSource = actualValid ? state.actualSolution.crank_points : state.solution.crank_points;
+  const actualPlatformSource = actualValid ? state.actualSolution.platform_points_world : state.solution.platform_points_world;
+  const actualCrank = actualCrankSource.map(toVector3);
+  const actualPlatform = actualPlatformSource.map(toVector3);
 
   updateLoop(baseLoop, base);
   updateLoop(platformLoop, platform);
+  updateLoop(actualPlatformLoop, actualPlatform);
+  actualPlatformLoop.visible = actualValid;
 
   for (let i = 0; i < 6; i += 1) {
     basePoints[i].position.copy(base[i]);
@@ -509,10 +534,20 @@ function renderCanvas() {
     rodLines[i].material.color.set(reachable ? "#2a2520" : "#c0392b");
     setLinePoints(crankLines[i], base[i], crank[i]);
     setLinePoints(rodLines[i], crank[i], platform[i]);
+    actualCrankPoints[i].visible = actualValid;
+    actualPlatformPoints[i].visible = actualValid;
+    actualCrankLines[i].visible = actualValid;
+    actualRodLines[i].visible = actualValid;
+    if (actualValid) {
+      actualCrankPoints[i].position.copy(actualCrank[i]);
+      actualPlatformPoints[i].position.copy(actualPlatform[i]);
+      setLinePoints(actualCrankLines[i], base[i], actualCrank[i]);
+      setLinePoints(actualRodLines[i], actualCrank[i], actualPlatform[i]);
+    }
   }
 
   if (needsCameraFit) {
-    fitCameraToPlatform([...base, ...crank, ...platform]);
+    fitCameraToPlatform(actualValid ? [...base, ...crank, ...platform, ...actualCrank, ...actualPlatform] : [...base, ...crank, ...platform]);
     needsCameraFit = false;
   }
 }

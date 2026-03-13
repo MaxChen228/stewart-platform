@@ -19,6 +19,30 @@ def _mat_vec_mul(m: list[list[float]], v: list[float]) -> list[float]:
     return [sum(m[row][k] * v[k] for k in range(3)) for row in range(3)]
 
 
+def _solve_linear_system(a: list[list[float]], b: list[float]) -> list[float]:
+    n = len(b)
+    aug = [row[:] + [b[idx]] for idx, row in enumerate(a)]
+
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda row: abs(aug[row][col]))
+        if abs(aug[pivot][col]) < 1e-9:
+            raise ValueError("Singular system")
+        aug[col], aug[pivot] = aug[pivot], aug[col]
+
+        scale = aug[col][col]
+        for k in range(col, n + 1):
+            aug[col][k] /= scale
+
+        for row in range(n):
+            if row == col:
+                continue
+            factor = aug[row][col]
+            for k in range(col, n + 1):
+                aug[row][k] -= factor * aug[col][k]
+
+    return [aug[row][n] for row in range(n)]
+
+
 @dataclass
 class Geometry:
     base_radius: float = 152.0
@@ -125,6 +149,115 @@ class StewartKinematics:
 
         calibration_z = sum(z_values) / len(z_values)
         return Pose(roll=0.0, pitch=0.0, yaw=0.0, x=0.0, y=0.0, z=calibration_z)
+
+    def servo_to_motor_angles(self, servo_angles_deg: list[float]) -> list[float]:
+        g = self.geometry
+        motor_angles: list[float] = []
+        for index in range(6):
+            sign = g.motor_signs[index] if g.motor_signs[index] != 0 else 1
+            motor_angles.append((servo_angles_deg[index] - g.zero_offsets_deg[index]) / sign)
+        return motor_angles
+
+    def crank_points_from_motor_angles(self, motor_angles_deg: list[float]) -> list[list[float]]:
+        g = self.geometry
+        base = self.base_points()
+        crank_points: list[list[float]] = []
+        for index in range(6):
+            plane = math.radians(g.stepper_plane_angles[index])
+            angle = math.radians(motor_angles_deg[index])
+            b = base[index]
+            crank_points.append(
+                [
+                    g.lower_leg * math.cos(angle) * math.cos(plane) + b[0],
+                    g.lower_leg * math.cos(angle) * math.sin(plane) + b[1],
+                    g.lower_leg * math.sin(angle) + b[2],
+                ]
+            )
+        return crank_points
+
+    def _pose_residuals(self, pose: Pose, crank_points: list[list[float]]) -> tuple[list[float], list[list[float]]]:
+        rotation = self.rotation_matrix(pose)
+        platform_local = self.platform_points()
+        world_points: list[list[float]] = []
+        residuals: list[float] = []
+        for index in range(6):
+            p_world = _mat_vec_mul(rotation, platform_local[index])
+            q = [p_world[i] + [pose.x, pose.y, pose.z][i] for i in range(3)]
+            world_points.append(q)
+            diff = [q[axis] - crank_points[index][axis] for axis in range(3)]
+            residuals.append(sum(component * component for component in diff) - self.geometry.upper_leg**2)
+        return residuals, world_points
+
+    def solve_pose_from_motor_angles(
+        self,
+        motor_angles_deg: list[float],
+        initial_pose: Pose | None = None,
+        iterations: int = 12,
+    ) -> dict:
+        crank_points = self.crank_points_from_motor_angles(motor_angles_deg)
+        pose = initial_pose or self.calibration_pose()
+        pose = Pose(**pose.to_dict())
+
+        converged = False
+        for _ in range(iterations):
+            residuals, platform_world = self._pose_residuals(pose, crank_points)
+            residual_norm = math.sqrt(sum(item * item for item in residuals))
+            if residual_norm < 1e-4:
+                converged = True
+                break
+
+            deltas = [0.05, 0.05, 0.05, 0.01, 0.01, 0.01]
+            params = [pose.roll, pose.pitch, pose.yaw, pose.x, pose.y, pose.z]
+            jacobian: list[list[float]] = []
+            for idx, delta in enumerate(deltas):
+                shifted = params[:]
+                shifted[idx] += delta
+                shifted_pose = Pose(*shifted)
+                shifted_residuals, _ = self._pose_residuals(shifted_pose, crank_points)
+                jacobian.append([(shifted_residuals[row] - residuals[row]) / delta for row in range(6)])
+
+            # Build JTJ and JTr for Gauss-Newton
+            jtj = [[0.0] * 6 for _ in range(6)]
+            jtr = [0.0] * 6
+            for row in range(6):
+                for col in range(6):
+                    jtj[row][col] = sum(jacobian[row][k] * jacobian[col][k] for k in range(6))
+                jtr[row] = sum(jacobian[row][k] * residuals[k] for k in range(6))
+
+            try:
+                step = _solve_linear_system(jtj, [-value for value in jtr])
+            except ValueError:
+                break
+
+            pose.roll += step[0]
+            pose.pitch += step[1]
+            pose.yaw += step[2]
+            pose.x += step[3]
+            pose.y += step[4]
+            pose.z += step[5]
+
+        residuals, platform_world = self._pose_residuals(pose, crank_points)
+        residual_norm = math.sqrt(sum(item * item for item in residuals))
+        return {
+            "reachable": residual_norm < 5.0,
+            "converged": converged or residual_norm < 5.0,
+            "residualNorm": residual_norm,
+            "pose": pose.to_dict(),
+            "base_points": self.base_points(),
+            "crank_points": crank_points,
+            "platform_points_world": platform_world,
+            "motor_angles_deg": motor_angles_deg,
+        }
+
+    def solve_from_servo_angles(
+        self,
+        servo_angles_deg: list[float],
+        initial_pose: Pose | None = None,
+    ) -> dict:
+        motor_angles_deg = self.servo_to_motor_angles(servo_angles_deg)
+        solution = self.solve_pose_from_motor_angles(motor_angles_deg, initial_pose=initial_pose)
+        solution["servo_angles_deg"] = servo_angles_deg
+        return solution
 
     def solve(self, pose: Pose) -> dict:
         g = self.geometry

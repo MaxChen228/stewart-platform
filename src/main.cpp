@@ -194,7 +194,9 @@ void handleSerial() {
             int comma = cmd.indexOf(',', start);
             String token = comma == -1 ? cmd.substring(start) : cmd.substring(start, comma);
             float nextTarget = token.toFloat();
-            float delta = nextTarget - motors[i].targetDeg;
+            // Relative position mode must be referenced from the measured actuator angle,
+            // otherwise any missed motion or manual movement accumulates permanent drift.
+            float delta = nextTarget - motors[i].encoderDeg;
             if (!motors[i].enabled) {
                 enableMotor(i + 1, true);
                 delay(10);
