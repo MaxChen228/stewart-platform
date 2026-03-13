@@ -7,7 +7,7 @@ const poseSpec = [
   { key: "yaw", label: "YAW", min: -30, max: 30, step: 0.5, unit: "deg" },
   { key: "x", label: "X", min: -40, max: 40, step: 0.5, unit: "mm" },
   { key: "y", label: "Y", min: -40, max: 40, step: 0.5, unit: "mm" },
-  { key: "z", label: "Z OFF", min: -120, max: 0, step: 0.5, unit: "mm" },
+  { key: "z", label: "Z", min: 60, max: 260, step: 0.5, unit: "mm" },
 ];
 
 const geometrySpec = [
@@ -147,16 +147,18 @@ function getPoseUiSpec(spec) {
   if (spec.key !== "z") {
     return spec;
   }
-  return spec;
+  const center = state?.geometry?.home_z || state?.pose?.z || spec.min;
+  return {
+    ...spec,
+    min: Math.max(0, center - 120),
+    max: center + 120,
+  };
 }
 
 async function onPoseChange(event) {
   const key = event.target.dataset.key;
   const value = Number(event.target.value);
   const pose = { ...state.pose, [key]: value };
-  if (key === "z") {
-    pose.z = (state.alignment?.calibrationZ || state.geometry.home_z || 0) + value;
-  }
   state = await api("/api/pose", {
     method: "POST",
     body: JSON.stringify({ pose }),
@@ -249,14 +251,8 @@ function renderPoseControls() {
     range.max = uiSpec.max;
     input.min = uiSpec.min;
     input.max = uiSpec.max;
-    if (spec.key === "z") {
-      const offset = state.pose.z - (state.alignment?.calibrationZ || state.geometry.home_z || 0);
-      range.value = offset;
-      input.value = offset.toFixed(2);
-    } else {
-      range.value = state.pose[spec.key];
-      input.value = state.pose[spec.key].toFixed(2);
-    }
+    range.value = state.pose[spec.key];
+    input.value = state.pose[spec.key].toFixed(2);
   });
 }
 

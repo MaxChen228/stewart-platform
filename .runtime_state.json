@@ -42,7 +42,7 @@
     "yaw": 2.98684809478927,
     "x": 2.287231670896571,
     "y": -0.7344993533250211,
-    "z": 74.04362983835736
+    "z": 150.043629838357
   },
   "lastCalibration": {
     "timestamp": 1773413354.993827,
@@ -96,9 +96,9 @@
     ]
   },
   "lastFeedback": {
-    "type": "calibrate_all",
-    "message": "已將當前姿態設為校正基準",
-    "timestamp": 1773413354.993855
+    "type": "motion_queue",
+    "message": "已排入平滑移動 0.7s",
+    "timestamp": 1773413513.728569
   },
   "motionDurationMs": 700
 }
