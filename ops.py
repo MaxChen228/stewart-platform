@@ -118,6 +118,42 @@ def command_goto_cal(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_watch(args: argparse.Namespace) -> int:
+    end_time = None if args.seconds <= 0 else time.time() + args.seconds
+    try:
+        while True:
+            state = api_get("/api/state")
+            actual = state["actualSolution"]
+            motors = state["hardware"]["motors"]
+            servo = [float(m["deg"]) for m in motors]
+            raw = [float(m.get("rawDeg", 0.0)) for m in motors]
+            print(
+                f"t={time.strftime('%H:%M:%S')} "
+                f"poseZ={state['pose']['z']:.3f} "
+                f"actualZ={actual.get('pose', {}).get('z', 0.0):.3f} "
+                f"res={actual.get('residualNorm', 0.0):.3f} "
+                f"servo={[round(v, 2) for v in servo]} "
+                f"raw={[round(v, 1) for v in raw]}"
+            )
+            if end_time is not None and time.time() >= end_time:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def command_recalibrate(args: argparse.Namespace) -> int:
+    wait_for_hardware()
+    print("[1/3] calibrating from current manual upright pose")
+    command_calibrate(argparse.Namespace(timeout=args.timeout, tolerance=args.tolerance))
+    print("\n[2/3] moving back to calibrated pose")
+    command_goto_cal(argparse.Namespace())
+    print("\n[3/3] validating Z sweep")
+    command_validate(argparse.Namespace(offsets=args.offsets, wait=args.wait))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stewart platform operations helper")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -137,6 +173,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     goto_cal = sub.add_parser("goto-cal", help="Move the machine to the calibrated upright pose")
     goto_cal.set_defaults(func=command_goto_cal)
+
+    watch = sub.add_parser("watch", help="Continuously print live state while manually trimming the machine")
+    watch.add_argument("--interval", type=float, default=0.25)
+    watch.add_argument("--seconds", type=float, default=0.0, help="0 means run until interrupted")
+    watch.set_defaults(func=command_watch)
+
+    recal = sub.add_parser("recalibrate", help="Run calibrate -> goto-cal -> validate in order")
+    recal.add_argument("--timeout", type=float, default=3.0)
+    recal.add_argument("--tolerance", type=float, default=2.0)
+    recal.add_argument("--offsets", type=float, nargs="*", default=[5.0, 10.0, 15.0])
+    recal.add_argument("--wait", type=float, default=2.2)
+    recal.set_defaults(func=command_recalibrate)
     return parser
 
 
