@@ -33,6 +33,7 @@ let actualPlatformLoop;
 let needsCameraFit = true;
 let calibrationFeedback = null;
 let viewMode = "control";
+let interactionLockUntil = 0;
 const crankLines = [];
 const rodLines = [];
 const basePoints = [];
@@ -50,6 +51,10 @@ let platformGuideLoop;
 
 function hardwareAvailable() {
   return Boolean(state?.hardware?.connected && !state?.hardware?.stale && state?.hardware?.ready);
+}
+
+function markInteraction(durationMs = 500) {
+  interactionLockUntil = Date.now() + durationMs;
 }
 
 function $(selector) {
@@ -156,6 +161,7 @@ function getPoseUiSpec(spec) {
 }
 
 async function onPoseChange(event) {
+  markInteraction();
   const key = event.target.dataset.key;
   const value = Number(event.target.value);
   const pose = { ...state.pose, [key]: value };
@@ -167,6 +173,7 @@ async function onPoseChange(event) {
 }
 
 async function onGeometryChange() {
+  markInteraction();
   const payload = {};
   document.querySelectorAll("[data-geometry]").forEach((input) => {
     payload[input.dataset.geometry] = Number(input.value);
@@ -180,6 +187,7 @@ async function onGeometryChange() {
 }
 
 async function onDurationChange(event) {
+  markInteraction();
   const seconds = Math.max(0.1, Number(event.target.value) || 1.8);
   state = await api("/api/settings", {
     method: "POST",
@@ -198,6 +206,7 @@ async function setMode(mode) {
 }
 
 async function sendCommand(command, extra = {}) {
+  markInteraction(900);
   const hardwareCommands = new Set([
     "enable_all",
     "disable_all",
@@ -227,6 +236,7 @@ async function sendCommand(command, extra = {}) {
 }
 
 async function applyPose() {
+  markInteraction(900);
   if (!hardwareAvailable()) {
     render();
     return;
@@ -251,22 +261,30 @@ function renderPoseControls() {
     range.max = uiSpec.max;
     input.min = uiSpec.min;
     input.max = uiSpec.max;
-    range.value = state.pose[spec.key];
-    input.value = state.pose[spec.key].toFixed(2);
+    if (document.activeElement !== range) {
+      range.value = state.pose[spec.key];
+    }
+    if (document.activeElement !== input) {
+      input.value = state.pose[spec.key].toFixed(2);
+    }
   });
 }
 
 function renderGeometry() {
   geometrySpec.forEach(([key]) => {
     const input = document.querySelector(`[data-geometry="${key}"]`);
-    input.value = state.geometry[key];
+    if (document.activeElement !== input) {
+      input.value = state.geometry[key];
+    }
   });
 }
 
 function renderTiming() {
   const input = $("#durationInput");
   const durationMs = state.motion?.durationMs || 1800;
-  input.value = (durationMs / 1000).toFixed(1);
+  if (document.activeElement !== input) {
+    input.value = (durationMs / 1000).toFixed(1);
+  }
   const hint = $("#timingHint");
   if (state.motion?.active) {
     hint.textContent = `移動中 ${Math.round((state.motion.progress || 0) * 100)}%`;
@@ -596,6 +614,9 @@ function render() {
 
 async function refresh() {
   state = await api("/api/state");
+  if (Date.now() < interactionLockUntil) {
+    return;
+  }
   render();
 }
 
@@ -622,6 +643,11 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button, input, label")) {
+      markInteraction();
+    }
+  }, true);
   initControls();
   initScene();
   document.querySelectorAll("[data-command]").forEach((button) => {
