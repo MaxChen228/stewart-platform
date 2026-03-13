@@ -13,10 +13,13 @@ MCP_CAN CAN0(CAN_CS);
 
 struct MotorState {
     bool online;
+    int32_t rawEncoderCount;
+    uint16_t singleTurnCount;
     float rawEncoderDeg;
     float encoderDeg;
     float targetDeg;
     float zeroOffsetDeg;
+    uint32_t zeroSeq;
     unsigned long lastSeen;
     bool enabled;
     bool moving;
@@ -86,6 +89,7 @@ void zeroMotor(uint8_t id) {
     motors[index].encoderDeg = 0.0f;
     motors[index].targetDeg = 0.0f;
     motors[index].moving = false;
+    motors[index].zeroSeq++;
 }
 
 void positionMode(uint8_t id, float deltaDeg) {
@@ -127,6 +131,8 @@ void scanMotors() {
             if (buf[0] == 0x30 && len == 8) {
                 int32_t carry = ((int32_t)buf[1]<<24) | (buf[2]<<16) | (buf[3]<<8) | buf[4];
                 uint16_t val = (buf[5]<<8) | buf[6];
+                motors[i].rawEncoderCount = carry * 16384 + val;
+                motors[i].singleTurnCount = val;
                 motors[i].rawEncoderDeg = (carry * 16384.0f + val) * 360.0f / 16384.0f;
                 motors[i].encoderDeg = motors[i].rawEncoderDeg - motors[i].zeroOffsetDeg;
                 if (fabsf(motors[i].targetDeg - motors[i].encoderDeg) < 1.0f) {
@@ -144,12 +150,16 @@ void sendStatus() {
     Serial.print("{\"motors\":[");
     for (int i = 0; i < NUM_MOTORS; i++) {
         if (i) Serial.print(",");
-        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"rawDeg\":%.1f,\"targetDeg\":%.1f,\"enabled\":%s,\"moving\":%s}",
+        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"rawDeg\":%.1f,\"encoderCount\":%ld,\"singleTurnCount\":%u,\"targetDeg\":%.1f,\"zeroOffsetDeg\":%.1f,\"zeroSeq\":%lu,\"enabled\":%s,\"moving\":%s}",
             i + 1,
             motors[i].online ? "true" : "false",
             motors[i].encoderDeg,
             motors[i].rawEncoderDeg,
+            (long)motors[i].rawEncoderCount,
+            motors[i].singleTurnCount,
             motors[i].targetDeg,
+            motors[i].zeroOffsetDeg,
+            (unsigned long)motors[i].zeroSeq,
             motors[i].enabled ? "true" : "false",
             motors[i].moving ? "true" : "false");
     }

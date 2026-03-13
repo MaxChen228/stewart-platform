@@ -30,6 +30,7 @@ let platformGroup;
 let baseLoop;
 let platformLoop;
 let needsCameraFit = true;
+const zeroFeedback = new Map();
 const crankLines = [];
 const rodLines = [];
 const basePoints = [];
@@ -150,6 +151,14 @@ async function sendCommand(command, extra = {}) {
     method: "POST",
     body: JSON.stringify({ command, ...extra }),
   });
+  if (command === "zero_motor" && extra.motorId) {
+    const motor = state.hardware.motors.find((item) => item.id === extra.motorId);
+    zeroFeedback.set(extra.motorId, {
+      pending: true,
+      seq: motor?.zeroSeq ?? null,
+      updatedAt: Date.now(),
+    });
+  }
   render();
 }
 
@@ -184,10 +193,12 @@ function renderGeometry() {
 function renderChips() {
   $("#modeChip").textContent = state.mode;
   $("#reachChip").textContent = state.solution.reachable ? "REACHABLE" : "UNREACHABLE";
-  $("#reachChip").style.background = state.solution.reachable ? "rgba(74,107,140,0.12)" : "rgba(192,57,43,0.12)";
-  $("#reachChip").style.borderColor = state.solution.reachable ? "transparent" : "transparent";
   $("#linkChip").textContent = state.hardware.connected ? "HW ONLINE" : "HW OFFLINE";
-  $("#linkChip").style.background = state.hardware.connected ? "rgba(74,107,140,0.12)" : "rgba(192,57,43,0.12)";
+  $("#modeChip").className = "chip";
+  $("#reachChip").className = `chip ${state.solution.reachable ? "status-ok" : "status-danger"}`;
+  $("#linkChip").className = `chip ${
+    hardwareAvailable() ? "status-ok" : (state.hardware.connected ? "status-warn" : "status-danger")
+  }`;
 
   document.querySelectorAll(".chip-button").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.mode === state.mode);
@@ -239,7 +250,7 @@ function renderHardwareAccess() {
 
 function renderSolve() {
   $("#solveStatus").textContent = state.solution.reachable ? "REACHABLE" : "UNREACHABLE";
-  $("#solveStatus").style.color = state.solution.reachable ? "var(--contra)" : "var(--dev)";
+  $("#solveStatus").className = `solve-status ${state.solution.reachable ? "status-ok" : "status-danger"}`;
   $("#solveIssues").textContent = state.solution.issues.length
     ? state.solution.issues.join(" | ")
     : "No constraint issues.";
@@ -265,18 +276,45 @@ function renderHardware() {
     const actual = motor.deg || 0;
     const error = actual - target;
     const card = el("div", "matrix-card");
+    const zeroState = zeroFeedback.get(motor.id);
+    if (zeroState?.pending) {
+      if (motor.zeroSeq !== zeroState.seq) {
+        zeroFeedback.set(motor.id, {
+          pending: false,
+          seq: motor.zeroSeq,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+    const currentZeroState = zeroFeedback.get(motor.id);
+    const elapsed = currentZeroState ? Date.now() - currentZeroState.updatedAt : Infinity;
+    if (currentZeroState?.pending) {
+      card.classList.add("zero-pending");
+    } else if (currentZeroState && elapsed < 3000) {
+      card.classList.add("zero-success");
+    }
     card.appendChild(el("strong", "", `M${motor.id}`));
-    card.appendChild(makeMetric("State", motor.on ? "ONLINE" : "OFFLINE"));
+    card.appendChild(makeMetric("State", motor.on ? "ONLINE" : "OFFLINE", motor.on ? "metric-ok" : "metric-danger"));
     card.appendChild(makeMetric("Actual", `${actual.toFixed(2)} deg`));
     card.appendChild(makeMetric("Raw", `${(motor.rawDeg || 0).toFixed(2)} deg`));
+    card.appendChild(makeMetric("Encoder", `${motor.encoderCount ?? 0}`));
+    card.appendChild(makeMetric("Turn Cnt", `${motor.singleTurnCount ?? 0}`));
     card.appendChild(makeMetric("Target", `${target.toFixed(2)} deg`));
-    card.appendChild(makeMetric("Error", `${error.toFixed(2)} deg`));
-    card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED"));
+    card.appendChild(makeMetric("Error", `${error.toFixed(2)} deg`, Math.abs(error) < 1 ? "metric-ok" : (Math.abs(error) < 5 ? "metric-warn" : "metric-danger")));
+    card.appendChild(makeMetric("Zero", `${(motor.zeroOffsetDeg || 0).toFixed(2)} deg`));
+    card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED", motor.enabled ? "metric-ok" : "metric-warn"));
     const zeroButton = el("button", "mini-action", "Zero");
     zeroButton.addEventListener("click", () => sendCommand("zero_motor", { motorId: motor.id }));
     zeroButton.disabled = !available;
     zeroButton.title = available ? "" : "Hardware offline";
     card.appendChild(zeroButton);
+    let statusText = "Idle";
+    if (currentZeroState?.pending) {
+      statusText = "Zero pending";
+    } else if (currentZeroState && elapsed < 3000) {
+      statusText = "Zeroed";
+    }
+    card.appendChild(el("div", "inline-status", statusText));
     matrix.appendChild(card);
   });
 }
@@ -329,7 +367,7 @@ function renderOverlays() {
 function makeMetric(label, value) {
   const row = el("div", "matrix-value");
   row.appendChild(el("span", "metric-label", label));
-  row.appendChild(el("span", "", value));
+  row.appendChild(el("span", arguments[2] || "", value));
   return row;
 }
 

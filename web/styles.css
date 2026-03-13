@@ -89,6 +89,24 @@ input {
   letter-spacing: 0.08em;
 }
 
+.chip.status-ok {
+  background: rgba(74, 107, 140, 0.14);
+  border-color: transparent;
+  color: var(--contra);
+}
+
+.chip.status-warn {
+  background: rgba(211, 84, 0, 0.12);
+  border-color: transparent;
+  color: var(--dual);
+}
+
+.chip.status-danger {
+  background: rgba(192, 57, 43, 0.14);
+  border-color: transparent;
+  color: var(--dev);
+}
+
 .layout {
   flex: 1;
   display: flex;
@@ -281,6 +299,14 @@ input {
   margin-bottom: 8px;
 }
 
+.solve-status.status-ok {
+  color: var(--contra);
+}
+
+.solve-status.status-danger {
+  color: var(--dev);
+}
+
 .matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -293,6 +319,14 @@ input {
 .matrix-card {
   background: var(--surface);
   padding: 12px;
+}
+
+.matrix-card.zero-pending {
+  outline: 1px solid rgba(230, 179, 0, 0.55);
+}
+
+.matrix-card.zero-success {
+  outline: 1px solid rgba(74, 107, 140, 0.55);
 }
 
 .matrix-card strong {
@@ -311,6 +345,26 @@ input {
   line-height: 1.7;
 }
 
+.metric-strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.metric-ok {
+  color: var(--contra);
+  font-weight: 700;
+}
+
+.metric-warn {
+  color: var(--dual);
+  font-weight: 700;
+}
+
+.metric-danger {
+  color: var(--dev);
+  font-weight: 700;
+}
+
 .matrix-card .mini-action {
   margin-top: 10px;
   width: 100%;
@@ -323,6 +377,15 @@ input {
   font-size: 11px;
   letter-spacing: 0.08em;
   cursor: pointer;
+}
+
+.inline-status {
+  margin-top: 8px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sub);
 }
 
 .metric-label {
