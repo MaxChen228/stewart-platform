@@ -21,6 +21,12 @@ const geometrySpec = [
   ["servo_pulses_per_rev", "PULSES / REV"],
 ];
 
+const driveSpec = [
+  { key: "workCurrentMa", label: "WORK CURRENT", min: 0, max: 3000, step: 100, unit: "mA" },
+  { key: "positionSpeed", label: "POS SPEED", min: 0, max: 3000, step: 10, unit: "rpm" },
+  { key: "positionAccel", label: "POS ACCEL", min: 0, max: 255, step: 1, unit: "raw" },
+];
+
 let state = null;
 let scene;
 let camera;
@@ -146,6 +152,20 @@ function initControls() {
     field.append(label, input);
     geometryGrid.appendChild(field);
   });
+
+  const driveGrid = $("#driveGrid");
+  driveSpec.forEach((spec) => {
+    const field = el("div", "geometry-field");
+    const label = el("label", "", spec.label);
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = spec.min;
+    input.max = spec.max;
+    input.step = spec.step;
+    input.dataset.drive = spec.key;
+    field.append(label, input);
+    driveGrid.appendChild(field);
+  });
 }
 
 function getPoseUiSpec(spec) {
@@ -192,6 +212,23 @@ async function onDurationChange(event) {
   state = await api("/api/settings", {
     method: "POST",
     body: JSON.stringify({ motionDurationMs: Math.round(seconds * 1000) }),
+  });
+  render();
+}
+
+async function applyDriveSettings() {
+  markInteraction(900);
+  if (!hardwareAvailable()) {
+    render();
+    return;
+  }
+  const payload = {};
+  document.querySelectorAll("[data-drive]").forEach((input) => {
+    payload[input.dataset.drive] = Number(input.value);
+  });
+  state = await api("/api/settings", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
   render();
 }
@@ -280,6 +317,16 @@ function renderGeometry() {
   });
 }
 
+function renderDrive() {
+  driveSpec.forEach((spec) => {
+    const input = document.querySelector(`[data-drive="${spec.key}"]`);
+    const value = state.motorSettings?.[spec.key] ?? 0;
+    if (document.activeElement !== input) {
+      input.value = value;
+    }
+  });
+}
+
 function renderTiming() {
   const input = $("#durationInput");
   const durationMs = state.motion?.durationMs || 1800;
@@ -316,6 +363,8 @@ function renderHardwareAccess() {
   $("#allUpReferenceBtn").title = available ? "" : "Hardware offline";
   $("#manualPrepBtn").disabled = !available;
   $("#manualPrepBtn").title = available ? "" : "Hardware offline";
+  $("#applyDriveBtn").disabled = !available;
+  $("#applyDriveBtn").title = available ? "" : "Hardware offline";
 
   document.querySelectorAll("[data-command]").forEach((button) => {
     const command = button.dataset.command;
@@ -611,6 +660,7 @@ function render() {
   if (!state) return;
   renderPoseControls();
   renderGeometry();
+  renderDrive();
   renderChips();
   renderHardwareAccess();
   renderTiming();
@@ -669,6 +719,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
   $("#allUpReferenceBtn").addEventListener("click", () => sendCommand("all_up_reference"));
   $("#durationInput").addEventListener("change", onDurationChange);
+  $("#applyDriveBtn").addEventListener("click", applyDriveSettings);
   $("#controlViewBtn").addEventListener("click", () => {
     viewMode = "control";
     $("#controlViewBtn").classList.add("is-active");

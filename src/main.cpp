@@ -15,6 +15,8 @@
 #define CONFIG_SCAN_TIMEOUT_MS 8
 
 MCP_CAN CAN0(CAN_CS);
+uint16_t gPositionSpeed = POSITION_SPEED;
+uint8_t gPositionAccel = POSITION_ACCEL;
 
 enum ConfigCode : uint8_t {
     CONFIG_MODE = 0x82,
@@ -114,6 +116,23 @@ void enableMotor(uint8_t id, bool en) {
     motors[id - 1].enabled = en;
 }
 
+bool setWorkingCurrent(uint8_t id, uint16_t currentMa, bool saveToFlash) {
+    uint8_t data[5] = {
+        0x83,
+        (uint8_t)((currentMa >> 8) & 0xFF),
+        (uint8_t)(currentMa & 0xFF),
+        0x00,
+        0x00,
+    };
+    uint8_t len = saveToFlash ? 4 : 5;
+    canSend(id, data, len);
+    uint8_t buf[8]; uint8_t rxLen;
+    if (!canReceive(id, buf, &rxLen, 50)) {
+        return false;
+    }
+    return rxLen >= 3 && buf[0] == 0x83 && buf[1] != 0x00;
+}
+
 void speedMode(uint8_t id, uint16_t speed, uint8_t accel, bool ccw) {
     uint8_t sh = (speed >> 8) & 0x0F;
     if (ccw) sh |= 0x80;
@@ -154,18 +173,18 @@ void positionMode(uint8_t id, float deltaDeg) {
         return;
     }
 
-    uint8_t sh = (POSITION_SPEED >> 8) & 0x0F;
+    uint8_t sh = (gPositionSpeed >> 8) & 0x0F;
     // The observed hardware motion is inverted relative to the vendor examples
     // we modeled from, so the relative-position direction bit must be flipped
     // to keep commanded servo angles aligned with measured encoder angles.
     if (deltaDeg > 0) sh |= 0x80;
-    uint8_t sl = POSITION_SPEED & 0xFF;
+    uint8_t sl = gPositionSpeed & 0xFF;
 
     uint8_t data[8] = {
         0xFD,
         sh,
         sl,
-        POSITION_ACCEL,
+        gPositionAccel,
         (uint8_t)((pulses >> 16) & 0xFF),
         (uint8_t)((pulses >> 8) & 0xFF),
         (uint8_t)(pulses & 0xFF),
@@ -240,7 +259,11 @@ void scanOneConfig(uint8_t id, uint8_t code) {
 }
 
 void sendStatus() {
-    Serial.print("{\"motors\":[");
+    Serial.print("{\"profile\":{\"positionSpeed\":");
+    Serial.print(gPositionSpeed);
+    Serial.print(",\"positionAccel\":");
+    Serial.print(gPositionAccel);
+    Serial.print("},\"motors\":[");
     for (int i = 0; i < NUM_MOTORS; i++) {
         if (i) Serial.print(",");
         int holdPct = motors[i].configKnown ? ((int)motors[i].holdCurrentRatio * 10 + 10) : 0;
@@ -301,6 +324,20 @@ void handleSerial() {
         }
     } else if (cmd == "CALIBRATE") {
         calibrateAllMotors();
+    } else if (cmd.startsWith("SET_PROFILE:")) {
+        int comma = cmd.indexOf(',', 12);
+        if (comma > 0) {
+            uint16_t speed = (uint16_t)constrain(cmd.substring(12, comma).toInt(), 0, 3000);
+            uint8_t accel = (uint8_t)constrain(cmd.substring(comma + 1).toInt(), 0, 255);
+            gPositionSpeed = speed;
+            gPositionAccel = accel;
+        }
+    } else if (cmd.startsWith("SET_CURRENT:")) {
+        uint16_t currentMa = (uint16_t)constrain(cmd.substring(12).toInt(), 0, 3000);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            setWorkingCurrent(i + 1, currentMa, false);
+            delay(10);
+        }
     } else if (cmd.startsWith("ZERO:")) {
         int id = cmd.substring(5).toInt();
         if (id >= 1 && id <= NUM_MOTORS) {

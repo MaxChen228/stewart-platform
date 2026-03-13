@@ -43,11 +43,17 @@ def wait_for_hardware(timeout: float = 5.0) -> dict:
 def print_state(state: dict) -> None:
     actual = state["actualSolution"]
     alignment = state["alignment"]
+    profile = state["hardware"].get("profile", {})
+    desired = state.get("motorSettings", {})
     print(
         f"Mode={state['mode']} Link={'ONLINE' if state['hardware']['connected'] else 'OFFLINE'} "
         f"Ready={state['hardware']['ready']} PoseZ={state['pose']['z']:.3f} "
         f"CalZ={alignment['calibrationZ']:.3f} Residual={actual['residualNorm']:.3f} "
         f"ActualFK={'TRACKED' if actual['converged'] else 'UNSOLVED'}"
+    )
+    print(
+        f"Profile speed={int(profile.get('positionSpeed', 0))} accel={int(profile.get('positionAccel', 0))} "
+        f"desiredMa={int(desired.get('workCurrentMa', 0))}mA"
     )
     for index, motor in enumerate(state["hardware"]["motors"], start=1):
         target = state["solution"]["servo_angles_deg"][index - 1]
@@ -67,6 +73,23 @@ def print_state(state: dict) -> None:
 
 
 def command_status(_: argparse.Namespace) -> int:
+    print_state(api_get("/api/state"))
+    return 0
+
+
+def command_drive(args: argparse.Namespace) -> int:
+    wait_for_hardware()
+    payload = {}
+    if args.speed is not None:
+        payload["positionSpeed"] = args.speed
+    if args.accel is not None:
+        payload["positionAccel"] = args.accel
+    if args.current is not None:
+        payload["workCurrentMa"] = args.current
+    if not payload:
+        raise RuntimeError("no drive settings specified")
+    state = api_post("/api/settings", payload)
+    time.sleep(args.wait)
     print_state(api_get("/api/state"))
     return 0
 
@@ -168,6 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="Print current operational state")
     status.set_defaults(func=command_status)
+
+    drive = sub.add_parser("drive", help="Tune motor current / speed / accel")
+    drive.add_argument("--speed", type=int)
+    drive.add_argument("--accel", type=int)
+    drive.add_argument("--current", type=int)
+    drive.add_argument("--wait", type=float, default=0.6)
+    drive.set_defaults(func=command_drive)
 
     calibrate = sub.add_parser("calibrate", help="Run hardware-first calibration and wait for stability")
     calibrate.add_argument("--timeout", type=float, default=3.0)

@@ -38,6 +38,10 @@ class HardwareBridge:
             "connected": False,
             "stale": True,
             "port": None,
+            "profile": {
+                "positionSpeed": 180,
+                "positionAccel": 12,
+            },
             "motors": [
                 {
                     "id": motor_id,
@@ -106,6 +110,8 @@ class HardwareBridge:
                     # If telemetry is flowing, the firmware is already alive even if
                     # the one-shot {"ready":true} boot message was missed.
                     self.telemetry["ready"] = True
+                if "profile" in data and isinstance(data["profile"], dict):
+                    self.telemetry["profile"] = data["profile"]
             except (serial.SerialException, OSError):
                 with self.serial_lock:
                     try:
@@ -152,6 +158,12 @@ class HardwareBridge:
     def zero_motor(self, motor_id: int) -> bool:
         return self.send_line(f"ZERO:{motor_id}")
 
+    def set_motion_profile(self, speed: int, accel: int) -> bool:
+        return self.send_line(f"SET_PROFILE:{speed},{accel}")
+
+    def set_work_current_all(self, current_ma: int) -> bool:
+        return self.send_line(f"SET_CURRENT:{current_ma}")
+
 
 class ControlState:
     def __init__(self) -> None:
@@ -165,6 +177,11 @@ class ControlState:
         self.last_calibration: dict[str, Any] | None = None
         self.last_feedback: dict[str, Any] | None = None
         self.motion_state: dict[str, Any] = {"active": False, "progress": 1.0, "durationMs": self.motion_duration_ms}
+        self.motor_settings: dict[str, int] = {
+            "positionSpeed": 180,
+            "positionAccel": 12,
+            "workCurrentMa": 0,
+        }
         self._state_lock = threading.RLock()
         self._trajectory_generation = 0
         self._load_runtime_state()
@@ -254,6 +271,14 @@ class ControlState:
         motion_duration_ms = payload.get("motionDurationMs")
         if isinstance(motion_duration_ms, (int, float)):
             self.motion_duration_ms = max(100, int(motion_duration_ms))
+        motor_settings = payload.get("motorSettings")
+        if isinstance(motor_settings, dict):
+            if "positionSpeed" in motor_settings:
+                self.motor_settings["positionSpeed"] = max(0, min(3000, int(float(motor_settings["positionSpeed"]))))
+            if "positionAccel" in motor_settings:
+                self.motor_settings["positionAccel"] = max(0, min(255, int(float(motor_settings["positionAccel"]))))
+            if "workCurrentMa" in motor_settings:
+                self.motor_settings["workCurrentMa"] = max(0, min(3000, int(float(motor_settings["workCurrentMa"]))))
         self.motion_state = {"active": False, "progress": 1.0, "durationMs": self.motion_duration_ms}
 
     def _persist_runtime_state(self) -> None:
@@ -263,6 +288,7 @@ class ControlState:
             "lastCalibration": self.last_calibration,
             "lastFeedback": self.last_feedback,
             "motionDurationMs": self.motion_duration_ms,
+            "motorSettings": self.motor_settings,
         }
         STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -367,6 +393,7 @@ class ControlState:
             "solution": self.last_solution,
             "actualSolution": actual_solution,
             "hardware": hardware_state,
+            "motorSettings": self.motor_settings,
             "alignment": {
                 "calibrationZ": self.kinematics.geometry.calibration_z,
                 "homeZ": self.kinematics.geometry.home_z,
@@ -433,6 +460,28 @@ class ControlState:
             self.last_feedback = {
                 "type": "settings",
                 "message": f"平滑時間已設為 {self.motion_duration_ms / 1000:.1f}s",
+                "timestamp": time.time(),
+            }
+        changed_parts: list[str] = []
+        position_speed = payload.get("positionSpeed")
+        position_accel = payload.get("positionAccel")
+        work_current_ma = payload.get("workCurrentMa")
+        if position_speed is not None or position_accel is not None:
+            speed = self.motor_settings["positionSpeed"] if position_speed is None else max(0, min(3000, int(float(position_speed))))
+            accel = self.motor_settings["positionAccel"] if position_accel is None else max(0, min(255, int(float(position_accel))))
+            self.motor_settings["positionSpeed"] = speed
+            self.motor_settings["positionAccel"] = accel
+            self.hardware.set_motion_profile(speed, accel)
+            changed_parts.append(f"profile={speed}/{accel}")
+        if work_current_ma is not None:
+            current_ma = max(0, min(3000, int(float(work_current_ma))))
+            self.motor_settings["workCurrentMa"] = current_ma
+            self.hardware.set_work_current_all(current_ma)
+            changed_parts.append(f"ma={current_ma}")
+        if changed_parts:
+            self.last_feedback = {
+                "type": "motor_settings",
+                "message": "已更新馬達設定 " + " ".join(changed_parts),
                 "timestamp": time.time(),
             }
         self._persist_runtime_state()
