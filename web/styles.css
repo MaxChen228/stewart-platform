@@ -392,6 +392,10 @@ input {
   color: var(--sub);
 }
 
+.matrix-card.debug-card {
+  grid-column: 1 / -1;
+}
+
 .metric-label {
   color: var(--sub);
   font-size: 10px;

@@ -161,14 +161,24 @@ class ControlState:
 
     def snapshot(self) -> dict[str, Any]:
         hardware_state = self.hardware.state()
+        actual_solution = self.actual_solution(hardware_state)
         return {
             "mode": self.mode,
             "liveSend": self.live_send,
             "pose": self.pose.to_dict(),
             "geometry": self.kinematics.geometry.to_dict(),
             "solution": self.last_solution,
-            "actualSolution": self.actual_solution(hardware_state),
+            "actualSolution": actual_solution,
             "hardware": hardware_state,
+            "alignment": {
+                "calibrationZ": self.kinematics.geometry.home_z,
+                "targetServoAnglesDeg": self.last_solution["servo_angles_deg"],
+                "targetMotorAnglesDeg": self.last_solution["motor_angles_deg"],
+                "actualServoAnglesDeg": [float(motor.get("deg", 0.0)) for motor in hardware_state.get("motors", [])[:6]],
+                "actualMotorAnglesDeg": actual_solution.get("motor_angles_deg", [0.0] * 6),
+                "zeroOffsetsDeg": self.kinematics.geometry.zero_offsets_deg,
+                "motorSigns": self.kinematics.geometry.motor_signs,
+            },
             "sequence": self.sequence,
         }
 

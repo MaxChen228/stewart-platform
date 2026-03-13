@@ -7,7 +7,7 @@ const poseSpec = [
   { key: "yaw", label: "YAW", min: -30, max: 30, step: 0.5, unit: "deg" },
   { key: "x", label: "X", min: -40, max: 40, step: 0.5, unit: "mm" },
   { key: "y", label: "Y", min: -40, max: 40, step: 0.5, unit: "mm" },
-  { key: "z", label: "Z", min: 80, max: 180, step: 0.5, unit: "mm" },
+  { key: "z", label: "Z OFF", min: -120, max: 0, step: 0.5, unit: "mm" },
 ];
 
 const geometrySpec = [
@@ -110,20 +110,19 @@ function initControls() {
 }
 
 function getPoseUiSpec(spec) {
-  if (spec.key !== "z" || !state?.geometry) {
+  if (spec.key !== "z") {
     return spec;
   }
-
-  const homeZ = Number(state.geometry.home_z || spec.min);
-  const min = Math.max(0, Math.floor((homeZ - 80) / 5) * 5);
-  const max = Math.ceil((homeZ + 80) / 5) * 5;
-  return { ...spec, min, max };
+  return spec;
 }
 
 async function onPoseChange(event) {
   const key = event.target.dataset.key;
   const value = Number(event.target.value);
   const pose = { ...state.pose, [key]: value };
+  if (key === "z") {
+    pose.z = (state.alignment?.calibrationZ || state.geometry.home_z || 0) + value;
+  }
   state = await api("/api/pose", {
     method: "POST",
     body: JSON.stringify({ pose }),
@@ -198,8 +197,14 @@ function renderPoseControls() {
     range.max = uiSpec.max;
     input.min = uiSpec.min;
     input.max = uiSpec.max;
-    range.value = state.pose[spec.key];
-    input.value = state.pose[spec.key].toFixed(2);
+    if (spec.key === "z") {
+      const offset = state.pose.z - (state.alignment?.calibrationZ || state.geometry.home_z || 0);
+      range.value = offset;
+      input.value = offset.toFixed(2);
+    } else {
+      range.value = state.pose[spec.key];
+      input.value = state.pose[spec.key].toFixed(2);
+    }
   });
 }
 
@@ -276,45 +281,6 @@ function renderSolve() {
   $("#solveIssues").textContent = state.solution.issues.length
     ? state.solution.issues.join(" | ")
     : "No constraint issues.";
-
-  const matrix = $("#solveMatrix");
-  matrix.innerHTML = "";
-  state.solution.servo_angles_deg.forEach((angle, index) => {
-    const card = el("div", "matrix-card");
-    card.appendChild(el("strong", "", `M${index + 1}`));
-    card.appendChild(makeMetric("Target", `${angle.toFixed(2)} deg`));
-    card.appendChild(makeMetric("Pulse", `${state.solution.motor_pulses[index]}`));
-    card.appendChild(makeMetric("Crank", `${state.solution.motor_angles_deg[index].toFixed(2)} deg`));
-    matrix.appendChild(card);
-  });
-}
-
-function renderHardware() {
-  const matrix = $("#hardwareMatrix");
-  matrix.innerHTML = "";
-  const calibratedRecently = calibrationFeedback && Date.now() - calibrationFeedback.updatedAt < 3000;
-  state.hardware.motors.forEach((motor, index) => {
-    const target = state.solution.servo_angles_deg[index] || 0;
-    const actual = motor.deg || 0;
-    const error = actual - target;
-    const card = el("div", "matrix-card");
-    if (calibratedRecently) {
-      card.classList.add("zero-success");
-    }
-    card.appendChild(el("strong", "", `M${motor.id}`));
-    card.appendChild(makeMetric("State", motor.on ? "ONLINE" : "OFFLINE", motor.on ? "metric-ok" : "metric-danger"));
-    card.appendChild(makeMetric("Actual", `${actual.toFixed(2)} deg`));
-    card.appendChild(makeMetric("Raw", `${(motor.rawDeg || 0).toFixed(2)} deg`));
-    card.appendChild(makeMetric("Encoder", `${motor.encoderCount ?? 0}`));
-    card.appendChild(makeMetric("Turn Cnt", `${motor.singleTurnCount ?? 0}`));
-    card.appendChild(makeMetric("Target", `${target.toFixed(2)} deg`));
-    card.appendChild(makeMetric("Error", `${error.toFixed(2)} deg`, Math.abs(error) < 1 ? "metric-ok" : (Math.abs(error) < 5 ? "metric-warn" : "metric-danger")));
-    card.appendChild(makeMetric("Zero", `${(motor.zeroOffsetDeg || 0).toFixed(2)} deg`));
-    card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED", motor.enabled ? "metric-ok" : "metric-warn"));
-    let statusText = calibratedRecently ? "Calibrated" : "Idle";
-    card.appendChild(el("div", "inline-status", statusText));
-    matrix.appendChild(card);
-  });
 }
 
 function renderSequence() {
@@ -332,6 +298,7 @@ function renderSequence() {
 }
 
 function renderOverlays() {
+  const calibrationZ = state.alignment?.calibrationZ || state.geometry.home_z || 0;
   $("#poseOverlay").innerHTML = `
     <div class="overlay-title">POSE</div>
     <div class="overlay-grid">
@@ -340,7 +307,7 @@ function renderOverlays() {
       <div>YAW</div><div>${state.pose.yaw.toFixed(2)}</div>
       <div>X</div><div>${state.pose.x.toFixed(2)}</div>
       <div>Y</div><div>${state.pose.y.toFixed(2)}</div>
-      <div>Z</div><div>${state.pose.z.toFixed(2)}</div>
+      <div>Z OFF</div><div>${(state.pose.z - calibrationZ).toFixed(2)}</div>
     </div>
   `;
 
@@ -350,17 +317,9 @@ function renderOverlays() {
       <div>MODE</div><div>${state.mode}</div>
       <div>LINK</div><div>${state.hardware.connected ? "ONLINE" : "OFFLINE"}</div>
       <div>SOLVE</div><div>${state.solution.reachable ? "OK" : "LIMIT"}</div>
-      <div>ACTUAL</div><div>${state.actualSolution?.converged ? "TRACKED" : "UNSOLVED"}</div>
       <div>LIVE</div><div>${state.liveSend ? "ON" : "OFF"}</div>
     </div>
   `;
-
-  const errorLines = state.hardware.motors.map((motor, index) => {
-    const target = state.solution.servo_angles_deg[index] || 0;
-    const actual = motor.deg || 0;
-    return `<div>M${motor.id}: ${(actual - target).toFixed(2)} deg</div>`;
-  }).join("");
-  $("#errorOverlay").innerHTML = `<div class="overlay-title">TARGET VS ACTUAL</div><div>Pose residual: ${(state.actualSolution?.residualNorm ?? 0).toFixed(3)}</div>${errorLines}`;
 }
 
 function makeMetric(label, value) {
@@ -560,7 +519,6 @@ function render() {
   renderSession();
   renderHardwareAccess();
   renderSolve();
-  renderHardware();
   renderSequence();
   renderOverlays();
   renderCanvas();
