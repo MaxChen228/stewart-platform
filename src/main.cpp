@@ -13,8 +13,10 @@ MCP_CAN CAN0(CAN_CS);
 
 struct MotorState {
     bool online;
+    float rawEncoderDeg;
     float encoderDeg;
     float targetDeg;
+    float zeroOffsetDeg;
     unsigned long lastSeen;
     bool enabled;
     bool moving;
@@ -78,6 +80,14 @@ void emergencyStop(uint8_t id) {
     motors[id - 1].moving = false;
 }
 
+void zeroMotor(uint8_t id) {
+    int index = id - 1;
+    motors[index].zeroOffsetDeg = motors[index].rawEncoderDeg;
+    motors[index].encoderDeg = 0.0f;
+    motors[index].targetDeg = 0.0f;
+    motors[index].moving = false;
+}
+
 void positionMode(uint8_t id, float deltaDeg) {
     uint32_t pulses = (uint32_t)lroundf(fabsf(deltaDeg) * SERVO_PULSES_PER_REV / 360.0f);
     if (pulses == 0) {
@@ -117,7 +127,8 @@ void scanMotors() {
             if (buf[0] == 0x30 && len == 8) {
                 int32_t carry = ((int32_t)buf[1]<<24) | (buf[2]<<16) | (buf[3]<<8) | buf[4];
                 uint16_t val = (buf[5]<<8) | buf[6];
-                motors[i].encoderDeg = (carry * 16384.0f + val) * 360.0f / 16384.0f;
+                motors[i].rawEncoderDeg = (carry * 16384.0f + val) * 360.0f / 16384.0f;
+                motors[i].encoderDeg = motors[i].rawEncoderDeg - motors[i].zeroOffsetDeg;
                 if (fabsf(motors[i].targetDeg - motors[i].encoderDeg) < 1.0f) {
                     motors[i].moving = false;
                 }
@@ -133,10 +144,11 @@ void sendStatus() {
     Serial.print("{\"motors\":[");
     for (int i = 0; i < NUM_MOTORS; i++) {
         if (i) Serial.print(",");
-        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"targetDeg\":%.1f,\"enabled\":%s,\"moving\":%s}",
+        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"rawDeg\":%.1f,\"targetDeg\":%.1f,\"enabled\":%s,\"moving\":%s}",
             i + 1,
             motors[i].online ? "true" : "false",
             motors[i].encoderDeg,
+            motors[i].rawEncoderDeg,
             motors[i].targetDeg,
             motors[i].enabled ? "true" : "false",
             motors[i].moving ? "true" : "false");
@@ -174,6 +186,11 @@ void handleSerial() {
             positionMode(i + 1, delta);
             motors[i].targetDeg = nextTarget;
             start = comma == -1 ? cmd.length() : comma + 1;
+        }
+    } else if (cmd.startsWith("ZERO:")) {
+        int id = cmd.substring(5).toInt();
+        if (id >= 1 && id <= NUM_MOTORS) {
+            zeroMotor(id);
         }
     } else if (cmd.startsWith("SPIN:")) {
         int id = cmd.substring(5).toInt();

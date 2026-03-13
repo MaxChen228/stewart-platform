@@ -130,10 +130,10 @@ async function setMode(mode) {
   render();
 }
 
-async function sendCommand(command) {
+async function sendCommand(command, extra = {}) {
   state = await api("/api/command", {
     method: "POST",
-    body: JSON.stringify({ command }),
+    body: JSON.stringify({ command, ...extra }),
   });
   render();
 }
@@ -216,8 +216,13 @@ function renderHardware() {
     card.appendChild(el("strong", "", `M${motor.id}`));
     card.appendChild(makeMetric("State", motor.on ? "ONLINE" : "OFFLINE"));
     card.appendChild(makeMetric("Actual", `${actual.toFixed(2)} deg`));
+    card.appendChild(makeMetric("Raw", `${(motor.rawDeg || 0).toFixed(2)} deg`));
     card.appendChild(makeMetric("Target", `${target.toFixed(2)} deg`));
     card.appendChild(makeMetric("Error", `${error.toFixed(2)} deg`));
+    card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED"));
+    const zeroButton = el("button", "mini-action", "Zero");
+    zeroButton.addEventListener("click", () => sendCommand("zero_motor", { motorId: motor.id }));
+    card.appendChild(zeroButton);
     matrix.appendChild(card);
   });
 }
@@ -489,5 +494,5 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await refresh();
-  setInterval(refresh, 500);
+  setInterval(refresh, 150);
 });

@@ -135,6 +135,9 @@ class HardwareBridge:
         payload = ",".join(f"{angle:.3f}" for angle in angles_deg)
         return self.send_line(f"MOVE:{payload}")
 
+    def zero_motor(self, motor_id: int) -> bool:
+        return self.send_line(f"ZERO:{motor_id}")
+
 
 class ControlState:
     def __init__(self) -> None:
@@ -186,13 +189,18 @@ class ControlState:
         self.live_send = live_send
         return self.snapshot()
 
-    def execute_command(self, command: str) -> dict[str, Any]:
+    def execute_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
         if command == "enable_all":
             self.hardware.enable_all(True)
         elif command == "disable_all":
             self.hardware.enable_all(False)
         elif command == "stop":
             self.hardware.stop()
+        elif command == "zero_motor":
+            motor_id = int(payload.get("motorId", 0))
+            if 1 <= motor_id <= 6:
+                self.hardware.zero_motor(motor_id)
         elif command == "apply_pose":
             if self.last_solution["reachable"]:
                 self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])
@@ -236,7 +244,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json(APP_STATE.set_mode(data.get("mode", "SIM"), bool(data.get("liveSend", False))))
             return
         if parsed.path == "/api/command":
-            self._json(APP_STATE.execute_command(data.get("command", "")))
+            self._json(APP_STATE.execute_command(data.get("command", ""), data))
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)

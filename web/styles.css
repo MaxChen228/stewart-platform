@@ -304,6 +304,20 @@ input {
   line-height: 1.7;
 }
 
+.matrix-card .mini-action {
+  margin-top: 10px;
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--border-base);
+  background: var(--bg);
+  border-radius: 999px;
+  color: var(--ink);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
 .metric-label {
   color: var(--sub);
   font-size: 10px;
