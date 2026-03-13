@@ -19,6 +19,7 @@ from host.kinematics import Geometry, Pose, StewartKinematics
 WEB_PORT = 8080
 SERIAL_BAUD = 115200
 STALE_TIMEOUT = 2.0
+STATE_PATH = Path(__file__).resolve().parent.parent / ".runtime_state.json"
 
 
 class HardwareBridge:
@@ -150,9 +151,10 @@ class ControlState:
         self.kinematics = StewartKinematics(Geometry())
         self.sequence: list[dict[str, float]] = []
         self.hardware = HardwareBridge()
+        self.last_calibration: dict[str, Any] | None = None
+        self._load_runtime_state()
         self.hardware.start()
         self.last_solution = self.kinematics.solve(self.pose)
-        self.last_calibration: dict[str, Any] | None = None
 
     def _calibration_zero_offsets(self) -> list[float]:
         return [-90.0 * sign for sign in self.kinematics.geometry.motor_signs]
@@ -166,6 +168,45 @@ class ControlState:
                 return latest
             time.sleep(0.05)
         return latest
+
+    def _load_runtime_state(self) -> None:
+        if not STATE_PATH.exists():
+            self.pose = Pose(z=self.kinematics.geometry.home_z)
+            return
+        try:
+            payload = json.loads(STATE_PATH.read_text())
+        except Exception:
+            self.pose = Pose(z=self.kinematics.geometry.home_z)
+            return
+
+        geometry = payload.get("geometry")
+        if isinstance(geometry, dict):
+            self.kinematics.update_geometry(geometry)
+
+        pose_data = payload.get("pose")
+        if isinstance(pose_data, dict):
+            self.pose = Pose(
+                roll=float(pose_data.get("roll", 0.0)),
+                pitch=float(pose_data.get("pitch", 0.0)),
+                yaw=float(pose_data.get("yaw", 0.0)),
+                x=float(pose_data.get("x", 0.0)),
+                y=float(pose_data.get("y", 0.0)),
+                z=float(pose_data.get("z", self.kinematics.geometry.home_z)),
+            )
+        else:
+            self.pose = Pose(z=self.kinematics.geometry.home_z)
+
+        calibration = payload.get("lastCalibration")
+        if isinstance(calibration, dict):
+            self.last_calibration = calibration
+
+    def _persist_runtime_state(self) -> None:
+        payload = {
+            "geometry": self.kinematics.geometry.to_dict(),
+            "pose": self.pose.to_dict(),
+            "lastCalibration": self.last_calibration,
+        }
+        STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
     def actual_solution(self, telemetry: dict[str, Any]) -> dict[str, Any]:
         servo_angles = [float(motor.get("deg", 0.0)) for motor in telemetry.get("motors", [])[:6]]
@@ -205,6 +246,7 @@ class ControlState:
         should_send = apply_hardware or (self.live_send and self.mode == "SIM+HW")
         if should_send and self.last_solution["reachable"]:
             self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])
+        self._persist_runtime_state()
         return self.snapshot()
 
     def update_geometry(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -218,11 +260,13 @@ class ControlState:
                 normalized[key] = float(value)
         self.kinematics.update_geometry(normalized)
         self.last_solution = self.kinematics.solve(self.pose)
+        self._persist_runtime_state()
         return self.snapshot()
 
     def set_mode(self, mode: str, live_send: bool) -> dict[str, Any]:
         self.mode = mode
         self.live_send = live_send
+        self._persist_runtime_state()
         return self.snapshot()
 
     def execute_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -262,6 +306,7 @@ class ControlState:
         elif command == "home":
             self.pose = Pose(z=self.kinematics.geometry.home_z)
             self.last_solution = self.kinematics.solve(self.pose)
+        self._persist_runtime_state()
         return self.snapshot()
 
 
