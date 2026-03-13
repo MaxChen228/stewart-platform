@@ -171,17 +171,28 @@ class ControlState:
 
     def _load_runtime_state(self) -> None:
         if not STATE_PATH.exists():
+            self.kinematics.geometry.calibration_z = self.kinematics.calibration_pose().z
+            self.kinematics.geometry.home_z = self.kinematics.operating_home_pose().z
             self.pose = Pose(z=self.kinematics.geometry.home_z)
             return
         try:
             payload = json.loads(STATE_PATH.read_text())
         except Exception:
+            self.kinematics.geometry.calibration_z = self.kinematics.calibration_pose().z
+            self.kinematics.geometry.home_z = self.kinematics.operating_home_pose().z
             self.pose = Pose(z=self.kinematics.geometry.home_z)
             return
 
         geometry = payload.get("geometry")
         if isinstance(geometry, dict):
             self.kinematics.update_geometry(geometry)
+
+        if self.kinematics.geometry.calibration_z <= 0:
+            self.kinematics.geometry.calibration_z = self.kinematics.calibration_pose().z
+
+        # Migrate older state files that treated calibration height as home height.
+        if self.kinematics.geometry.home_z <= 0 or abs(self.kinematics.geometry.home_z - self.kinematics.geometry.calibration_z) < 1e-6:
+            self.kinematics.geometry.home_z = self.kinematics.operating_home_pose().z
 
         pose_data = payload.get("pose")
         if isinstance(pose_data, dict):
@@ -226,7 +237,8 @@ class ControlState:
             "actualSolution": actual_solution,
             "hardware": hardware_state,
             "alignment": {
-                "calibrationZ": self.kinematics.geometry.home_z,
+                "calibrationZ": self.kinematics.geometry.calibration_z,
+                "homeZ": self.kinematics.geometry.home_z,
                 "targetServoAnglesDeg": self.last_solution["servo_angles_deg"],
                 "targetMotorAnglesDeg": self.last_solution["motor_angles_deg"],
                 "actualServoAnglesDeg": [float(motor.get("deg", 0.0)) for motor in hardware_state.get("motors", [])[:6]],
@@ -284,13 +296,16 @@ class ControlState:
             after = self._wait_for_fresh_telemetry()
 
             calibration_pose = self.kinematics.calibration_pose()
+            operating_home = self.kinematics.operating_home_pose()
             self.kinematics.geometry.zero_offsets_deg = self._calibration_zero_offsets()
-            self.kinematics.geometry.home_z = calibration_pose.z
+            self.kinematics.geometry.calibration_z = calibration_pose.z
+            self.kinematics.geometry.home_z = operating_home.z
             self.pose = calibration_pose
             self.last_solution = self.kinematics.solve(self.pose)
             self.last_calibration = {
                 "timestamp": time.time(),
                 "calibrationPose": calibration_pose.to_dict(),
+                "homePose": operating_home.to_dict(),
                 "beforeServoDeg": [float(motor.get("deg", 0.0)) for motor in before.get("motors", [])[:6]],
                 "beforeRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in before.get("motors", [])[:6]],
                 "afterServoDeg": [float(motor.get("deg", 0.0)) for motor in after.get("motors", [])[:6]],
@@ -304,7 +319,8 @@ class ControlState:
         elif command == "clear_keyframes":
             self.sequence = []
         elif command == "home":
-            self.pose = Pose(z=self.kinematics.geometry.home_z)
+            self.pose = self.kinematics.operating_home_pose()
+            self.kinematics.geometry.home_z = self.pose.z
             self.last_solution = self.kinematics.solve(self.pose)
         self._persist_runtime_state()
         return self.snapshot()

@@ -51,7 +51,8 @@ class Geometry:
     platform_angle: float = 28.07
     lower_leg: float = 65.0
     upper_leg: float = 165.0
-    home_z: float = 105.0
+    home_z: float = 143.17391199119228
+    calibration_z: float = 222.23941294691016
     stepper_plane_angles: List[float] = field(
         default_factory=lambda: [-90.0, 90.0, 30.0, 210.0, -210.0, -30.0]
     )
@@ -149,6 +150,23 @@ class StewartKinematics:
 
         calibration_z = sum(z_values) / len(z_values)
         return Pose(roll=0.0, pitch=0.0, yaw=0.0, x=0.0, y=0.0, z=calibration_z)
+
+    def operating_home_pose(self) -> Pose:
+        seed_z = self.geometry.home_z if self.geometry.home_z > 0 else 150.0
+        solution = self.solve_pose_from_motor_angles(
+            [0.0] * 6,
+            initial_pose=Pose(z=seed_z),
+            iterations=25,
+        )
+        pose = solution["pose"]
+        return Pose(
+            roll=float(pose["roll"]),
+            pitch=float(pose["pitch"]),
+            yaw=float(pose["yaw"]),
+            x=float(pose["x"]),
+            y=float(pose["y"]),
+            z=float(pose["z"]),
+        )
 
     def servo_to_motor_angles(self, servo_angles_deg: list[float]) -> list[float]:
         g = self.geometry
