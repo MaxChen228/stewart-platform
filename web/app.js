@@ -452,7 +452,7 @@ function resizeScene() {
   const height = viewport.clientHeight;
   camera.aspect = width / Math.max(height, 1);
   camera.updateProjectionMatrix();
-  renderer.setSize(width, height, false);
+  renderer.setSize(width, height, true);
 }
 
 function animateScene() {
