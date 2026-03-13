@@ -180,6 +180,10 @@ input {
   grid-template-columns: 1fr;
 }
 
+.button-row.triple-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .chip-button,
 .action-button {
   min-height: 38px;
@@ -228,9 +232,7 @@ input {
   accent-color: var(--accent);
 }
 
-.session-meta,
-.solve-issues,
-.sequence-list,
+.motor-summary,
 .pose-overlay-grid,
 .geometry-grid,
 .metric-value,
@@ -238,9 +240,7 @@ input {
   font-family: "JetBrains Mono", monospace;
 }
 
-.session-meta,
-.solve-issues,
-.sequence-list {
+.motor-summary {
   margin-top: 14px;
   font-size: 12px;
   line-height: 1.8;
@@ -421,6 +421,37 @@ input {
   color: var(--sub);
 }
 
+.motor-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.motor-card {
+  border: 1px solid var(--border-light);
+  background: var(--bg);
+  border-radius: 2px;
+  padding: 12px;
+}
+
+.motor-card strong {
+  display: block;
+  margin-bottom: 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.motor-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  line-height: 1.8;
+}
+
 .canvas-panel {
   position: relative;
   flex: 1;
@@ -511,5 +542,11 @@ input {
 
   .canvas-panel {
     min-height: 60vh;
+  }
+
+  .button-row.triple-row,
+  .motor-grid,
+  .geometry-grid {
+    grid-template-columns: 1fr;
   }
 }

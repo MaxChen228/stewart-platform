@@ -144,7 +144,7 @@ async function onGeometryChange() {
 }
 
 async function setMode(mode) {
-  const liveSend = $("#liveSendToggle").checked;
+  const liveSend = false;
   state = await api("/api/mode", {
     method: "POST",
     body: JSON.stringify({ mode, liveSend }),
@@ -225,34 +225,10 @@ function renderChips() {
     hardwareAvailable() ? "status-ok" : (state.hardware.connected ? "status-warn" : "status-danger")
   }`;
 
-  document.querySelectorAll(".chip-button").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.mode === state.mode);
-  });
-  $("#liveSendToggle").checked = state.liveSend;
-}
-
-function renderSession() {
-  const online = state.hardware.motors.filter((motor) => motor.on).length;
-  $("#sessionMeta").innerHTML = [
-    `Port: ${state.hardware.port || "--"}`,
-    `Ready: ${state.hardware.ready ? "YES" : "NO"}`,
-    `Motors Online: ${online}/6`,
-    `Telemetry: ${state.hardware.stale ? "STALE" : "LIVE"}`,
-  ].join("<br>");
 }
 
 function renderHardwareAccess() {
   const available = hardwareAvailable();
-  const allowHardwareMode = available || state.mode === "SIM";
-
-  document.querySelectorAll(".chip-button").forEach((button) => {
-    if (button.dataset.mode === "SIM+HW") {
-      button.disabled = !available;
-      button.title = available ? "" : "Hardware offline";
-    }
-  });
-
-  $("#liveSendToggle").disabled = !available || state.mode !== "SIM+HW";
   $("#applyBtn").disabled = !available;
   $("#applyBtn").title = available ? "" : "Hardware offline";
   $("#calibrateBtn").disabled = !available;
@@ -270,63 +246,37 @@ function renderHardwareAccess() {
     }
   });
 
-  if (!allowHardwareMode && state.mode === "SIM+HW") {
-    $("#modeChip").textContent = "SIM";
-  }
 }
 
-function renderSolve() {
-  $("#solveStatus").textContent = state.solution.reachable ? "REACHABLE" : "UNREACHABLE";
-  $("#solveStatus").className = `solve-status ${state.solution.reachable ? "status-ok" : "status-danger"}`;
-  $("#solveIssues").textContent = state.solution.issues.length
-    ? state.solution.issues.join(" | ")
-    : "No constraint issues.";
-}
+function renderMotorStatus() {
+  const motors = state.hardware.motors || [];
+  const online = motors.filter((motor) => motor.on).length;
+  $("#motorSummary").innerHTML = [
+    `Port: ${state.hardware.port || "--"}`,
+    `Ready: ${state.hardware.ready ? "YES" : "NO"}`,
+    `Online: ${online}/6`,
+  ].join("<br>");
 
-function renderSequence() {
-  const list = $("#sequenceList");
-  list.innerHTML = "";
-  if (!state.sequence.length) {
-    list.textContent = "No keyframes recorded.";
-    return;
-  }
-  state.sequence.forEach((frame, index) => {
-    const item = el("div", "sequence-item");
-    item.textContent = `${String(index + 1).padStart(2, "0")} | r:${frame.roll.toFixed(1)} p:${frame.pitch.toFixed(1)} y:${frame.yaw.toFixed(1)} x:${frame.x.toFixed(1)} y:${frame.y.toFixed(1)} z:${frame.z.toFixed(1)}`;
-    list.appendChild(item);
+  const grid = $("#motorGrid");
+  grid.innerHTML = "";
+  motors.slice(0, 6).forEach((motor) => {
+    const actual = Number(motor.deg || 0);
+    const target = Number(motor.targetDeg || 0);
+    const error = actual - target;
+    const stateClass = motor.on ? "metric-ok" : "metric-danger";
+    const enabledClass = motor.enabled ? "metric-ok" : "metric-warn";
+    const errorClass = Math.abs(error) < 1 ? "metric-ok" : (Math.abs(error) < 3 ? "metric-warn" : "metric-danger");
+    const card = el("div", "motor-card");
+    card.innerHTML = `
+      <strong>M${motor.id}</strong>
+      <div class="motor-row"><span>State</span><span class="${stateClass}">${motor.on ? "ONLINE" : "OFFLINE"}</span></div>
+      <div class="motor-row"><span>Hold</span><span class="${enabledClass}">${motor.enabled ? "ON" : "OFF"}</span></div>
+      <div class="motor-row"><span>Actual</span><span>${actual.toFixed(1)} deg</span></div>
+      <div class="motor-row"><span>Target</span><span>${target.toFixed(1)} deg</span></div>
+      <div class="motor-row"><span>Error</span><span class="${errorClass}">${error.toFixed(1)} deg</span></div>
+    `;
+    grid.appendChild(card);
   });
-}
-
-function renderOverlays() {
-  const calibrationZ = state.alignment?.calibrationZ || state.geometry.home_z || 0;
-  $("#poseOverlay").innerHTML = `
-    <div class="overlay-title">POSE</div>
-    <div class="overlay-grid">
-      <div>ROLL</div><div>${state.pose.roll.toFixed(2)}</div>
-      <div>PITCH</div><div>${state.pose.pitch.toFixed(2)}</div>
-      <div>YAW</div><div>${state.pose.yaw.toFixed(2)}</div>
-      <div>X</div><div>${state.pose.x.toFixed(2)}</div>
-      <div>Y</div><div>${state.pose.y.toFixed(2)}</div>
-      <div>Z OFF</div><div>${(state.pose.z - calibrationZ).toFixed(2)}</div>
-    </div>
-  `;
-
-  $("#summaryOverlay").innerHTML = `
-    <div class="overlay-title">SESSION</div>
-    <div class="overlay-grid">
-      <div>MODE</div><div>${state.mode}</div>
-      <div>LINK</div><div>${state.hardware.connected ? "ONLINE" : "OFFLINE"}</div>
-      <div>SOLVE</div><div>${state.solution.reachable ? "OK" : "LIMIT"}</div>
-      <div>LIVE</div><div>${state.liveSend ? "ON" : "OFF"}</div>
-    </div>
-  `;
-}
-
-function makeMetric(label, value) {
-  const row = el("div", "matrix-value");
-  row.appendChild(el("span", "metric-label", label));
-  row.appendChild(el("span", arguments[2] || "", value));
-  return row;
 }
 
 function toVector3(point) {
@@ -516,11 +466,8 @@ function render() {
   renderPoseControls();
   renderGeometry();
   renderChips();
-  renderSession();
   renderHardwareAccess();
-  renderSolve();
-  renderSequence();
-  renderOverlays();
+  renderMotorStatus();
   renderCanvas();
 }
 
@@ -554,9 +501,6 @@ window.addEventListener("resize", () => {
 document.addEventListener("DOMContentLoaded", async () => {
   initControls();
   initScene();
-  document.querySelectorAll("[data-mode]").forEach((button) => {
-    button.addEventListener("click", () => setMode(button.dataset.mode));
-  });
   document.querySelectorAll("[data-command]").forEach((button) => {
     button.addEventListener("click", () => sendCommand(button.dataset.command));
   });
@@ -567,7 +511,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
-  $("#liveSendToggle").addEventListener("change", () => setMode(state.mode));
   $("#geometryToggle").addEventListener("click", () => {
     $("#geometryGrid").classList.toggle("hidden");
     $("#geometryToggle").textContent = $("#geometryGrid").classList.contains("hidden") ? "EXPAND" : "COLLAPSE";
