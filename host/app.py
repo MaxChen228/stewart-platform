@@ -46,6 +46,12 @@ class HardwareBridge:
                     "targetDeg": 0.0,
                     "enabled": False,
                     "moving": False,
+                    "modeCode": 0,
+                    "mode": "UNKNOWN",
+                    "workCurrentMa": 0,
+                    "holdCurrentRatio": 0,
+                    "holdCurrentPct": 0,
+                    "configKnown": False,
                 }
                 for motor_id in range(1, 7)
             ],

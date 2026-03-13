@@ -52,9 +52,17 @@ def print_state(state: dict) -> None:
     for index, motor in enumerate(state["hardware"]["motors"], start=1):
         target = state["solution"]["servo_angles_deg"][index - 1]
         actual_deg = float(motor.get("deg", 0.0))
+        mode = motor.get("mode", "UNKNOWN")
+        work_current = int(motor.get("workCurrentMa", 0))
+        hold_pct = int(motor.get("holdCurrentPct", 0))
+        config_known = bool(motor.get("configKnown", False))
+        mode_text = mode if config_known else "PENDING"
+        ma_text = f"{work_current:4d}mA" if config_known else " ----"
+        hold_text = f"{hold_pct:2d}%" if config_known else " --"
         print(
             f"M{index}: target={target:8.2f} actual={actual_deg:8.2f} "
-            f"error={actual_deg - target:8.2f} raw={float(motor.get('rawDeg', 0.0)):9.2f}"
+            f"error={actual_deg - target:8.2f} raw={float(motor.get('rawDeg', 0.0)):9.2f} "
+            f"mode={mode_text:>8} ma={ma_text} hold={hold_text} cfg={'Y' if config_known else 'N'}"
         )
 
 

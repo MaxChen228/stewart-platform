@@ -8,8 +8,26 @@
 #define SERVO_PULSES_PER_REV 3200
 #define POSITION_SPEED 180
 #define POSITION_ACCEL 12
+#define TELEMETRY_INTERVAL_MS 50
+#define MOTOR_SCAN_INTERVAL_MS 8
+#define CONFIG_SCAN_INTERVAL_MS 80
+#define MOTOR_SCAN_TIMEOUT_MS 6
+#define CONFIG_SCAN_TIMEOUT_MS 8
 
 MCP_CAN CAN0(CAN_CS);
+
+enum ConfigCode : uint8_t {
+    CONFIG_MODE = 0x82,
+    CONFIG_WORK_CURRENT = 0x83,
+    CONFIG_HOLD_CURRENT = 0x9B,
+};
+
+enum ConfigFlag : uint8_t {
+    CONFIG_FLAG_MODE = 0x01,
+    CONFIG_FLAG_WORK_CURRENT = 0x02,
+    CONFIG_FLAG_HOLD_CURRENT = 0x04,
+    CONFIG_FLAG_ALL = CONFIG_FLAG_MODE | CONFIG_FLAG_WORK_CURRENT | CONFIG_FLAG_HOLD_CURRENT,
+};
 
 struct MotorState {
     bool online;
@@ -23,6 +41,12 @@ struct MotorState {
     unsigned long lastSeen;
     bool enabled;
     bool moving;
+    uint8_t modeCode;
+    uint16_t workCurrentMa;
+    uint8_t holdCurrentRatio;
+    bool configKnown;
+    uint8_t configMask;
+    unsigned long lastConfigSeen;
 };
 
 MotorState motors[NUM_MOTORS];
@@ -55,6 +79,31 @@ void drainCAN() {
         uint8_t l; uint8_t b[8]; unsigned long id;
         CAN0.readMsgBuf(&id, &l, b);
     }
+}
+
+const char *modeName(uint8_t modeCode) {
+    switch (modeCode) {
+        case 0x00: return "CR_OPEN";
+        case 0x01: return "CR_CLOSE";
+        case 0x02: return "CR_vFOC";
+        case 0x03: return "SR_OPEN";
+        case 0x04: return "SR_CLOSE";
+        case 0x05: return "SR_vFOC";
+        default: return "UNKNOWN";
+    }
+}
+
+void updateConfigKnown(int index) {
+    motors[index].configKnown = motors[index].configMask == CONFIG_FLAG_ALL;
+}
+
+void clearMotorConfig(int index) {
+    motors[index].modeCode = 0;
+    motors[index].workCurrentMa = 0;
+    motors[index].holdCurrentRatio = 0;
+    motors[index].configKnown = false;
+    motors[index].configMask = 0;
+    motors[index].lastConfigSeen = 0;
 }
 
 void enableMotor(uint8_t id, bool en) {
@@ -128,38 +177,74 @@ void positionMode(uint8_t id, float deltaDeg) {
     motors[id - 1].moving = true;
 }
 
-void scanMotors() {
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        uint8_t id = i + 1;
-        uint8_t data[2] = {0x30, 0x00};
-        canSend(id, data, 2);
-        uint8_t buf[8]; uint8_t len;
-        if (canReceive(id, buf, &len)) {
-            motors[i].online = true;
-            motors[i].lastSeen = millis();
-            if (buf[0] == 0x30 && len == 8) {
-                int32_t carry = ((int32_t)buf[1]<<24) | (buf[2]<<16) | (buf[3]<<8) | buf[4];
-                uint16_t val = (buf[5]<<8) | buf[6];
-                motors[i].rawEncoderCount = carry * 16384 + val;
-                motors[i].singleTurnCount = val;
-                motors[i].rawEncoderDeg = (carry * 16384.0f + val) * 360.0f / 16384.0f;
-                motors[i].encoderDeg = motors[i].rawEncoderDeg - motors[i].zeroOffsetDeg;
-                if (fabsf(motors[i].targetDeg - motors[i].encoderDeg) < 1.0f) {
-                    motors[i].moving = false;
-                }
-            }
-        } else if (millis() - motors[i].lastSeen > 1000) {
-            motors[i].online = false;
-            motors[i].moving = false;
-        }
+bool readConfigParam(uint8_t id, uint8_t code, uint8_t *buf, uint8_t *len, unsigned long timeout = CONFIG_SCAN_TIMEOUT_MS) {
+    uint8_t data[3] = {0x00, code, 0x00};
+    canSend(id, data, 3);
+    if (!canReceive(id, buf, len, timeout)) {
+        return false;
     }
+    return *len >= 3 && buf[0] == code;
+}
+
+void scanMotor(uint8_t id) {
+    int index = id - 1;
+    uint8_t data[2] = {0x30, 0x00};
+    canSend(id, data, 2);
+    uint8_t buf[8]; uint8_t len;
+    if (canReceive(id, buf, &len, MOTOR_SCAN_TIMEOUT_MS)) {
+        motors[index].online = true;
+        motors[index].lastSeen = millis();
+        if (buf[0] == 0x30 && len == 8) {
+            int32_t carry = ((int32_t)buf[1]<<24) | (buf[2]<<16) | (buf[3]<<8) | buf[4];
+            uint16_t val = (buf[5]<<8) | buf[6];
+            motors[index].rawEncoderCount = carry * 16384 + val;
+            motors[index].singleTurnCount = val;
+            motors[index].rawEncoderDeg = (carry * 16384.0f + val) * 360.0f / 16384.0f;
+            motors[index].encoderDeg = motors[index].rawEncoderDeg - motors[index].zeroOffsetDeg;
+            if (fabsf(motors[index].targetDeg - motors[index].encoderDeg) < 1.0f) {
+                motors[index].moving = false;
+            }
+        }
+    } else if (millis() - motors[index].lastSeen > 1000) {
+        motors[index].online = false;
+        motors[index].moving = false;
+        clearMotorConfig(index);
+    }
+}
+
+void scanOneConfig(uint8_t id, uint8_t code) {
+    int index = id - 1;
+    uint8_t buf[8]; uint8_t len = 0;
+    if (!readConfigParam(id, code, buf, &len)) {
+        return;
+    }
+
+    if (len == 4 && buf[1] == 0xFF && buf[2] == 0xFF) {
+        return;
+    }
+
+    if (code == CONFIG_MODE && len >= 3) {
+        motors[index].modeCode = buf[1];
+        motors[index].configMask |= CONFIG_FLAG_MODE;
+        motors[index].lastConfigSeen = millis();
+    } else if (code == CONFIG_WORK_CURRENT && len >= 4) {
+        motors[index].workCurrentMa = (uint16_t)(buf[1] << 8) | buf[2];
+        motors[index].configMask |= CONFIG_FLAG_WORK_CURRENT;
+        motors[index].lastConfigSeen = millis();
+    } else if (code == CONFIG_HOLD_CURRENT && len >= 3) {
+        motors[index].holdCurrentRatio = buf[1];
+        motors[index].configMask |= CONFIG_FLAG_HOLD_CURRENT;
+        motors[index].lastConfigSeen = millis();
+    }
+    updateConfigKnown(index);
 }
 
 void sendStatus() {
     Serial.print("{\"motors\":[");
     for (int i = 0; i < NUM_MOTORS; i++) {
         if (i) Serial.print(",");
-        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"rawDeg\":%.1f,\"encoderCount\":%ld,\"singleTurnCount\":%u,\"targetDeg\":%.1f,\"zeroOffsetDeg\":%.1f,\"zeroSeq\":%lu,\"enabled\":%s,\"moving\":%s}",
+        int holdPct = motors[i].configKnown ? ((int)motors[i].holdCurrentRatio * 10 + 10) : 0;
+        Serial.printf("{\"id\":%d,\"on\":%s,\"deg\":%.1f,\"rawDeg\":%.1f,\"encoderCount\":%ld,\"singleTurnCount\":%u,\"targetDeg\":%.1f,\"zeroOffsetDeg\":%.1f,\"zeroSeq\":%lu,\"enabled\":%s,\"moving\":%s,\"modeCode\":%u,\"mode\":\"%s\",\"workCurrentMa\":%u,\"holdCurrentRatio\":%u,\"holdCurrentPct\":%d,\"configKnown\":%s}",
             i + 1,
             motors[i].online ? "true" : "false",
             motors[i].encoderDeg,
@@ -170,7 +255,13 @@ void sendStatus() {
             motors[i].zeroOffsetDeg,
             (unsigned long)motors[i].zeroSeq,
             motors[i].enabled ? "true" : "false",
-            motors[i].moving ? "true" : "false");
+            motors[i].moving ? "true" : "false",
+            motors[i].modeCode,
+            modeName(motors[i].modeCode),
+            motors[i].workCurrentMa,
+            motors[i].holdCurrentRatio,
+            holdPct,
+            motors[i].configKnown ? "true" : "false");
     }
     Serial.println("]}");
 }
@@ -243,11 +334,34 @@ void setup() {
 void loop() {
     handleSerial();
 
-    static unsigned long lastScan = 0;
-    if (millis() - lastScan > 100) {
+    static unsigned long lastTelemetry = 0;
+    static unsigned long lastMotorScan = 0;
+    static unsigned long lastConfigScan = 0;
+    static uint8_t nextMotor = 1;
+    static uint8_t nextConfigMotor = 1;
+    static uint8_t nextConfigIndex = 0;
+    static const uint8_t configCodes[] = {CONFIG_MODE, CONFIG_WORK_CURRENT, CONFIG_HOLD_CURRENT};
+
+    if (millis() - lastMotorScan >= MOTOR_SCAN_INTERVAL_MS) {
         drainCAN();
-        scanMotors();
+        scanMotor(nextMotor);
+        nextMotor = nextMotor >= NUM_MOTORS ? 1 : nextMotor + 1;
+        lastMotorScan = millis();
+    }
+
+    if (millis() - lastConfigScan >= CONFIG_SCAN_INTERVAL_MS) {
+        drainCAN();
+        scanOneConfig(nextConfigMotor, configCodes[nextConfigIndex]);
+        nextConfigIndex++;
+        if (nextConfigIndex >= sizeof(configCodes)) {
+            nextConfigIndex = 0;
+            nextConfigMotor = nextConfigMotor >= NUM_MOTORS ? 1 : nextConfigMotor + 1;
+        }
+        lastConfigScan = millis();
+    }
+
+    if (millis() - lastTelemetry >= TELEMETRY_INTERVAL_MS) {
         sendStatus();
-        lastScan = millis();
+        lastTelemetry = millis();
     }
 }
