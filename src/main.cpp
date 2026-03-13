@@ -5,7 +5,7 @@
 #define CAN_CS   5
 #define CAN_INT  4
 #define NUM_MOTORS 6
-#define SERVO_PULSES_PER_REV 6400
+#define SERVO_PULSES_PER_REV 3200
 #define POSITION_SPEED 180
 #define POSITION_ACCEL 12
 
@@ -106,7 +106,10 @@ void positionMode(uint8_t id, float deltaDeg) {
     }
 
     uint8_t sh = (POSITION_SPEED >> 8) & 0x0F;
-    if (deltaDeg < 0) sh |= 0x80;
+    // The observed hardware motion is inverted relative to the vendor examples
+    // we modeled from, so the relative-position direction bit must be flipped
+    // to keep commanded servo angles aligned with measured encoder angles.
+    if (deltaDeg > 0) sh |= 0x80;
     uint8_t sl = POSITION_SPEED & 0xFF;
 
     uint8_t data[8] = {

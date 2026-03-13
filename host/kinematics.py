@@ -57,7 +57,7 @@ class Geometry:
     )
     motor_signs: List[int] = field(default_factory=lambda: [1, -1, 1, -1, 1, -1])
     zero_offsets_deg: List[float] = field(default_factory=lambda: [0.0] * 6)
-    servo_pulses_per_rev: int = 6400
+    servo_pulses_per_rev: int = 3200
     default_speed: int = 180
     default_accel: int = 12
 
