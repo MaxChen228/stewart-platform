@@ -138,8 +138,8 @@ class HardwareBridge:
         payload = ",".join(f"{angle:.3f}" for angle in angles_deg)
         return self.send_line(f"MOVE:{payload}")
 
-    def zero_motor(self, motor_id: int) -> bool:
-        return self.send_line(f"ZERO:{motor_id}")
+    def calibrate_all(self) -> bool:
+        return self.send_line("CALIBRATE")
 
 
 class ControlState:
@@ -200,10 +200,16 @@ class ControlState:
             self.hardware.enable_all(False)
         elif command == "stop":
             self.hardware.stop()
-        elif command == "zero_motor":
-            motor_id = int(payload.get("motorId", 0))
-            if 1 <= motor_id <= 6:
-                self.hardware.zero_motor(motor_id)
+        elif command == "calibrate":
+            calibration_pose = self.kinematics.calibration_pose()
+            self.pose = calibration_pose
+            self.kinematics.geometry.home_z = calibration_pose.z
+            calibration_solution = self.kinematics.solve(self.pose)
+            self.kinematics.geometry.zero_offsets_deg = [
+                -angle for angle in calibration_solution["servo_angles_deg"]
+            ]
+            self.last_solution = self.kinematics.solve(self.pose)
+            self.hardware.calibrate_all()
         elif command == "apply_pose":
             if self.last_solution["reachable"]:
                 self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])

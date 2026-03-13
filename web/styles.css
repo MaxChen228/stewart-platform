@@ -176,6 +176,10 @@ input {
   margin-top: 16px;
 }
 
+.button-row.single-row {
+  grid-template-columns: 1fr;
+}
+
 .chip-button,
 .action-button {
   min-height: 38px;

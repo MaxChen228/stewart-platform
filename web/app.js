@@ -30,7 +30,7 @@ let platformGroup;
 let baseLoop;
 let platformLoop;
 let needsCameraFit = true;
-const zeroFeedback = new Map();
+let calibrationFeedback = null;
 const crankLines = [];
 const rodLines = [];
 const basePoints = [];
@@ -78,6 +78,8 @@ function initControls() {
 
     const input = document.createElement("input");
     input.type = "number";
+    input.min = spec.min;
+    input.max = spec.max;
     input.step = spec.step;
     input.dataset.key = spec.key;
     input.addEventListener("change", onPoseChange);
@@ -100,6 +102,17 @@ function initControls() {
     field.append(label, input);
     geometryGrid.appendChild(field);
   });
+}
+
+function getPoseUiSpec(spec) {
+  if (spec.key !== "z" || !state?.geometry) {
+    return spec;
+  }
+
+  const homeZ = Number(state.geometry.home_z || spec.min);
+  const min = Math.max(0, Math.floor((homeZ - 80) / 5) * 5);
+  const max = Math.ceil((homeZ + 80) / 5) * 5;
+  return { ...spec, min, max };
 }
 
 async function onPoseChange(event) {
@@ -140,7 +153,7 @@ async function sendCommand(command, extra = {}) {
     "enable_all",
     "disable_all",
     "stop",
-    "zero_motor",
+    "calibrate",
     "apply_pose",
   ]);
   if (hardwareCommands.has(command) && !hardwareAvailable()) {
@@ -151,13 +164,10 @@ async function sendCommand(command, extra = {}) {
     method: "POST",
     body: JSON.stringify({ command, ...extra }),
   });
-  if (command === "zero_motor" && extra.motorId) {
-    const motor = state.hardware.motors.find((item) => item.id === extra.motorId);
-    zeroFeedback.set(extra.motorId, {
-      pending: true,
-      seq: motor?.zeroSeq ?? null,
+  if (command === "calibrate") {
+    calibrationFeedback = {
       updatedAt: Date.now(),
-    });
+    };
   }
   render();
 }
@@ -176,8 +186,13 @@ async function applyPose() {
 
 function renderPoseControls() {
   poseSpec.forEach((spec) => {
+    const uiSpec = getPoseUiSpec(spec);
     const range = document.getElementById(`pose-${spec.key}`);
     const input = document.querySelector(`input[type="number"][data-key="${spec.key}"]`);
+    range.min = uiSpec.min;
+    range.max = uiSpec.max;
+    input.min = uiSpec.min;
+    input.max = uiSpec.max;
     range.value = state.pose[spec.key];
     input.value = state.pose[spec.key].toFixed(2);
   });
@@ -230,6 +245,8 @@ function renderHardwareAccess() {
   $("#liveSendToggle").disabled = !available || state.mode !== "SIM+HW";
   $("#applyBtn").disabled = !available;
   $("#applyBtn").title = available ? "" : "Hardware offline";
+  $("#calibrateBtn").disabled = !available;
+  $("#calibrateBtn").title = available ? "" : "Hardware offline";
 
   document.querySelectorAll("[data-command]").forEach((button) => {
     const command = button.dataset.command;
@@ -270,27 +287,13 @@ function renderSolve() {
 function renderHardware() {
   const matrix = $("#hardwareMatrix");
   matrix.innerHTML = "";
-  const available = hardwareAvailable();
+  const calibratedRecently = calibrationFeedback && Date.now() - calibrationFeedback.updatedAt < 3000;
   state.hardware.motors.forEach((motor, index) => {
     const target = state.solution.servo_angles_deg[index] || 0;
     const actual = motor.deg || 0;
     const error = actual - target;
     const card = el("div", "matrix-card");
-    const zeroState = zeroFeedback.get(motor.id);
-    if (zeroState?.pending) {
-      if (motor.zeroSeq !== zeroState.seq) {
-        zeroFeedback.set(motor.id, {
-          pending: false,
-          seq: motor.zeroSeq,
-          updatedAt: Date.now(),
-        });
-      }
-    }
-    const currentZeroState = zeroFeedback.get(motor.id);
-    const elapsed = currentZeroState ? Date.now() - currentZeroState.updatedAt : Infinity;
-    if (currentZeroState?.pending) {
-      card.classList.add("zero-pending");
-    } else if (currentZeroState && elapsed < 3000) {
+    if (calibratedRecently) {
       card.classList.add("zero-success");
     }
     card.appendChild(el("strong", "", `M${motor.id}`));
@@ -303,17 +306,7 @@ function renderHardware() {
     card.appendChild(makeMetric("Error", `${error.toFixed(2)} deg`, Math.abs(error) < 1 ? "metric-ok" : (Math.abs(error) < 5 ? "metric-warn" : "metric-danger")));
     card.appendChild(makeMetric("Zero", `${(motor.zeroOffsetDeg || 0).toFixed(2)} deg`));
     card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED", motor.enabled ? "metric-ok" : "metric-warn"));
-    const zeroButton = el("button", "mini-action", "Zero");
-    zeroButton.addEventListener("click", () => sendCommand("zero_motor", { motorId: motor.id }));
-    zeroButton.disabled = !available;
-    zeroButton.title = available ? "" : "Hardware offline";
-    card.appendChild(zeroButton);
-    let statusText = "Idle";
-    if (currentZeroState?.pending) {
-      statusText = "Zero pending";
-    } else if (currentZeroState && elapsed < 3000) {
-      statusText = "Zeroed";
-    }
+    let statusText = calibratedRecently ? "Calibrated" : "Idle";
     card.appendChild(el("div", "inline-status", statusText));
     matrix.appendChild(card);
   });
@@ -580,6 +573,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     needsCameraFit = true;
     render();
   });
+  $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
   $("#liveSendToggle").addEventListener("change", () => setMode(state.mode));
   $("#geometryToggle").addEventListener("click", () => {
     $("#geometryGrid").classList.toggle("hidden");

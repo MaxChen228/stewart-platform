@@ -92,6 +92,12 @@ void zeroMotor(uint8_t id) {
     motors[index].zeroSeq++;
 }
 
+void calibrateAllMotors() {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        zeroMotor(i + 1);
+    }
+}
+
 void positionMode(uint8_t id, float deltaDeg) {
     uint32_t pulses = (uint32_t)lroundf(fabsf(deltaDeg) * SERVO_PULSES_PER_REV / 360.0f);
     if (pulses == 0) {
@@ -197,11 +203,8 @@ void handleSerial() {
             motors[i].targetDeg = nextTarget;
             start = comma == -1 ? cmd.length() : comma + 1;
         }
-    } else if (cmd.startsWith("ZERO:")) {
-        int id = cmd.substring(5).toInt();
-        if (id >= 1 && id <= NUM_MOTORS) {
-            zeroMotor(id);
-        }
+    } else if (cmd == "CALIBRATE") {
+        calibrateAllMotors();
     } else if (cmd.startsWith("SPIN:")) {
         int id = cmd.substring(5).toInt();
         if (id >= 1 && id <= NUM_MOTORS) {

@@ -108,6 +108,24 @@ class StewartKinematics:
         ]
         return _mat_mul(_mat_mul(rz, ry), rx)
 
+    def calibration_pose(self) -> Pose:
+        g = self.geometry
+        base = self.base_points()
+        platform = self.platform_points()
+
+        z_values: list[float] = []
+        for index in range(6):
+            dx = platform[index][0] - base[index][0]
+            dy = platform[index][1] - base[index][1]
+            planar_sq = dx * dx + dy * dy
+            rod_vertical_sq = g.upper_leg * g.upper_leg - planar_sq
+            if rod_vertical_sq <= 0:
+                raise ValueError("Geometry cannot reach vertical-up calibration pose")
+            z_values.append(g.lower_leg + math.sqrt(rod_vertical_sq))
+
+        calibration_z = sum(z_values) / len(z_values)
+        return Pose(roll=0.0, pitch=0.0, yaw=0.0, x=0.0, y=0.0, z=calibration_z)
+
     def solve(self, pose: Pose) -> dict:
         g = self.geometry
         base = self.base_points()
