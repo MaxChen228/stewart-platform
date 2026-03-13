@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import math
 import threading
 import time
 from http import HTTPStatus
@@ -150,18 +151,39 @@ class ControlState:
     def __init__(self) -> None:
         self.mode = "SIM"
         self.live_send = False
+        self.motion_duration_ms = 1800
         self.pose = Pose(z=105.0)
         self.kinematics = StewartKinematics(Geometry())
         self.sequence: list[dict[str, float]] = []
         self.hardware = HardwareBridge()
         self.last_calibration: dict[str, Any] | None = None
         self.last_feedback: dict[str, Any] | None = None
+        self.motion_state: dict[str, Any] = {"active": False, "progress": 1.0, "durationMs": self.motion_duration_ms}
+        self._state_lock = threading.RLock()
+        self._trajectory_generation = 0
         self._load_runtime_state()
         self.hardware.start()
         self.last_solution = self.kinematics.solve(self.pose)
 
-    def _calibration_zero_offsets(self) -> list[float]:
-        return [-90.0 * sign for sign in self.kinematics.geometry.motor_signs]
+    def _zero_offsets_from_reference_motor_angles(self, motor_angles_deg: list[float]) -> list[float]:
+        offsets: list[float] = []
+        for index, sign in enumerate(self.kinematics.geometry.motor_signs):
+            safe_sign = sign if sign != 0 else 1
+            offsets.append(-motor_angles_deg[index] * safe_sign)
+        return offsets
+
+    def _reference_pose(self) -> Pose:
+        calibration_pose = (self.last_calibration or {}).get("calibrationPose")
+        if isinstance(calibration_pose, dict):
+            return Pose(
+                roll=float(calibration_pose.get("roll", 0.0)),
+                pitch=float(calibration_pose.get("pitch", 0.0)),
+                yaw=float(calibration_pose.get("yaw", 0.0)),
+                x=float(calibration_pose.get("x", 0.0)),
+                y=float(calibration_pose.get("y", 0.0)),
+                z=float(calibration_pose.get("z", self.kinematics.geometry.home_z)),
+            )
+        return Pose(**self.pose.to_dict())
 
     def _wait_for_fresh_telemetry(self, timeout: float = 1.5) -> dict[str, Any]:
         deadline = time.time() + timeout
@@ -217,6 +239,10 @@ class ControlState:
         feedback = payload.get("lastFeedback")
         if isinstance(feedback, dict):
             self.last_feedback = feedback
+        motion_duration_ms = payload.get("motionDurationMs")
+        if isinstance(motion_duration_ms, (int, float)):
+            self.motion_duration_ms = max(100, int(motion_duration_ms))
+        self.motion_state = {"active": False, "progress": 1.0, "durationMs": self.motion_duration_ms}
 
     def _persist_runtime_state(self) -> None:
         payload = {
@@ -224,8 +250,93 @@ class ControlState:
             "pose": self.pose.to_dict(),
             "lastCalibration": self.last_calibration,
             "lastFeedback": self.last_feedback,
+            "motionDurationMs": self.motion_duration_ms,
         }
         STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _ease_in_out(self, t: float) -> float:
+        return t * t * (3.0 - 2.0 * t)
+
+    def _interpolate_pose(self, start: Pose, end: Pose, alpha: float) -> Pose:
+        return Pose(
+            roll=start.roll + (end.roll - start.roll) * alpha,
+            pitch=start.pitch + (end.pitch - start.pitch) * alpha,
+            yaw=start.yaw + (end.yaw - start.yaw) * alpha,
+            x=start.x + (end.x - start.x) * alpha,
+            y=start.y + (end.y - start.y) * alpha,
+            z=start.z + (end.z - start.z) * alpha,
+        )
+
+    def _start_pose_for_motion(self, target_pose: Pose) -> Pose:
+        hardware_state = self.hardware.state()
+        actual_solution = self.actual_solution(hardware_state)
+        actual_pose = actual_solution.get("pose") if actual_solution.get("converged") else None
+        if isinstance(actual_pose, dict):
+            return Pose(
+                roll=float(actual_pose.get("roll", target_pose.roll)),
+                pitch=float(actual_pose.get("pitch", target_pose.pitch)),
+                yaw=float(actual_pose.get("yaw", target_pose.yaw)),
+                x=float(actual_pose.get("x", target_pose.x)),
+                y=float(actual_pose.get("y", target_pose.y)),
+                z=float(actual_pose.get("z", target_pose.z)),
+            )
+        return Pose(**target_pose.to_dict())
+
+    def _run_motion(self, start_pose: Pose, target_pose: Pose, duration_ms: int, send_hardware: bool, generation: int) -> None:
+        steps = max(2, int(math.ceil(duration_ms / 50.0)))
+        start_time = time.time()
+        with self._state_lock:
+            self.motion_state = {"active": True, "progress": 0.0, "durationMs": duration_ms}
+            self.last_feedback = {
+                "type": "motion",
+                "message": f"平滑移動中 {duration_ms / 1000:.1f}s",
+                "timestamp": start_time,
+            }
+            self._persist_runtime_state()
+
+        for step in range(1, steps + 1):
+            with self._state_lock:
+                if generation != self._trajectory_generation:
+                    return
+            t = step / steps
+            alpha = self._ease_in_out(t)
+            pose = self._interpolate_pose(start_pose, target_pose, alpha)
+            solution = self.kinematics.solve(pose)
+            if send_hardware and solution["reachable"]:
+                self.hardware.move_to_targets(solution["servo_angles_deg"])
+            with self._state_lock:
+                if generation != self._trajectory_generation:
+                    return
+                self.pose = pose
+                self.last_solution = solution
+                self.motion_state = {"active": True, "progress": t, "durationMs": duration_ms}
+            if step < steps:
+                time.sleep(duration_ms / steps / 1000.0)
+
+        with self._state_lock:
+            if generation != self._trajectory_generation:
+                return
+            self.pose = target_pose
+            self.last_solution = self.kinematics.solve(self.pose)
+            self.motion_state = {"active": False, "progress": 1.0, "durationMs": duration_ms}
+            self.last_feedback = {
+                "type": "motion_done",
+                "message": f"平滑移動完成 {duration_ms / 1000:.1f}s",
+                "timestamp": time.time(),
+            }
+            self._persist_runtime_state()
+
+    def _queue_motion(self, target_pose: Pose, duration_ms: int, send_hardware: bool) -> None:
+        with self._state_lock:
+            self._trajectory_generation += 1
+            generation = self._trajectory_generation
+            start_pose = self._start_pose_for_motion(target_pose)
+        worker = threading.Thread(
+            target=self._run_motion,
+            args=(start_pose, target_pose, duration_ms, send_hardware, generation),
+            daemon=True,
+        )
+        worker.start()
 
     def actual_solution(self, telemetry: dict[str, Any]) -> dict[str, Any]:
         servo_angles = [float(motor.get("deg", 0.0)) for motor in telemetry.get("motors", [])[:6]]
@@ -256,16 +367,28 @@ class ControlState:
             },
             "calibration": self.last_calibration,
             "feedback": self.last_feedback,
+            "motion": self.motion_state,
             "sequence": self.sequence,
         }
 
     def update_pose(self, payload: dict[str, Any], apply_hardware: bool = False) -> dict[str, Any]:
+        duration_ms = int(payload.get("durationMs", self.motion_duration_ms))
+        target_pose = Pose(**self.pose.to_dict())
         for key in ("roll", "pitch", "yaw", "x", "y", "z"):
             if key in payload:
-                setattr(self.pose, key, float(payload[key]))
+                setattr(target_pose, key, float(payload[key]))
+        self.pose = target_pose
         self.last_solution = self.kinematics.solve(self.pose)
         should_send = apply_hardware or (self.live_send and self.mode == "SIM+HW")
-        if should_send and self.last_solution["reachable"]:
+        if apply_hardware and self.last_solution["reachable"]:
+            self.motion_duration_ms = max(100, duration_ms)
+            self._queue_motion(target_pose, self.motion_duration_ms, True)
+            self.last_feedback = {
+                "type": "motion_queue",
+                "message": f"已排入平滑移動 {self.motion_duration_ms / 1000:.1f}s",
+                "timestamp": time.time(),
+            }
+        elif should_send and self.last_solution["reachable"]:
             self.hardware.move_to_targets(self.last_solution["servo_angles_deg"])
         self._persist_runtime_state()
         return self.snapshot()
@@ -290,6 +413,19 @@ class ControlState:
         self._persist_runtime_state()
         return self.snapshot()
 
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        duration = payload.get("motionDurationMs")
+        if duration is not None:
+            self.motion_duration_ms = max(100, int(float(duration)))
+            self.motion_state["durationMs"] = self.motion_duration_ms
+            self.last_feedback = {
+                "type": "settings",
+                "message": f"平滑時間已設為 {self.motion_duration_ms / 1000:.1f}s",
+                "timestamp": time.time(),
+            }
+        self._persist_runtime_state()
+        return self.snapshot()
+
     def execute_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         if command == "enable_all":
@@ -303,27 +439,44 @@ class ControlState:
             self.last_feedback = {"type": "stop", "message": "已送出急停", "timestamp": time.time()}
         elif command == "calibrate":
             before = self._wait_for_fresh_telemetry()
+            before_actual = self.actual_solution(before)
+            if before_actual.get("converged") and isinstance(before_actual.get("pose"), dict):
+                actual_pose = before_actual["pose"]
+                reference_pose = Pose(
+                    roll=float(actual_pose.get("roll", self.pose.roll)),
+                    pitch=float(actual_pose.get("pitch", self.pose.pitch)),
+                    yaw=float(actual_pose.get("yaw", self.pose.yaw)),
+                    x=float(actual_pose.get("x", self.pose.x)),
+                    y=float(actual_pose.get("y", self.pose.y)),
+                    z=float(actual_pose.get("z", self.pose.z)),
+                )
+                reference_motor_angles = [float(angle) for angle in before_actual.get("motor_angles_deg", [0.0] * 6)]
+            else:
+                reference_pose = Pose(**self.pose.to_dict())
+                reference_motor_angles = [float(angle) for angle in self.last_solution.get("motor_angles_deg", [0.0] * 6)]
             self.hardware.calibrate_all()
             time.sleep(0.35)
             after = self._wait_for_fresh_telemetry()
 
-            calibration_pose = self.kinematics.calibration_pose()
-            operating_home = self.kinematics.operating_home_pose()
-            self.kinematics.geometry.zero_offsets_deg = self._calibration_zero_offsets()
-            self.kinematics.geometry.calibration_z = calibration_pose.z
-            self.kinematics.geometry.home_z = operating_home.z
-            self.pose = calibration_pose
+            self.kinematics.geometry.zero_offsets_deg = self._zero_offsets_from_reference_motor_angles(reference_motor_angles)
+            self.kinematics.geometry.calibration_z = reference_pose.z
+            self.kinematics.geometry.home_z = reference_pose.z
+            self.pose = reference_pose
             self.last_solution = self.kinematics.solve(self.pose)
             self.last_calibration = {
                 "timestamp": time.time(),
-                "calibrationPose": calibration_pose.to_dict(),
-                "homePose": operating_home.to_dict(),
+                "calibrationPose": reference_pose.to_dict(),
+                "referenceMotorAnglesDeg": reference_motor_angles,
                 "beforeServoDeg": [float(motor.get("deg", 0.0)) for motor in before.get("motors", [])[:6]],
                 "beforeRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in before.get("motors", [])[:6]],
                 "afterServoDeg": [float(motor.get("deg", 0.0)) for motor in after.get("motors", [])[:6]],
                 "afterRawDeg": [float(motor.get("rawDeg", 0.0)) for motor in after.get("motors", [])[:6]],
             }
-            self.last_feedback = {"type": "calibrate_all", "message": "已完成全部校正", "timestamp": time.time()}
+            self.last_feedback = {
+                "type": "calibrate_all",
+                "message": "已將當前姿態設為校正基準",
+                "timestamp": time.time(),
+            }
         elif command == "zero_motor":
             motor_id = int(payload.get("motorId", 0))
             motors_before = self._wait_for_fresh_telemetry().get("motors", [])
@@ -349,10 +502,11 @@ class ControlState:
         elif command == "clear_keyframes":
             self.sequence = []
         elif command == "home":
-            self.pose = self.kinematics.operating_home_pose()
+            self.pose = self._reference_pose()
             self.kinematics.geometry.home_z = self.pose.z
+            self.kinematics.geometry.calibration_z = self.pose.z
             self.last_solution = self.kinematics.solve(self.pose)
-            self.last_feedback = {"type": "home", "message": "已切換到 Home 工作位", "timestamp": time.time()}
+            self.last_feedback = {"type": "home", "message": "已回到校正基準", "timestamp": time.time()}
         self._persist_runtime_state()
         return self.snapshot()
 
@@ -382,6 +536,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/geometry":
             self._json(APP_STATE.update_geometry(data))
+            return
+        if parsed.path == "/api/settings":
+            self._json(APP_STATE.update_settings(data))
             return
         if parsed.path == "/api/mode":
             self._json(APP_STATE.set_mode(data.get("mode", "SIM"), bool(data.get("liveSend", False))))

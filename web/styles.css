@@ -301,6 +301,41 @@ input {
   gap: 14px;
 }
 
+.timing-row {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: 44px 96px 34px;
+  gap: 10px;
+  align-items: center;
+}
+
+.timing-row label {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--sub);
+}
+
+.timing-row input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--border-base);
+  background: var(--bg);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 8px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+
+.timing-hint {
+  margin-top: 8px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--sub);
+}
+
 .pose-row {
   display: grid;
   grid-template-columns: 44px 1fr 78px 34px;

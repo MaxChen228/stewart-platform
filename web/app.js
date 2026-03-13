@@ -177,6 +177,15 @@ async function onGeometryChange() {
   render();
 }
 
+async function onDurationChange(event) {
+  const seconds = Math.max(0.1, Number(event.target.value) || 1.8);
+  state = await api("/api/settings", {
+    method: "POST",
+    body: JSON.stringify({ motionDurationMs: Math.round(seconds * 1000) }),
+  });
+  render();
+}
+
 async function setMode(mode) {
   const liveSend = false;
   state = await api("/api/mode", {
@@ -222,7 +231,11 @@ async function applyPose() {
   }
   state = await api("/api/pose", {
     method: "POST",
-    body: JSON.stringify({ pose: state.pose, applyHardware: true }),
+    body: JSON.stringify({
+      pose: state.pose,
+      applyHardware: true,
+      durationMs: state.motion?.durationMs || 1800,
+    }),
   });
   render();
 }
@@ -252,6 +265,18 @@ function renderGeometry() {
     const input = document.querySelector(`[data-geometry="${key}"]`);
     input.value = state.geometry[key];
   });
+}
+
+function renderTiming() {
+  const input = $("#durationInput");
+  const durationMs = state.motion?.durationMs || 1800;
+  input.value = (durationMs / 1000).toFixed(1);
+  const hint = $("#timingHint");
+  if (state.motion?.active) {
+    hint.textContent = `移動中 ${Math.round((state.motion.progress || 0) * 100)}%`;
+  } else {
+    hint.textContent = "平滑進出，減少突兀變化";
+  }
 }
 
 function renderChips() {
@@ -567,6 +592,7 @@ function render() {
   renderGeometry();
   renderChips();
   renderHardwareAccess();
+  renderTiming();
   renderMotorStatus();
   renderFeedback();
   renderCanvas();
@@ -612,6 +638,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   });
   $("#calibrateBtn").addEventListener("click", () => sendCommand("calibrate"));
+  $("#durationInput").addEventListener("change", onDurationChange);
   $("#controlViewBtn").addEventListener("click", () => {
     viewMode = "control";
     $("#controlViewBtn").classList.add("is-active");

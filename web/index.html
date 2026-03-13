@@ -31,6 +31,12 @@
             <span class="micro-label">CONTROL</span>
           </div>
           <div id="poseControls" class="pose-stack"></div>
+          <div class="timing-row">
+            <label for="durationInput">TIME</label>
+            <input id="durationInput" type="number" min="0.1" step="0.1">
+            <span class="unit-tag">sec</span>
+          </div>
+          <div class="timing-hint" id="timingHint">平滑進出，減少突兀變化</div>
           <div class="button-row">
             <button class="action-button" id="homeBtn">Home</button>
             <button class="action-button primary" id="applyBtn">Apply Pose</button>
@@ -53,12 +59,12 @@
           <div class="motor-summary" id="motorSummary"></div>
           <div class="calibration-panel">
             <div class="calibration-copy">
-              <div class="micro-label">MANUAL CALIBRATION</div>
-              <p>先按 Disable All 手動調整，再做全部或單顆校正。</p>
+              <div class="micro-label">REFERENCE</div>
+              <p>先手動調整到你要的基準姿態，再按下校正；Home 會回到同一個基準。</p>
             </div>
             <div class="button-row">
               <button class="action-button" id="manualPrepBtn" data-command="disable_all">Prepare Manual</button>
-              <button class="action-button primary" id="calibrateBtn">Calibrate All</button>
+              <button class="action-button primary" id="calibrateBtn">Set Reference</button>
             </div>
             <div class="feedback-strip" id="feedbackStrip">等待操作</div>
           </div>
