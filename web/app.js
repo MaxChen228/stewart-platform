@@ -36,6 +36,10 @@ const basePoints = [];
 const crankPoints = [];
 const platformPoints = [];
 
+function hardwareAvailable() {
+  return Boolean(state?.hardware?.connected && !state?.hardware?.stale && state?.hardware?.ready);
+}
+
 function $(selector) {
   return document.querySelector(selector);
 }
@@ -131,6 +135,17 @@ async function setMode(mode) {
 }
 
 async function sendCommand(command, extra = {}) {
+  const hardwareCommands = new Set([
+    "enable_all",
+    "disable_all",
+    "stop",
+    "zero_motor",
+    "apply_pose",
+  ]);
+  if (hardwareCommands.has(command) && !hardwareAvailable()) {
+    render();
+    return;
+  }
   state = await api("/api/command", {
     method: "POST",
     body: JSON.stringify({ command, ...extra }),
@@ -139,6 +154,10 @@ async function sendCommand(command, extra = {}) {
 }
 
 async function applyPose() {
+  if (!hardwareAvailable()) {
+    render();
+    return;
+  }
   state = await api("/api/pose", {
     method: "POST",
     body: JSON.stringify({ pose: state.pose, applyHardware: true }),
@@ -186,6 +205,38 @@ function renderSession() {
   ].join("<br>");
 }
 
+function renderHardwareAccess() {
+  const available = hardwareAvailable();
+  const allowHardwareMode = available || state.mode === "SIM";
+
+  document.querySelectorAll(".chip-button").forEach((button) => {
+    if (button.dataset.mode === "SIM+HW") {
+      button.disabled = !available;
+      button.title = available ? "" : "Hardware offline";
+    }
+  });
+
+  $("#liveSendToggle").disabled = !available || state.mode !== "SIM+HW";
+  $("#applyBtn").disabled = !available;
+  $("#applyBtn").title = available ? "" : "Hardware offline";
+
+  document.querySelectorAll("[data-command]").forEach((button) => {
+    const command = button.dataset.command;
+    const needsHardware = ["enable_all", "disable_all", "stop"].includes(command);
+    if (needsHardware) {
+      button.disabled = !available;
+      button.title = available ? "" : "Hardware offline";
+    } else {
+      button.disabled = false;
+      button.title = "";
+    }
+  });
+
+  if (!allowHardwareMode && state.mode === "SIM+HW") {
+    $("#modeChip").textContent = "SIM";
+  }
+}
+
 function renderSolve() {
   $("#solveStatus").textContent = state.solution.reachable ? "REACHABLE" : "UNREACHABLE";
   $("#solveStatus").style.color = state.solution.reachable ? "var(--contra)" : "var(--dev)";
@@ -208,6 +259,7 @@ function renderSolve() {
 function renderHardware() {
   const matrix = $("#hardwareMatrix");
   matrix.innerHTML = "";
+  const available = hardwareAvailable();
   state.hardware.motors.forEach((motor, index) => {
     const target = state.solution.servo_angles_deg[index] || 0;
     const actual = motor.deg || 0;
@@ -222,6 +274,8 @@ function renderHardware() {
     card.appendChild(makeMetric("Hold", motor.enabled ? "ENABLED" : "DISABLED"));
     const zeroButton = el("button", "mini-action", "Zero");
     zeroButton.addEventListener("click", () => sendCommand("zero_motor", { motorId: motor.id }));
+    zeroButton.disabled = !available;
+    zeroButton.title = available ? "" : "Hardware offline";
     card.appendChild(zeroButton);
     matrix.appendChild(card);
   });
@@ -438,6 +492,7 @@ function render() {
   renderGeometry();
   renderChips();
   renderSession();
+  renderHardwareAccess();
   renderSolve();
   renderHardware();
   renderSequence();

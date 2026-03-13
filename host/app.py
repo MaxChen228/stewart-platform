@@ -95,6 +95,9 @@ class HardwareBridge:
                     self.telemetry["ready"] = bool(data["ready"])
                 if "motors" in data:
                     self.telemetry["motors"] = data["motors"]
+                    # If telemetry is flowing, the firmware is already alive even if
+                    # the one-shot {"ready":true} boot message was missed.
+                    self.telemetry["ready"] = True
             except (serial.SerialException, OSError):
                 with self.serial_lock:
                     try:

@@ -175,6 +175,13 @@ input {
   border-color: transparent;
 }
 
+.chip-button:disabled,
+.action-button:disabled,
+.matrix-card .mini-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .action-button.primary {
   background: var(--accent);
   border-color: transparent;
