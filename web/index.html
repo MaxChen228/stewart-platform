@@ -3,41 +3,327 @@
 <head>
 <meta charset="UTF-8">
 <title>Stewart Platform Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
 <style>
+:root {
+  --bg: #F8F7F4;
+  --surface: #FCFBFA;
+  --borderBase: #DBD6CD;
+  --borderL: #E8E4DB;
+  --ink: #2A2520;
+  --sub: #7A756C;
+  --inkLight: #5A5550;
+  --dev: #C0392B;
+  --contra: #4A6B8C;
+  --dual: #D35400;
+  --accent: #E6B300;
+
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+  --font-sans: 'Noto Sans TC', sans-serif;
+
+  --nav-height: 52px;
+  --sidebar-width: 440px;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #111; color: #eee; font-family: 'Courier New', monospace; overflow: hidden; }
-#hud { position: absolute; top: 10px; left: 10px; z-index: 1; font-size: 13px; line-height: 1.6; }
-#controls { position: absolute; top: 10px; right: 10px; z-index: 1; }
-button { background: #333; color: #fff; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 13px; margin: 2px; }
-button:hover { background: #555; }
-button:disabled { opacity: 0.3; cursor: default; }
-#status { color: #f44; }
-#status.ok { color: #4f4; }
-.ang { color: #8cf; }
-.pose { color: #fc8; }
+
+html { -webkit-font-smoothing: antialiased; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-weight: 300;
+  font-size: 13px;
+  line-height: 1.8;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--borderBase); }
+::-webkit-scrollbar-thumb:hover { background: var(--sub); }
+
+/* ===== Nav Bar ===== */
+.nav {
+  height: var(--nav-height);
+  background: var(--surface);
+  border-bottom: 1px solid var(--borderBase);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  z-index: 20;
+  flex-shrink: 0;
+}
+
+.nav-brand {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  color: var(--ink);
+}
+
+.nav-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nav-status.disconnected { color: var(--dev); }
+.nav-status.connected { color: var(--contra); }
+
+/* ===== Content ===== */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--borderBase);
+  box-shadow: 4px 0 24px rgba(0,0,0,0.03);
+  overflow-y: auto;
+  padding: 32px 24px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ===== Card ===== */
+.ui-card {
+  background: var(--surface);
+  border: 1px solid var(--borderBase);
+  border-radius: 4px;
+  padding: 20px;
+}
+
+.ui-card-title {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--borderL);
+}
+
+/* ===== Chips ===== */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border: 1px solid var(--borderBase);
+  border-radius: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.chip:hover { border-color: var(--sub); }
+
+.chip.active {
+  background: var(--contra);
+  border-color: transparent;
+  color: #fff;
+}
+
+.chip.danger {
+  border-color: var(--dev);
+  color: var(--dev);
+}
+.chip.danger:hover {
+  background: var(--dev);
+  color: #fff;
+}
+
+.chip:disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* ===== Matrix Grid ===== */
+.matrix-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--borderL);
+  border: 1px solid var(--borderL);
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  overflow: hidden;
+}
+
+.matrix-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.matrix-grid.cols-6 { grid-template-columns: repeat(6, 1fr); }
+
+.matrix-cell {
+  background: var(--surface);
+  padding: 8px 12px;
+  text-align: center;
+}
+
+.matrix-cell-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sub);
+  margin-bottom: 2px;
+}
+
+.matrix-cell-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== Inset Panel ===== */
+.inset-panel {
+  background: var(--bg);
+  border-left: 1px solid var(--borderBase);
+  border-right: 1px solid var(--borderBase);
+  border-radius: 2px;
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--inkLight);
+  line-height: 1.6;
+}
+
+/* ===== Chip Group ===== */
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ===== Dev Label ===== */
+.dev-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+}
+
+/* ===== Canvas Zone ===== */
+.canvas-zone {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+}
+.canvas-zone:active { cursor: grabbing; }
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 </style>
 </head>
 <body>
-<div id="hud">
-  <div id="status">Disconnected</div>
-  <div id="raw"></div>
-  <div id="angles"></div>
-  <div id="pose-display"></div>
-  <div id="fk-debug"></div>
-</div>
-<div id="controls">
-  <button id="btnConnect" onclick="connectSerial()" style="display:none">Connect</button>
-  <button onclick="sendCmd('Z')" disabled class="zbtn">Zero All</button>
-  <button onclick="sendCmd('D')" disabled class="zbtn" style="background:#811;border-color:#a33">Disable</button>
-  <button onclick="resetFK()">Reset FK</button>
-  <div style="margin-top:6px;display:flex;gap:2px;flex-wrap:wrap">
-    <button onclick="sendCmd('Z0')" disabled class="zbtn">M1</button>
-    <button onclick="sendCmd('Z1')" disabled class="zbtn">M2</button>
-    <button onclick="sendCmd('Z2')" disabled class="zbtn">M3</button>
-    <button onclick="sendCmd('Z3')" disabled class="zbtn">M4</button>
-    <button onclick="sendCmd('Z4')" disabled class="zbtn">M5</button>
-    <button onclick="sendCmd('Z5')" disabled class="zbtn">M6</button>
-  </div>
+
+<!-- Nav Bar -->
+<nav class="nav">
+  <div class="nav-brand">PHYSICS_LAB</div>
+  <div id="status" class="nav-status disconnected">DISCONNECTED</div>
+</nav>
+
+<!-- Content -->
+<div class="content">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+
+    <!-- Commands Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">Commands</div>
+      <div class="chip-group">
+        <button class="chip zbtn" onclick="sendCmd('Z')" disabled>Zero All</button>
+        <button class="chip danger zbtn" onclick="sendCmd('D')" disabled>Disable</button>
+        <button class="chip" onclick="resetFK()">Reset FK</button>
+      </div>
+    </div>
+
+    <!-- Individual Motors Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">Individual Zero</div>
+      <div class="chip-group">
+        <button class="chip zbtn" onclick="sendCmd('Z0')" disabled>M1</button>
+        <button class="chip zbtn" onclick="sendCmd('Z1')" disabled>M2</button>
+        <button class="chip zbtn" onclick="sendCmd('Z2')" disabled>M3</button>
+        <button class="chip zbtn" onclick="sendCmd('Z3')" disabled>M4</button>
+        <button class="chip zbtn" onclick="sendCmd('Z4')" disabled>M5</button>
+        <button class="chip zbtn" onclick="sendCmd('Z5')" disabled>M6</button>
+      </div>
+    </div>
+
+    <!-- Motor Angles Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">Motor Angles</div>
+      <div id="angles" class="matrix-grid cols-6">
+        <div class="matrix-cell" id="ang-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="ang-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="ang-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="ang-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="ang-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="ang-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
+      </div>
+    </div>
+
+    <!-- Pose Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">Platform Pose</div>
+      <div id="pose-display" class="matrix-grid cols-3">
+        <div class="matrix-cell" id="pose-x"><div class="matrix-cell-label">X</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-y"><div class="matrix-cell-label">Y</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-z"><div class="matrix-cell-label">Z</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Roll</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pitch</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-w"><div class="matrix-cell-label">Yaw</div><div class="matrix-cell-value">—</div></div>
+      </div>
+    </div>
+
+    <!-- FK Debug Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">Diagnostics</div>
+      <div id="fk-debug" class="inset-panel">—</div>
+      <div id="raw" class="inset-panel" style="margin-top: 8px;">—</div>
+    </div>
+
+  </aside>
+
+  <!-- Canvas -->
+  <div class="canvas-zone" id="canvas-zone"></div>
 </div>
 
 <script type="importmap">
@@ -71,7 +357,6 @@ const PLATFORM_ANGLES = [
   -PLATFORM_ANGLE/2-120, PLATFORM_ANGLE/2-120
 ];
 
-// 預算底座與平台附著點
 const B = [], P = [];
 for (let i = 0; i < 6; i++) {
   const ba = BASE_ANGLES[i] * DEG, pa = PLATFORM_ANGLES[i] * DEG;
@@ -79,14 +364,12 @@ for (let i = 0; i < 6; i++) {
   P.push(new THREE.Vector3(PLATFORM_RADIUS*Math.cos(pa), PLATFORM_RADIUS*Math.sin(pa), 0));
 }
 
-// 全部朝上 (90°) 時的平台高度：|Q-A|=UPPER_LEG, A在B正上方LOWER_LEG處
-// (Px-Bx)² + (Py-By)² + (z-LOWER_LEG)² = UPPER_LEG²
 const hDist2 = (P[0].x-B[0].x)**2 + (P[0].y-B[0].y)**2;
 const Z_LEGS_UP = LOWER_LEG + Math.sqrt(UPPER_LEG*UPPER_LEG - hDist2);
 console.log('Z_LEGS_UP =', Z_LEGS_UP.toFixed(1));
 
 // ===== 逆向運動學 =====
-function ik(pose) { // pose = [x,y,z,roll,pitch,yaw] degrees
+function ik(pose) {
   const [x,y,z,roll,pitch,yaw] = pose;
   const cr=Math.cos(roll*DEG), sr=Math.sin(roll*DEG);
   const cp=Math.cos(pitch*DEG), sp=Math.sin(pitch*DEG);
@@ -139,12 +422,10 @@ function gaussSolve(A, b) {
 
 // ===== FK（距離約束 Newton-Raphson，解析 Jacobian）=====
 let lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
-
 let fkStatus = '';
 
 function solveFK(measured) {
   const A = computeA(measured);
-
   if (lastPose.some(v => !isFinite(v))) lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
   let pose = [...lastPose];
   let finalIter = 0, finalErr = 999;
@@ -154,14 +435,11 @@ function solveFK(measured) {
     const cr = Math.cos(roll*DEG), sr = Math.sin(roll*DEG);
     const cp = Math.cos(pitch*DEG), sp = Math.sin(pitch*DEG);
     const cy2 = Math.cos(yaw*DEG), sy2 = Math.sin(yaw*DEG);
-
-    // R = Rz·Ry·Rx
     const R = [
       [cy2*cp, cy2*sp*sr-sy2*cr, cy2*sp*cr+sy2*sr],
       [sy2*cp, sy2*sp*sr+cy2*cr, sy2*sp*cr-cy2*sr],
       [-sp, cp*sr, cp*cr]
     ];
-    // ∂R/∂roll, ∂R/∂pitch, ∂R/∂yaw (w.r.t. radians)
     const dRr = [
       [0, cy2*sp*cr+sy2*sr, -cy2*sp*sr+sy2*cr],
       [0, sy2*sp*cr-cy2*sr, -sy2*sp*sr-cy2*cr],
@@ -181,22 +459,14 @@ function solveFK(measured) {
     const f = [], J = [];
     for (let i = 0; i < 6; i++) {
       const px = P[i].x, py = P[i].y;
-      // Q = R·P + T  (P.z = 0)
       const qx = R[0][0]*px + R[0][1]*py + x;
       const qy = R[1][0]*px + R[1][1]*py + y;
       const qz = R[2][0]*px + R[2][1]*py + z;
-      // v = Q - A (upper leg vector)
       const vx = qx-A[i].x, vy = qy-A[i].y, vz = qz-A[i].z;
-
-      // f_i = |v|² - UPPER²
       f.push(vx*vx + vy*vy + vz*vz - UPPER_LEG*UPPER_LEG);
-
-      // ∂Q/∂(roll,pitch,yaw) = dR*P
       const drx = dRr[0][0]*px+dRr[0][1]*py, dry = dRr[1][0]*px+dRr[1][1]*py, drz = dRr[2][0]*px+dRr[2][1]*py;
       const dpx2 = dRp[0][0]*px+dRp[0][1]*py, dpy2 = dRp[1][0]*px+dRp[1][1]*py, dpz2 = dRp[2][0]*px+dRp[2][1]*py;
       const dyx = dRyw[0][0]*px+dRyw[0][1]*py, dyy = dRyw[1][0]*px+dRyw[1][1]*py;
-
-      // ∂f/∂[x,y,z] = 2v;  ∂f/∂angle_deg = 2(v·dR*P)·DEG
       J.push([
         2*vx, 2*vy, 2*vz,
         2*(vx*drx+vy*dry+vz*drz)*DEG,
@@ -255,26 +525,27 @@ function computeA(angles) {
 }
 
 // ===== Three.js 場景 =====
+const canvasZone = document.getElementById('canvas-zone');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x111111);
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 1, 2000);
+scene.background = new THREE.Color(0xF8F7F4);
+const camera = new THREE.PerspectiveCamera(50, canvasZone.clientWidth/canvasZone.clientHeight, 1, 2000);
 camera.up.set(0,0,1);
 camera.position.set(300, -300, 250);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+renderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
+canvasZone.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 60);
 controls.update();
 
 // 燈光
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const dl = new THREE.DirectionalLight(0xffffff, 0.6);
 dl.position.set(200, -200, 300);
 scene.add(dl);
 
-// 地面網格
-const grid = new THREE.GridHelper(400, 20, 0x333333, 0x222222);
+// 地面網格 — warm neutral tones
+const grid = new THREE.GridHelper(400, 20, 0xDBD6CD, 0xE8E4DB);
 grid.rotation.x = Math.PI/2;
 scene.add(grid);
 
@@ -284,7 +555,7 @@ function makeSphere(color, r=4) {
   scene.add(m);
   return m;
 }
-function makeLine(color) {
+function makeLine(color, width=1) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0,0,0,0],3));
   const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color}));
@@ -300,11 +571,11 @@ function updateLine(line, a, b) {
 const bSpheres=[], aSpheres=[], qSpheres=[];
 const lowerLines=[], upperLines=[];
 for (let i=0;i<6;i++) {
-  bSpheres.push(makeSphere(0xff4444, 5));
-  aSpheres.push(makeSphere(0xffcc00, 4));
-  qSpheres.push(makeSphere(0x44aaff, 4));
-  lowerLines.push(makeLine(0x4488ff));
-  upperLines.push(makeLine(0x44ff88));
+  bSpheres.push(makeSphere(0xC0392B, 5));   // dev red
+  aSpheres.push(makeSphere(0xE6B300, 4));   // accent gold
+  qSpheres.push(makeSphere(0x4A6B8C, 4));   // contra blue
+  lowerLines.push(makeLine(0x4A6B8C));       // contra
+  upperLines.push(makeLine(0xD35400));       // dual
 }
 
 // 底座面
@@ -314,7 +585,7 @@ const baseMesh = (() => {
   for(let i=1;i<6;i++) shape.lineTo(B[i].x, B[i].y);
   shape.closePath();
   const geo = new THREE.ShapeGeometry(shape);
-  const mat = new THREE.MeshPhongMaterial({color:0x444444, transparent:true, opacity:0.5, side:THREE.DoubleSide});
+  const mat = new THREE.MeshPhongMaterial({color:0xDBD6CD, transparent:true, opacity:0.5, side:THREE.DoubleSide});
   const m = new THREE.Mesh(geo, mat);
   scene.add(m);
   return m;
@@ -323,7 +594,7 @@ const baseMesh = (() => {
 // 平台面
 const platGeo = new THREE.BufferGeometry();
 platGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
-const platMesh = new THREE.Mesh(platGeo, new THREE.MeshPhongMaterial({color:0xff4444, transparent:true, opacity:0.4, side:THREE.DoubleSide}));
+const platMesh = new THREE.Mesh(platGeo, new THREE.MeshPhongMaterial({color:0xC0392B, transparent:true, opacity:0.35, side:THREE.DoubleSide}));
 scene.add(platMesh);
 
 function updatePlatform(Q) {
@@ -365,30 +636,41 @@ function updateViz(motorAngles) {
   }
   updatePlatform(Q);
 
-  // HUD
-  document.getElementById('angles').innerHTML = '<span class="ang">Angles: ' +
-    motorAngles.map((a,i)=>`M${i+1}:${a.toFixed(1)}°`).join(' ') + '</span>';
-  document.getElementById('pose-display').innerHTML = '<span class="pose">' +
-    `x:${x.toFixed(1)} y:${y.toFixed(1)} z:${z.toFixed(1)} R:${roll.toFixed(1)} P:${pitch.toFixed(1)} Y:${yaw.toFixed(1)}` + '</span>';
-  document.getElementById('fk-debug').innerHTML =
-    `<span style="color:${fkStatus.startsWith('FK OK')?'#4f4':'#f44'}">${fkStatus}</span>`;
+  // Update matrix cells
+  for(let i=0;i<6;i++) {
+    const cell = document.querySelector(`#ang-${i} .matrix-cell-value`);
+    if(cell) cell.textContent = motorAngles[i].toFixed(1) + '°';
+  }
+
+  const poseFields = [
+    ['pose-x', x], ['pose-y', y], ['pose-z', z],
+    ['pose-r', roll], ['pose-p', pitch], ['pose-w', yaw]
+  ];
+  for(const [id, val] of poseFields) {
+    const cell = document.querySelector(`#${id} .matrix-cell-value`);
+    if(cell) cell.textContent = val.toFixed(1);
+  }
+
+  document.getElementById('fk-debug').textContent = fkStatus;
+  document.getElementById('fk-debug').style.color =
+    fkStatus.startsWith('FK OK') ? 'var(--contra)' : 'var(--dev)';
 }
 
 // 初始顯示中立
 updateViz(ik([0,0,NEUTRAL_Z,0,0,0]));
 
-// Self-test: FK(IK(pitch=10°)) 應回到 pitch≈10°
+// Self-test
 {
   const testPose = [0, 0, NEUTRAL_Z, 0, 10, 0];
   const testAngles = ik(testPose);
-  lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0]; // self-test 從 legs-up 開始
+  lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
   const recovered = solveFK(testAngles);
   console.log('FK self-test:');
   console.log('  input pose:', testPose);
   console.log('  IK angles:', testAngles.map(a=>a.toFixed(2)));
   console.log('  FK recovered:', recovered.map(v=>v.toFixed(2)));
   console.log('  status:', fkStatus);
-  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0]; // 重置
+  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
 }
 
 // ===== 動畫迴圈 =====
@@ -399,9 +681,9 @@ function animate() {
 animate();
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.aspect = canvasZone.clientWidth/canvasZone.clientHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
 });
 
 // ===== WebSocket =====
@@ -412,8 +694,8 @@ function connectWS() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
-    document.getElementById('status').textContent = 'Connected';
-    document.getElementById('status').className = 'ok';
+    document.getElementById('status').textContent = 'CONNECTED';
+    document.getElementById('status').className = 'nav-status connected';
     document.querySelectorAll('.zbtn').forEach(b => b.disabled = false);
   };
 
@@ -422,12 +704,12 @@ function connectWS() {
       const data = JSON.parse(e.data);
       if (data.a) updateViz(data.a);
       if (data.r) {
-        document.getElementById('raw').innerHTML =
-          `<span style="color:#888">Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}</span>`;
+        document.getElementById('raw').textContent =
+          `Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}`;
       }
       if (data.status) {
-        document.getElementById('status').textContent = 'Status: ' + data.status;
-        document.getElementById('status').className = 'ok';
+        document.getElementById('status').textContent = data.status.toUpperCase();
+        document.getElementById('status').className = 'nav-status connected';
         if (data.status.includes('zeroed')) {
           lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
         }
@@ -436,8 +718,8 @@ function connectWS() {
   };
 
   ws.onclose = () => {
-    document.getElementById('status').textContent = 'Disconnected — reconnecting...';
-    document.getElementById('status').className = '';
+    document.getElementById('status').textContent = 'DISCONNECTED';
+    document.getElementById('status').className = 'nav-status disconnected';
     document.querySelectorAll('.zbtn').forEach(b => b.disabled = true);
     setTimeout(connectWS, 1000);
   };
@@ -450,6 +732,8 @@ window.sendCmd = function(cmd) {
 window.resetFK = function() {
   lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
   fkStatus = 'FK reset';
+  document.getElementById('fk-debug').textContent = fkStatus;
+  document.getElementById('fk-debug').style.color = 'var(--sub)';
 };
 
 window.connectSerial = connectWS;
