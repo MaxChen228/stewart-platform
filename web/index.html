@@ -29,6 +29,7 @@ button:disabled { opacity: 0.3; cursor: default; }
   <button id="btnConnect" onclick="connectSerial()" style="display:none">Connect</button>
   <button onclick="sendCmd('Z')" disabled class="zbtn">Zero All</button>
   <button onclick="sendCmd('D')" disabled class="zbtn" style="background:#811;border-color:#a33">Disable</button>
+  <button onclick="resetFK()">Reset FK</button>
   <div style="margin-top:6px;display:flex;gap:2px;flex-wrap:wrap">
     <button onclick="sendCmd('Z0')" disabled class="zbtn">M1</button>
     <button onclick="sendCmd('Z1')" disabled class="zbtn">M2</button>
@@ -446,7 +447,11 @@ window.sendCmd = function(cmd) {
   if (ws && ws.readyState === 1) ws.send(cmd);
 };
 
-// 不再需要手動按 Connect
+window.resetFK = function() {
+  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+  fkStatus = 'FK reset';
+};
+
 window.connectSerial = connectWS;
 connectWS();
 </script>
