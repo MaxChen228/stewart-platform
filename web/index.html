@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>Stewart Platform Monitor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; color: #eee; font-family: 'Courier New', monospace; overflow: hidden; }
+#hud { position: absolute; top: 10px; left: 10px; z-index: 1; font-size: 13px; line-height: 1.6; }
+#controls { position: absolute; top: 10px; right: 10px; z-index: 1; }
+button { background: #333; color: #fff; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 13px; margin: 2px; }
+button:hover { background: #555; }
+button:disabled { opacity: 0.3; cursor: default; }
+#status { color: #f44; }
+#status.ok { color: #4f4; }
+.ang { color: #8cf; }
+.pose { color: #fc8; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="status">Disconnected</div>
+  <div id="raw"></div>
+  <div id="angles"></div>
+  <div id="pose-display"></div>
+  <div id="fk-debug"></div>
+</div>
+<div id="controls">
+  <button id="btnConnect" onclick="connectSerial()">Connect</button>
+  <button onclick="sendCmd('Z')" disabled class="zbtn">Zero All</button>
+  <div style="margin-top:6px;display:flex;gap:2px;flex-wrap:wrap">
+    <button onclick="sendCmd('Z0')" disabled class="zbtn">M1</button>
+    <button onclick="sendCmd('Z1')" disabled class="zbtn">M2</button>
+    <button onclick="sendCmd('Z2')" disabled class="zbtn">M3</button>
+    <button onclick="sendCmd('Z3')" disabled class="zbtn">M4</button>
+    <button onclick="sendCmd('Z4')" disabled class="zbtn">M5</button>
+    <button onclick="sendCmd('Z5')" disabled class="zbtn">M6</button>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ===== 幾何參數（與 C++ 一致）=====
+const BASE_RADIUS = 152, BASE_ANGLE = 18.92;
+const PLATFORM_RADIUS = 103, PLATFORM_ANGLE = 28.07;
+const LOWER_LEG = 65, UPPER_LEG = 165;
+const NEUTRAL_Z = 105;
+const DEG = Math.PI / 180;
+const MOTOR_PLANE_ANGLE = [-90, 90, 30, 210, -210, -30];
+
+const BASE_ANGLES = [
+  -BASE_ANGLE/2, BASE_ANGLE/2,
+  -BASE_ANGLE/2+120, BASE_ANGLE/2+120,
+  -BASE_ANGLE/2-120, BASE_ANGLE/2-120
+];
+const PLATFORM_ANGLES = [
+  -PLATFORM_ANGLE/2, PLATFORM_ANGLE/2,
+  -PLATFORM_ANGLE/2+120, PLATFORM_ANGLE/2+120,
+  -PLATFORM_ANGLE/2-120, PLATFORM_ANGLE/2-120
+];
+
+// 預算底座與平台附著點
+const B = [], P = [];
+for (let i = 0; i < 6; i++) {
+  const ba = BASE_ANGLES[i] * DEG, pa = PLATFORM_ANGLES[i] * DEG;
+  B.push(new THREE.Vector3(BASE_RADIUS*Math.cos(ba), BASE_RADIUS*Math.sin(ba), 0));
+  P.push(new THREE.Vector3(PLATFORM_RADIUS*Math.cos(pa), PLATFORM_RADIUS*Math.sin(pa), 0));
+}
+
+// 全部朝上 (90°) 時的平台高度：|Q-A|=UPPER_LEG, A在B正上方LOWER_LEG處
+// (Px-Bx)² + (Py-By)² + (z-LOWER_LEG)² = UPPER_LEG²
+const hDist2 = (P[0].x-B[0].x)**2 + (P[0].y-B[0].y)**2;
+const Z_LEGS_UP = LOWER_LEG + Math.sqrt(UPPER_LEG*UPPER_LEG - hDist2);
+console.log('Z_LEGS_UP =', Z_LEGS_UP.toFixed(1));
+
+// ===== 逆向運動學 =====
+function ik(pose) { // pose = [x,y,z,roll,pitch,yaw] degrees
+  const [x,y,z,roll,pitch,yaw] = pose;
+  const cr=Math.cos(roll*DEG), sr=Math.sin(roll*DEG);
+  const cp=Math.cos(pitch*DEG), sp=Math.sin(pitch*DEG);
+  const cy=Math.cos(yaw*DEG), sy=Math.sin(yaw*DEG);
+  const R = [
+    [cy*cp, cy*sp*sr-sy*cr, cy*sp*cr+sy*sr],
+    [sy*cp, sy*sp*sr+cy*cr, sy*sp*cr-cy*sr],
+    [-sp, cp*sr, cp*cr]
+  ];
+  const angles = [];
+  for (let i = 0; i < 6; i++) {
+    const px=P[i].x, py=P[i].y, pz=P[i].z;
+    const qx = R[0][0]*px + R[0][1]*py + R[0][2]*pz + x;
+    const qy = R[1][0]*px + R[1][1]*py + R[1][2]*pz + y;
+    const qz = R[2][0]*px + R[2][1]*py + R[2][2]*pz + z;
+    const dx=qx-B[i].x, dy=qy-B[i].y, dz=qz-B[i].z;
+    const L = dx*dx+dy*dy+dz*dz-(UPPER_LEG*UPPER_LEG-LOWER_LEG*LOWER_LEG);
+    const M = 2*LOWER_LEG*dz;
+    const th = MOTOR_PLANE_ANGLE[i]*DEG;
+    const N = 2*LOWER_LEG*(Math.cos(th)*dx + Math.sin(th)*dy);
+    const d = Math.sqrt(M*M+N*N);
+    const sa = Math.max(-1, Math.min(1, L/d));
+    angles.push((Math.asin(sa) - Math.atan2(N,M)) / DEG);
+  }
+  return angles;
+}
+
+// ===== 高斯消去 6×6 =====
+function gaussSolve(A, b) {
+  const n = 6;
+  const M = A.map((row,i) => [...row, b[i]]);
+  for (let i = 0; i < n; i++) {
+    let mx = i;
+    for (let k=i+1;k<n;k++) if(Math.abs(M[k][i])>Math.abs(M[mx][i])) mx=k;
+    [M[i],M[mx]]=[M[mx],M[i]];
+    if (Math.abs(M[i][i])<1e-10) return null;
+    for (let k=i+1;k<n;k++) {
+      const c=M[k][i]/M[i][i];
+      for(let j=i;j<=n;j++) M[k][j]-=c*M[i][j];
+    }
+  }
+  const x=new Array(n);
+  for(let i=n-1;i>=0;i--) {
+    x[i]=M[i][n];
+    for(let j=i+1;j<n;j++) x[i]-=M[i][j]*x[j];
+    x[i]/=M[i][i];
+  }
+  return x;
+}
+
+// ===== FK（距離約束 Newton-Raphson，解析 Jacobian）=====
+let lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+
+let fkStatus = '';
+
+function solveFK(measured) {
+  const A = computeA(measured);
+
+  if (lastPose.some(v => !isFinite(v))) lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+  let pose = [...lastPose];
+  let finalIter = 0, finalErr = 999;
+
+  for (let iter = 0; iter < 50; iter++) {
+    const [x, y, z, roll, pitch, yaw] = pose;
+    const cr = Math.cos(roll*DEG), sr = Math.sin(roll*DEG);
+    const cp = Math.cos(pitch*DEG), sp = Math.sin(pitch*DEG);
+    const cy2 = Math.cos(yaw*DEG), sy2 = Math.sin(yaw*DEG);
+
+    // R = Rz·Ry·Rx
+    const R = [
+      [cy2*cp, cy2*sp*sr-sy2*cr, cy2*sp*cr+sy2*sr],
+      [sy2*cp, sy2*sp*sr+cy2*cr, sy2*sp*cr-cy2*sr],
+      [-sp, cp*sr, cp*cr]
+    ];
+    // ∂R/∂roll, ∂R/∂pitch, ∂R/∂yaw (w.r.t. radians)
+    const dRr = [
+      [0, cy2*sp*cr+sy2*sr, -cy2*sp*sr+sy2*cr],
+      [0, sy2*sp*cr-cy2*sr, -sy2*sp*sr-cy2*cr],
+      [0, cp*cr, -cp*sr]
+    ];
+    const dRp = [
+      [-cy2*sp, cy2*cp*sr, cy2*cp*cr],
+      [-sy2*sp, sy2*cp*sr, sy2*cp*cr],
+      [-cp, -sp*sr, -sp*cr]
+    ];
+    const dRyw = [
+      [-sy2*cp, -sy2*sp*sr-cy2*cr, -sy2*sp*cr+cy2*sr],
+      [cy2*cp, cy2*sp*sr-sy2*cr, cy2*sp*cr+sy2*sr],
+      [0, 0, 0]
+    ];
+
+    const f = [], J = [];
+    for (let i = 0; i < 6; i++) {
+      const px = P[i].x, py = P[i].y;
+      // Q = R·P + T  (P.z = 0)
+      const qx = R[0][0]*px + R[0][1]*py + x;
+      const qy = R[1][0]*px + R[1][1]*py + y;
+      const qz = R[2][0]*px + R[2][1]*py + z;
+      // v = Q - A (upper leg vector)
+      const vx = qx-A[i].x, vy = qy-A[i].y, vz = qz-A[i].z;
+
+      // f_i = |v|² - UPPER²
+      f.push(vx*vx + vy*vy + vz*vz - UPPER_LEG*UPPER_LEG);
+
+      // ∂Q/∂(roll,pitch,yaw) = dR*P
+      const drx = dRr[0][0]*px+dRr[0][1]*py, dry = dRr[1][0]*px+dRr[1][1]*py, drz = dRr[2][0]*px+dRr[2][1]*py;
+      const dpx2 = dRp[0][0]*px+dRp[0][1]*py, dpy2 = dRp[1][0]*px+dRp[1][1]*py, dpz2 = dRp[2][0]*px+dRp[2][1]*py;
+      const dyx = dRyw[0][0]*px+dRyw[0][1]*py, dyy = dRyw[1][0]*px+dRyw[1][1]*py;
+
+      // ∂f/∂[x,y,z] = 2v;  ∂f/∂angle_deg = 2(v·dR*P)·DEG
+      J.push([
+        2*vx, 2*vy, 2*vz,
+        2*(vx*drx+vy*dry+vz*drz)*DEG,
+        2*(vx*dpx2+vy*dpy2+vz*dpz2)*DEG,
+        2*(vx*dyx+vy*dyy)*DEG
+      ]);
+    }
+
+    const maxF = Math.max(...f.map(Math.abs));
+    finalIter = iter; finalErr = maxF;
+
+    if (maxF < 1.0) {
+      fkStatus = `FK OK iter=${iter} err=${maxF.toFixed(3)}`;
+      lastPose = [...pose];
+      return pose;
+    }
+
+    const neg_f = f.map(v => -v);
+    const dp = gaussSolve(J, neg_f);
+    if (!dp || dp.some(v => !isFinite(v))) {
+      fkStatus = `FK FAIL singular iter=${iter} err=${maxF.toFixed(1)}`;
+      break;
+    }
+
+    const stepLimit = [30, 30, 30, 15, 15, 15];
+    for (let j = 0; j < 6; j++) {
+      dp[j] = Math.max(-stepLimit[j], Math.min(stepLimit[j], dp[j]));
+      pose[j] += dp[j];
+    }
+
+    if (pose.some(v => !isFinite(v))) {
+      fkStatus = `FK FAIL NaN iter=${iter}`;
+      pose = [...lastPose];
+      break;
+    }
+  }
+
+  if (finalErr > 1.0) {
+    fkStatus = `FK NO CONVERGE iter=${finalIter} err=${finalErr.toFixed(1)}`;
+  }
+
+  if (pose.every(v => isFinite(v))) lastPose = [...pose];
+  return lastPose;
+}
+
+// ===== 從馬達角度算 A 點 =====
+function computeA(angles) {
+  return angles.map((ang, i) => {
+    const a = ang * DEG, th = MOTOR_PLANE_ANGLE[i] * DEG;
+    return new THREE.Vector3(
+      LOWER_LEG*Math.cos(a)*Math.cos(th) + B[i].x,
+      LOWER_LEG*Math.cos(a)*Math.sin(th) + B[i].y,
+      LOWER_LEG*Math.sin(a) + B[i].z
+    );
+  });
+}
+
+// ===== Three.js 場景 =====
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 1, 2000);
+camera.up.set(0,0,1);
+camera.position.set(300, -300, 250);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 60);
+controls.update();
+
+// 燈光
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+dl.position.set(200, -200, 300);
+scene.add(dl);
+
+// 地面網格
+const grid = new THREE.GridHelper(400, 20, 0x333333, 0x222222);
+grid.rotation.x = Math.PI/2;
+scene.add(grid);
+
+// 建立幾何物件
+function makeSphere(color, r=4) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r,8,8), new THREE.MeshPhongMaterial({color}));
+  scene.add(m);
+  return m;
+}
+function makeLine(color) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0,0,0,0],3));
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color}));
+  scene.add(line);
+  return line;
+}
+function updateLine(line, a, b) {
+  const p = line.geometry.attributes.position.array;
+  p[0]=a.x;p[1]=a.y;p[2]=a.z; p[3]=b.x;p[4]=b.y;p[5]=b.z;
+  line.geometry.attributes.position.needsUpdate = true;
+}
+
+const bSpheres=[], aSpheres=[], qSpheres=[];
+const lowerLines=[], upperLines=[];
+for (let i=0;i<6;i++) {
+  bSpheres.push(makeSphere(0xff4444, 5));
+  aSpheres.push(makeSphere(0xffcc00, 4));
+  qSpheres.push(makeSphere(0x44aaff, 4));
+  lowerLines.push(makeLine(0x4488ff));
+  upperLines.push(makeLine(0x44ff88));
+}
+
+// 底座面
+const baseMesh = (() => {
+  const shape = new THREE.Shape();
+  shape.moveTo(B[0].x, B[0].y);
+  for(let i=1;i<6;i++) shape.lineTo(B[i].x, B[i].y);
+  shape.closePath();
+  const geo = new THREE.ShapeGeometry(shape);
+  const mat = new THREE.MeshPhongMaterial({color:0x444444, transparent:true, opacity:0.5, side:THREE.DoubleSide});
+  const m = new THREE.Mesh(geo, mat);
+  scene.add(m);
+  return m;
+})();
+
+// 平台面
+const platGeo = new THREE.BufferGeometry();
+platGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
+const platMesh = new THREE.Mesh(platGeo, new THREE.MeshPhongMaterial({color:0xff4444, transparent:true, opacity:0.4, side:THREE.DoubleSide}));
+scene.add(platMesh);
+
+function updatePlatform(Q) {
+  const p = platGeo.attributes.position.array;
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<6;i++){cx+=Q[i].x;cy+=Q[i].y;cz+=Q[i].z;}
+  cx/=6;cy/=6;cz/=6;
+  for(let i=0;i<6;i++){
+    const j=(i+1)%6, k=i*9;
+    p[k]=cx;p[k+1]=cy;p[k+2]=cz;
+    p[k+3]=Q[i].x;p[k+4]=Q[i].y;p[k+5]=Q[i].z;
+    p[k+6]=Q[j].x;p[k+7]=Q[j].y;p[k+8]=Q[j].z;
+  }
+  platGeo.attributes.position.needsUpdate = true;
+  platGeo.computeVertexNormals();
+}
+
+// ===== 更新視覺化 =====
+function updateViz(motorAngles) {
+  const Apt = computeA(motorAngles);
+  const pose = solveFK(motorAngles);
+  const [x,y,z,roll,pitch,yaw] = pose;
+  const cr=Math.cos(roll*DEG),sr=Math.sin(roll*DEG);
+  const cp=Math.cos(pitch*DEG),sp=Math.sin(pitch*DEG);
+  const cy2=Math.cos(yaw*DEG),sy2=Math.sin(yaw*DEG);
+  const R=[[cy2*cp,cy2*sp*sr-sy2*cr,cy2*sp*cr+sy2*sr],[sy2*cp,sy2*sp*sr+cy2*cr,sy2*sp*cr-cy2*sr],[-sp,cp*sr,cp*cr]];
+  const Q = P.map(p => new THREE.Vector3(
+    R[0][0]*p.x+R[0][1]*p.y+R[0][2]*p.z+x,
+    R[1][0]*p.x+R[1][1]*p.y+R[1][2]*p.z+y,
+    R[2][0]*p.x+R[2][1]*p.y+R[2][2]*p.z+z
+  ));
+
+  for(let i=0;i<6;i++){
+    bSpheres[i].position.copy(B[i]);
+    aSpheres[i].position.copy(Apt[i]);
+    qSpheres[i].position.copy(Q[i]);
+    updateLine(lowerLines[i], B[i], Apt[i]);
+    updateLine(upperLines[i], Apt[i], Q[i]);
+  }
+  updatePlatform(Q);
+
+  // HUD
+  document.getElementById('angles').innerHTML = '<span class="ang">Angles: ' +
+    motorAngles.map((a,i)=>`M${i+1}:${a.toFixed(1)}°`).join(' ') + '</span>';
+  document.getElementById('pose-display').innerHTML = '<span class="pose">' +
+    `x:${x.toFixed(1)} y:${y.toFixed(1)} z:${z.toFixed(1)} R:${roll.toFixed(1)} P:${pitch.toFixed(1)} Y:${yaw.toFixed(1)}` + '</span>';
+  document.getElementById('fk-debug').innerHTML =
+    `<span style="color:${fkStatus.startsWith('FK OK')?'#4f4':'#f44'}">${fkStatus}</span>`;
+}
+
+// 初始顯示中立
+updateViz(ik([0,0,NEUTRAL_Z,0,0,0]));
+
+// Self-test: FK(IK(pitch=10°)) 應回到 pitch≈10°
+{
+  const testPose = [0, 0, NEUTRAL_Z, 0, 10, 0];
+  const testAngles = ik(testPose);
+  lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0]; // self-test 從 legs-up 開始
+  const recovered = solveFK(testAngles);
+  console.log('FK self-test:');
+  console.log('  input pose:', testPose);
+  console.log('  IK angles:', testAngles.map(a=>a.toFixed(2)));
+  console.log('  FK recovered:', recovered.map(v=>v.toFixed(2)));
+  console.log('  status:', fkStatus);
+  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0]; // 重置
+}
+
+// ===== 動畫迴圈 =====
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ===== Web Serial =====
+let port = null, reader = null, writer = null;
+let lineBuf = '';
+
+window.connectSerial = async function() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    document.getElementById('status').textContent = 'Connected';
+    document.getElementById('status').className = 'ok';
+    document.querySelectorAll('.zbtn').forEach(b => b.disabled = false);
+    readLoop();
+  } catch(e) {
+    document.getElementById('status').textContent = 'Error: ' + e.message;
+  }
+};
+
+window.sendCmd = async function(cmd) {
+  if (writer) {
+    await writer.write(new TextEncoder().encode(cmd + '\n'));
+  }
+};
+
+async function readLoop() {
+  const decoder = new TextDecoderStream();
+  const readableStreamClosed = port.readable.pipeTo(decoder.writable);
+  reader = decoder.readable.getReader();
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      lineBuf += value;
+      const lines = lineBuf.split('\n');
+      lineBuf = lines.pop();
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line.trim());
+          if (data.a) updateViz(data.a);
+          if (data.r) {
+            document.getElementById('raw').innerHTML =
+              `<span style="color:#888">Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}</span>`;
+          }
+          if (data.status) {
+            document.getElementById('status').textContent = 'Status: ' + data.status;
+            document.getElementById('status').className = 'ok';
+            if (data.status.includes('zeroed')) {
+              lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
+            }
+          }
+        } catch(e) {}
+      }
+    }
+  } catch(e) {
+    document.getElementById('status').textContent = 'Disconnected';
+    document.getElementById('status').className = '';
+  }
+}
+</script>
+</body>
+</html>
