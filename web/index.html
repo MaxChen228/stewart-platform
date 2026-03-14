@@ -249,6 +249,23 @@ canvas {
   width: 100%;
   height: 100%;
 }
+
+/* ===== 3D Motor Labels ===== */
+.motor-label {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--borderBase);
+  border-radius: 3px;
+  padding: 1px 5px;
+  pointer-events: none;
+  white-space: nowrap;
+  text-shadow: none;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
 </style>
 </head>
 <body>
@@ -337,6 +354,7 @@ canvas {
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
 // ===== 幾何參數（與 C++ 一致）=====
 const BASE_RADIUS = 152, BASE_ANGLE = 18.92;
@@ -534,6 +552,13 @@ camera.position.set(300, -300, 250);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
 canvasZone.appendChild(renderer.domElement);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
+labelRenderer.domElement.style.position = 'absolute';
+labelRenderer.domElement.style.top = '0';
+labelRenderer.domElement.style.left = '0';
+labelRenderer.domElement.style.pointerEvents = 'none';
+canvasZone.appendChild(labelRenderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 60);
 controls.update();
@@ -576,6 +601,19 @@ for (let i=0;i<6;i++) {
   qSpheres.push(makeSphere(0x4A6B8C, 4));   // contra blue
   lowerLines.push(makeLine(0x4A6B8C));       // contra
   upperLines.push(makeLine(0xD35400));       // dual
+}
+
+// 馬達編號標籤 (CSS2D screen-space)
+const motorLabels = [];
+for (let i = 0; i < 6; i++) {
+  const div = document.createElement('div');
+  div.className = 'motor-label';
+  div.textContent = `M${i+1}`;
+  const label = new CSS2DObject(div);
+  label.position.copy(B[i]);
+  label.position.z = -12;
+  scene.add(label);
+  motorLabels.push(label);
 }
 
 // 底座面
@@ -677,6 +715,7 @@ updateViz(ik([0,0,NEUTRAL_Z,0,0,0]));
 function animate() {
   requestAnimationFrame(animate);
   renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
 }
 animate();
 
@@ -684,6 +723,7 @@ window.addEventListener('resize', () => {
   camera.aspect = canvasZone.clientWidth/canvasZone.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
+  labelRenderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
 });
 
 // ===== WebSocket =====
