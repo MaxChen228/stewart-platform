@@ -97,4 +97,38 @@ public:
             setEnable(MOTOR_ADDR[i], false);
         }
     }
+
+    // 速度控制 (0xF6)
+    // speed: 0-3000 RPM, dir: 0=CCW 1=CW, acc: 0-255 (0=instant)
+    void setSpeed(uint8_t motorId, uint16_t speed, uint8_t dir, uint8_t acc) {
+        if (speed > 3000) speed = 3000;
+        uint8_t cmd[5];
+        cmd[0] = 0xF6;
+        cmd[1] = (dir ? 0x80 : 0x00) | ((speed >> 8) & 0x0F);
+        cmd[2] = speed & 0xFF;
+        cmd[3] = acc;
+        cmd[4] = (motorId + cmd[0] + cmd[1] + cmd[2] + cmd[3]) & 0xFF;
+        can.sendMsgBuf(motorId, 0, 5, cmd);
+    }
+
+    // 停止所有馬達速度模式
+    void stopAllSpeed() {
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            setSpeed(MOTOR_ADDR[i], 0, 0, 0);
+        }
+    }
+
+    // 緊急停止 (0xF7)
+    void emergencyStop(uint8_t motorId) {
+        uint8_t cmd[2];
+        cmd[0] = 0xF7;
+        cmd[1] = (motorId + 0xF7) & 0xFF;
+        can.sendMsgBuf(motorId, 0, 2, cmd);
+    }
+
+    void emergencyStopAll() {
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            emergencyStop(MOTOR_ADDR[i]);
+        }
+    }
 };

@@ -22,6 +22,19 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 釋放序列埠（供韌體上傳用，暫停 30 秒重連）
+  if (req.url === '/api/release') {
+    uploadMode = true;
+    if (serial && serial.isOpen) {
+      serial.close();
+      console.log('[Serial] released for upload (30s hold)');
+    }
+    setTimeout(() => { uploadMode = false; connectSerial(); }, 30000);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"released":true}');
+    return;
+  }
+
   // 靜態檔案
   const filePath = path.join(__dirname, 'web', req.url === '/' ? 'index.html' : req.url);
   const ext = path.extname(filePath);
@@ -59,18 +72,22 @@ wss.on('connection', (ws) => {
 
 // ===== Serial =====
 let serial = null;
+let uploadMode = false;
 
 async function connectSerial() {
+  if (uploadMode) return;
   const ports = await SerialPort.list();
-  const usbPort = ports.find(p => p.path.includes('cu.usbserial'));
+  const usbPort = ports.find(p => p.path.includes('usbserial'));
   if (!usbPort) {
     console.error('[Serial] No USB serial port found. Retrying in 3s...');
     setTimeout(connectSerial, 3000);
     return;
   }
 
-  console.log(`[Serial] opening ${usbPort.path}`);
-  serial = new SerialPort({ path: usbPort.path, baudRate: BAUD });
+  // macOS: 用 cu. 開啟避免 tty. 的 carrier detect block
+  const portPath = usbPort.path.replace('/dev/tty.', '/dev/cu.');
+  console.log(`[Serial] opening ${portPath}`);
+  serial = new SerialPort({ path: portPath, baudRate: BAUD });
   const parser = serial.pipe(new ReadlineParser({ delimiter: '\n' }));
 
   parser.on('data', (line) => {
@@ -87,11 +104,15 @@ async function connectSerial() {
   serial.on('close', () => {
     console.log('[Serial] disconnected. Reconnecting in 3s...');
     serial = null;
+    lastData = null;
     setTimeout(connectSerial, 3000);
   });
 
   serial.on('error', (err) => {
     console.error('[Serial] error:', err.message);
+    serial = null;
+    lastData = null;
+    setTimeout(connectSerial, 3000);
   });
 }
 

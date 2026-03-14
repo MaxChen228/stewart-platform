@@ -330,6 +330,31 @@ canvas {
       </div>
     </div>
 
+    <!-- PID Control Card -->
+    <div class="ui-card">
+      <div class="ui-card-title">PID Control</div>
+      <div class="chip-group" style="margin-bottom:16px">
+        <button class="chip zbtn" id="btnPidEnable" onclick="togglePID()" disabled>Enable</button>
+        <button class="chip danger zbtn" onclick="sendCmd('S')" disabled>Stop</button>
+      </div>
+      <div class="dev-label" style="margin-bottom:8px">Target Pose</div>
+      <div style="display:grid;grid-template-columns:40px 1fr 50px;gap:4px 8px;align-items:center;font-family:var(--font-mono);font-size:11px">
+        <span>X</span><input type="range" id="sl-x" min="-30" max="30" value="0" step="0.5" oninput="updateTarget()"><span id="sv-x">0</span>
+        <span>Y</span><input type="range" id="sl-y" min="-30" max="30" value="0" step="0.5" oninput="updateTarget()"><span id="sv-y">0</span>
+        <span>Z</span><input type="range" id="sl-z" min="70" max="140" value="105" step="0.5" oninput="updateTarget()"><span id="sv-z">105</span>
+        <span>Roll</span><input type="range" id="sl-roll" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-roll">0</span>
+        <span>Pitch</span><input type="range" id="sl-pitch" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-pitch">0</span>
+        <span>Yaw</span><input type="range" id="sl-yaw" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-yaw">0</span>
+      </div>
+      <div class="dev-label" style="margin:12px 0 8px">PID Gains</div>
+      <div style="display:grid;grid-template-columns:30px 1fr 30px 1fr 30px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
+        <span>Kp</span><input type="number" id="pid-kp" value="3" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
+        <span>Ki</span><input type="number" id="pid-ki" value="0" step="0.1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
+        <span>Kd</span><input type="number" id="pid-kd" value="1" step="0.5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
+      </div>
+      <div id="pid-status" class="inset-panel" style="margin-top:12px">PID OFF</div>
+    </div>
+
     <!-- FK Debug Card -->
     <div class="ui-card">
       <div class="ui-card-title">Diagnostics</div>
@@ -747,12 +772,29 @@ function connectWS() {
         document.getElementById('raw').textContent =
           `Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}`;
       }
+      if (data.pid !== undefined) {
+        const el = document.getElementById('pid-status');
+        const btn = document.getElementById('btnPidEnable');
+        if (data.pid) {
+          el.textContent = data.err ? `ERR: ${data.err.map(e=>e.toFixed(1)).join(' ')} | RPM: ${data.rpm.map(r=>r.toFixed(0)).join(' ')}` : 'PID ON';
+          el.style.color = 'var(--contra)';
+          if (btn) btn.textContent = 'Running';
+        } else {
+          el.textContent = 'PID OFF';
+          el.style.color = '';
+          if (btn) btn.textContent = 'Enable';
+        }
+      }
       if (data.status) {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
         if (data.status.includes('zeroed')) {
           lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
         }
+      }
+      if (data.error) {
+        document.getElementById('pid-status').textContent = data.error;
+        document.getElementById('pid-status').style.color = 'var(--dev)';
       }
     } catch(e) {}
   };
@@ -767,6 +809,33 @@ function connectWS() {
 
 window.sendCmd = function(cmd) {
   if (ws && ws.readyState === 1) ws.send(cmd);
+};
+
+window.updateTarget = function() {
+  const x = document.getElementById('sl-x').value;
+  const y = document.getElementById('sl-y').value;
+  const z = document.getElementById('sl-z').value;
+  const roll = document.getElementById('sl-roll').value;
+  const pitch = document.getElementById('sl-pitch').value;
+  const yaw = document.getElementById('sl-yaw').value;
+  document.getElementById('sv-x').textContent = x;
+  document.getElementById('sv-y').textContent = y;
+  document.getElementById('sv-z').textContent = z;
+  document.getElementById('sv-roll').textContent = roll;
+  document.getElementById('sv-pitch').textContent = pitch;
+  document.getElementById('sv-yaw').textContent = yaw;
+  sendCmd(`P ${x} ${y} ${z} ${roll} ${pitch} ${yaw}`);
+};
+
+window.updateGains = function() {
+  const kp = document.getElementById('pid-kp').value;
+  const ki = document.getElementById('pid-ki').value;
+  const kd = document.getElementById('pid-kd').value;
+  sendCmd(`K ${kp} ${ki} ${kd}`);
+};
+
+window.togglePID = function() {
+  sendCmd('E');
 };
 
 window.resetFK = function() {
