@@ -19,8 +19,11 @@ float pidIntegral[NUM_MOTORS] = {0};
 float pidPrevError[NUM_MOTORS] = {0};
 float pidMaxRPM = 10.0f;
 float pidMaxIntegral = 50.0f;
-float pidMaxError = 45.0f; // 超過此角度誤差 → 急停
+float pidMaxError = 20.0f; // 超過此角度誤差 → 急停（從 45 降到 20）
 bool pidEnabled = false;
+
+// 逐馬達速度方向：1=正常, -1=翻轉
+int8_t speedDir[NUM_MOTORS] = {1, 1, 1, 1, 1, 1};
 
 void computeNeutralAngles() {
     Pose neutral = {0, 0, NEUTRAL_Z, 0, 0, 0};
@@ -126,6 +129,35 @@ void handleSerial() {
             pidKp = kp; pidKi = ki; pidKd = kd;
             Serial.printf("{\"status\":\"pid gains\",\"kp\":%.1f,\"ki\":%.2f,\"kd\":%.1f}\n", kp, ki, kd);
         }
+    } else if (cmd.startsWith("T")) {
+        // 單馬達方向測試: T0~T5
+        // 以 2 RPM 正轉 0.5 秒，回報角度變化方向
+        int idx = cmd.charAt(1) - '0';
+        if (idx >= 0 && idx < NUM_MOTORS) {
+            servos.setEnable(MOTOR_ADDR[idx], true);
+            delay(10);
+
+            // 讀起始角度
+            int32_t rawBefore = servos.readEncoderRaw(MOTOR_ADDR[idx]);
+
+            // 以 dir=0 (CCW) 轉 0.5 秒
+            servos.setSpeed(MOTOR_ADDR[idx], 3, 0, 0);
+            delay(500);
+            servos.setSpeed(MOTOR_ADDR[idx], 0, 0, 0);
+
+            // 讀結束角度
+            int32_t rawAfter = servos.readEncoderRaw(MOTOR_ADDR[idx]);
+            servos.setEnable(MOTOR_ADDR[idx], false);
+
+            int32_t delta = rawAfter - rawBefore;
+            if (delta > 8192) delta -= 16384;
+            if (delta < -8192) delta += 16384;
+            float degChange = MOTOR_SIGN[idx] * (float)delta * 360.0f / 16384.0f;
+
+            Serial.printf("{\"status\":\"test M%d\",\"raw_delta\":%ld,\"deg_change\":%.2f,\"note\":\"%s\"}\n",
+                idx + 1, delta, degChange,
+                degChange > 0 ? "CCW=angle+" : "CCW=angle-");
+        }
     }
 }
 
@@ -184,16 +216,19 @@ void loop() {
                 float output = pidKp * error + pidKi * pidIntegral[i] + pidKd * derivative;
                 // output = 角度速度 (deg/s)
 
-                // 轉換為馬達軸速度（考慮 MOTOR_SIGN）
-                float shaftVel = output * MOTOR_SIGN[i];
+                // 轉換為馬達軸速度（考慮 MOTOR_SIGN + speedDir）
+                float shaftVel = output * MOTOR_SIGN[i] * speedDir[i];
 
                 // 轉換為 RPM (360 deg/s = 60 RPM)
                 float rpm = fabsf(shaftVel) / 6.0f;
                 rpm = min(rpm, pidMaxRPM);
                 rpms[i] = rpm;
 
-                uint16_t speedCmd = (uint16_t)roundf(rpm);
-                if (speedCmd == 0 && fabsf(error) > 0.3f) speedCmd = 1;
+                uint16_t speedCmd = 0;
+                if (fabsf(error) > 1.5f) {
+                    speedCmd = (uint16_t)roundf(rpm);
+                    if (speedCmd == 0) speedCmd = 1;
+                }
                 uint8_t dir = shaftVel > 0 ? 1 : 0;
                 servos.setSpeed(MOTOR_ADDR[i], speedCmd, dir, 0);
             }

@@ -13,27 +13,27 @@ constexpr float NEUTRAL_Z = 105.0f;
 constexpr float DEG2RAD = M_PI / 180.0f;
 constexpr float RAD2DEG = 180.0f / M_PI;
 
-// 馬達平面角（度）: [-90, 90, 30, 210, -210, -30]
-constexpr float MOTOR_PLANE_ANGLE[6] = {-90, 90, 30, 210, -210, -30};
+// 馬達平面角（度）— CW 排列：pair@0°, pair@-120°, pair@+120°
+constexpr float MOTOR_PLANE_ANGLE[6] = {-90, 90, -210, -30, 30, 210};
 
-// 底座附著點角度（度）
+// 底座附著點角度（度）— CW
 constexpr float BASE_ANGLES[6] = {
     -BASE_ANGLE / 2,
      BASE_ANGLE / 2,
-    -BASE_ANGLE / 2 + 120,
-     BASE_ANGLE / 2 + 120,
     -BASE_ANGLE / 2 - 120,
-     BASE_ANGLE / 2 - 120
+     BASE_ANGLE / 2 - 120,
+    -BASE_ANGLE / 2 + 120,
+     BASE_ANGLE / 2 + 120
 };
 
-// 平台附著點角度（度）
+// 平台附著點角度（度）— CW
 constexpr float PLATFORM_ANGLES[6] = {
     -PLATFORM_ANGLE / 2,
      PLATFORM_ANGLE / 2,
-    -PLATFORM_ANGLE / 2 + 120,
-     PLATFORM_ANGLE / 2 + 120,
     -PLATFORM_ANGLE / 2 - 120,
-     PLATFORM_ANGLE / 2 - 120
+     PLATFORM_ANGLE / 2 - 120,
+    -PLATFORM_ANGLE / 2 + 120,
+     PLATFORM_ANGLE / 2 + 120
 };
 
 struct Pose {
