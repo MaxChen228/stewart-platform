@@ -26,7 +26,7 @@ button:disabled { opacity: 0.3; cursor: default; }
   <div id="fk-debug"></div>
 </div>
 <div id="controls">
-  <button id="btnConnect" onclick="connectSerial()">Connect</button>
+  <button id="btnConnect" onclick="connectSerial()" style="display:none">Connect</button>
   <button onclick="sendCmd('Z')" disabled class="zbtn">Zero All</button>
   <button onclick="sendCmd('D')" disabled class="zbtn" style="background:#811;border-color:#a33">Disable</button>
   <div style="margin-top:6px;display:flex;gap:2px;flex-wrap:wrap">
@@ -403,64 +403,52 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// ===== Web Serial =====
-let port = null, reader = null, writer = null;
-let lineBuf = '';
+// ===== WebSocket =====
+let ws = null;
 
-window.connectSerial = async function() {
-  try {
-    port = await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
-    writer = port.writable.getWriter();
+function connectWS() {
+  const url = `ws://${location.host}`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
     document.getElementById('status').textContent = 'Connected';
     document.getElementById('status').className = 'ok';
     document.querySelectorAll('.zbtn').forEach(b => b.disabled = false);
-    readLoop();
-  } catch(e) {
-    document.getElementById('status').textContent = 'Error: ' + e.message;
-  }
-};
+  };
 
-window.sendCmd = async function(cmd) {
-  if (writer) {
-    await writer.write(new TextEncoder().encode(cmd + '\n'));
-  }
-};
-
-async function readLoop() {
-  const decoder = new TextDecoderStream();
-  const readableStreamClosed = port.readable.pipeTo(decoder.writable);
-  reader = decoder.readable.getReader();
-  try {
-    while (true) {
-      const {value, done} = await reader.read();
-      if (done) break;
-      lineBuf += value;
-      const lines = lineBuf.split('\n');
-      lineBuf = lines.pop();
-      for (const line of lines) {
-        try {
-          const data = JSON.parse(line.trim());
-          if (data.a) updateViz(data.a);
-          if (data.r) {
-            document.getElementById('raw').innerHTML =
-              `<span style="color:#888">Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}</span>`;
-          }
-          if (data.status) {
-            document.getElementById('status').textContent = 'Status: ' + data.status;
-            document.getElementById('status').className = 'ok';
-            if (data.status.includes('zeroed')) {
-              lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
-            }
-          }
-        } catch(e) {}
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.a) updateViz(data.a);
+      if (data.r) {
+        document.getElementById('raw').innerHTML =
+          `<span style="color:#888">Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}</span>`;
       }
-    }
-  } catch(e) {
-    document.getElementById('status').textContent = 'Disconnected';
+      if (data.status) {
+        document.getElementById('status').textContent = 'Status: ' + data.status;
+        document.getElementById('status').className = 'ok';
+        if (data.status.includes('zeroed')) {
+          lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
+        }
+      }
+    } catch(e) {}
+  };
+
+  ws.onclose = () => {
+    document.getElementById('status').textContent = 'Disconnected — reconnecting...';
     document.getElementById('status').className = '';
-  }
+    document.querySelectorAll('.zbtn').forEach(b => b.disabled = true);
+    setTimeout(connectWS, 1000);
+  };
 }
+
+window.sendCmd = function(cmd) {
+  if (ws && ws.readyState === 1) ws.send(cmd);
+};
+
+// 不再需要手動按 Connect
+window.connectSerial = connectWS;
+connectWS();
 </script>
 </body>
 </html>
