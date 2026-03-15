@@ -16,6 +16,7 @@ Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 Pose smoothedTarget = {0, 0, NEUTRAL_Z, 0, 0, 0};
 
 bool posEnabled = false;
+float enableAngle[NUM_MOTORS] = {0}; // Enable 時的角度（F5 coord 參考點，不影響映射）
 
 uint16_t posSpeed = 30;   // 最大移動速度 (RPM)
 uint8_t  posAcc   = 5;    // 加減速參數
@@ -26,6 +27,7 @@ constexpr float SMOOTH_TIME = 0.5f; // setpoint 平滑時間（秒）
 float prevAngles[NUM_MOTORS] = {0};
 float trackingMu = 0.5f;
 float trackingKd = 3.0f;
+float maxGain = 0.3f;              // 外迴圈最大增益（低=穩定，高=響應快但易震盪）
 float smoothKinetic = 0;
 bool adaptiveFirstCycle = true;
 
@@ -74,9 +76,10 @@ static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
     sm.yaw  += alpha * (tgt.yaw  - sm.yaw);
 }
 
-// 角度 → F5 絕對座標（永遠相對於 Z 校正位置，angle=90° ↔ coord=0）
+// 角度 → F5 絕對座標（相對於 Enable 時的 0x92 零點）
+// enableAngle 是 F5 的座標參考，不影響角度映射
 int32_t angleToCoord(int motorIdx, float targetAngle) {
-    float deltaAngle = targetAngle - 90.0f;
+    float deltaAngle = targetAngle - enableAngle[motorIdx];
     return (int32_t)roundf(deltaAngle / (float)MOTOR_SIGN[motorIdx] * 16384.0f / 360.0f);
 }
 
@@ -166,13 +169,17 @@ void handleSerial() {
             return;
         }
 
-        // 只啟用馬達，不碰 0x92，不碰校正值
+        // 1. 啟用馬達 + 0x92（F5 座標零點，0x35 不受影響）
         for (int i = 0; i < NUM_MOTORS; i++)
             servos.setEnable(MOTOR_ADDR[i], true);
         delay(20);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            servos.setZeroPoint(MOTOR_ADDR[i]);
+            delay(10);
+        }
         servos.flushReceiveBuffer();
 
-        // 讀當前角度初始化追蹤
+        // 2. 用 0x35 讀當前角度作為 F5 座標參考（0x35 不受 0x92 影響）
         int64_t raw[NUM_MOTORS];
         servos.readAllRawEncoders(raw);
         float initAngles[NUM_MOTORS];
@@ -182,6 +189,7 @@ void handleSerial() {
             } else {
                 initAngles[i] = 90.0f;
             }
+            enableAngle[i] = initAngles[i]; // F5 coord 參考點
         }
 
         smoothedTarget = targetPose;
@@ -190,10 +198,20 @@ void handleSerial() {
         adaptiveFirstCycle = true;
         posEnabled = true;
 
-        Serial.printf("{\"status\":\"pos enabled\",\"speed\":%d,\"acc\":%d,\"angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
+        // Debug: 顯示 enableAngle 和 target 角度，找出「往下扯」的原因
+        IKResult dbgIK = inverse_kinematics(targetPose);
+        Serial.printf("{\"status\":\"pos enabled\",\"speed\":%d,\"acc\":%d,"
+            "\"enableAngle\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+            "\"ikTarget\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+            "\"targetPose\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
             posSpeed, posAcc,
-            initAngles[0],initAngles[1],initAngles[2],
-            initAngles[3],initAngles[4],initAngles[5]);
+            enableAngle[0],enableAngle[1],enableAngle[2],
+            enableAngle[3],enableAngle[4],enableAngle[5],
+            dbgIK.valid?dbgIK.angles[0]:0, dbgIK.valid?dbgIK.angles[1]:0,
+            dbgIK.valid?dbgIK.angles[2]:0, dbgIK.valid?dbgIK.angles[3]:0,
+            dbgIK.valid?dbgIK.angles[4]:0, dbgIK.valid?dbgIK.angles[5]:0,
+            targetPose.x, targetPose.y, targetPose.z,
+            targetPose.roll, targetPose.pitch, targetPose.yaw);
     } else if (cmd == "S") {
         posStop();
         Serial.println("{\"status\":\"pos stopped\"}");
@@ -224,12 +242,13 @@ void handleSerial() {
             Serial.printf("{\"status\":\"pos params\",\"speed\":%d,\"acc\":%d}\n", posSpeed, posAcc);
         }
     } else if (cmd.startsWith("M ")) {
-        float mu, kd = -1;
-        int n = sscanf(cmd.c_str(), "M %f %f", &mu, &kd);
+        float mu, kd = -1, mg = -1;
+        int n = sscanf(cmd.c_str(), "M %f %f %f", &mu, &kd, &mg);
         if (n >= 1) {
             trackingMu = fmaxf(0.0f, mu);
             if (n >= 2) trackingKd = fmaxf(0.0f, kd);
-            Serial.printf("{\"status\":\"tracking params\",\"mu\":%.2f,\"kd\":%.2f}\n", trackingMu, trackingKd);
+            if (n >= 3) maxGain = fmaxf(0.05f, fminf(1.0f, mg));
+            Serial.printf("{\"status\":\"tracking params\",\"mu\":%.2f,\"kd\":%.2f,\"maxGain\":%.2f}\n", trackingMu, trackingKd, maxGain);
         }
     } else if (cmd.startsWith("T")) {
         int idx = cmd.charAt(1) - '0';
@@ -329,13 +348,15 @@ void loop() {
             }
 
             smoothKinetic = 0.9f * smoothKinetic + 0.1f * kinetic;
-            gain = 1.0f / (1.0f + trackingMu * smoothKinetic);
+            gain = fminf(maxGain, 1.0f / (1.0f + trackingMu * smoothKinetic));
 
             for (int i = 0; i < NUM_MOTORS; i++) {
                 targetAngles[i] = target.angles[i];
 
                 float error = target.angles[i] - angles[i];
-                float damp = (error * vel[i] < 0) ? trackingKd * vel[i] : 0.0f;
+                // 非對稱阻尼：朝目標移動 30% 阻尼（防止蓄積動能），過衝 100% 煞車
+                float dampRatio = (error * vel[i] < 0) ? 1.0f : 0.3f;
+                float damp = trackingKd * vel[i] * dampRatio;
                 adjustedAngles[i] = angles[i] + gain * error - damp;
 
                 coords[i] = angleToCoord(i, adjustedAngles[i]);
