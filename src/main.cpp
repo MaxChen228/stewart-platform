@@ -26,7 +26,8 @@ constexpr float SMOOTH_TIME = 0.5f; // setpoint 平滑時間（秒）
 // ===== 自適應追蹤 =====
 float prevAngles[NUM_MOTORS] = {0};  // 上一 cycle 的角度（算速度用）
 float trackingMu = 0.5f;            // 震動懲罰係數（越大越優先穩定）
-float trackingKd = 3.0f;            // 速度阻尼係數（抵抗當前運動方向）
+float trackingKd = 3.0f;            // 速度阻尼係數（僅在過衝時作用）
+float smoothKinetic = 0;            // 低通濾波後的動能（偵測持續震盪）
 bool adaptiveFirstCycle = true;
 
 // 逐馬達速度方向：1=正常, -1=翻轉
@@ -313,6 +314,7 @@ void loop() {
             if (adaptiveFirstCycle) {
                 for (int i = 0; i < NUM_MOTORS; i++)
                     prevAngles[i] = angles[i];
+                smoothKinetic = 0;
                 adaptiveFirstCycle = false;
             }
 
@@ -324,15 +326,19 @@ void loop() {
                 kinetic += vel[i] * vel[i];
             }
 
-            // 自適應增益：震動越大 → gain 越小 → 目標越保守
-            gain = 1.0f / (1.0f + trackingMu * kinetic);
+            // 低通濾波動能：偵測持續震盪，忽略單次大移動
+            // α=0.1 → 時間常數 200ms，持續震盪 >300ms 才大幅壓 gain
+            smoothKinetic = 0.9f * smoothKinetic + 0.1f * kinetic;
+            gain = 1.0f / (1.0f + trackingMu * smoothKinetic);
 
             for (int i = 0; i < NUM_MOTORS; i++) {
                 targetAngles[i] = target.angles[i];
 
-                // PD 控制：P = gain × error（自適應衰減），D = Kd × velocity（始終阻尼）
                 float error = target.angles[i] - angles[i];
-                adjustedAngles[i] = angles[i] + gain * error - trackingKd * vel[i];
+                // 方向性阻尼：僅在過衝時煞車（vel 方向與 error 相反）
+                // 朝目標移動時不阻尼 → 大幅移動不再 chatter
+                float damp = (error * vel[i] < 0) ? trackingKd * vel[i] : 0.0f;
+                adjustedAngles[i] = angles[i] + gain * error - damp;
 
                 coords[i] = angleToCoord(i, adjustedAngles[i]);
 
