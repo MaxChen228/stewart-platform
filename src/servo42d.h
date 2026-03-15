@@ -70,6 +70,37 @@ public:
         return -1;
     }
 
+    // 讀取馬達累計坐標值 (0x31) — F5 使用的絕對坐標系
+    // 回傳 INT32_MIN 表示失敗
+    int32_t readCoordinate(uint8_t motorId) {
+        uint8_t cmd[3];
+        cmd[0] = 0x31;
+        cmd[1] = 0x00; // 校正後的值
+        cmd[2] = (motorId + 0x31 + 0x00) & 0xFF;
+
+        if (can.sendMsgBuf(motorId, 0, 3, cmd) != CAN_OK) return INT32_MIN;
+
+        uint32_t start = millis();
+        while (millis() - start < 20) {
+            if (can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long rxId;
+                uint8_t rxLen;
+                uint8_t rxBuf[8];
+                can.readMsgBuf(&rxId, &rxLen, rxBuf);
+                if ((rxId & 0x7FF) == motorId && rxBuf[0] == 0x31 && rxLen >= 7) {
+                    // 回應: [0x31, carry_b3..b0, val_hi, val_lo, CRC]
+                    int32_t carry = ((int32_t)(int8_t)rxBuf[1] << 24) |
+                                    ((int32_t)rxBuf[2] << 16) |
+                                    ((int32_t)rxBuf[3] << 8) |
+                                    rxBuf[4];
+                    uint16_t val = ((uint16_t)rxBuf[5] << 8) | rxBuf[6];
+                    return carry * 16384 + (int32_t)(val & 0x3FFF);
+                }
+            }
+        }
+        return INT32_MIN;
+    }
+
     // 讀取所有馬達編碼器原始值
     // 回傳成功讀取的馬達數
     int readAllEncoders(int32_t rawValues[NUM_MOTORS]) {
@@ -130,5 +161,99 @@ public:
         for (int i = 0; i < NUM_MOTORS; i++) {
             emergencyStop(MOTOR_ADDR[i]);
         }
+    }
+
+    // 設定馬達零點 (0x92) — 將當前位置設為坐標原點
+    bool setZeroPoint(uint8_t motorId) {
+        uint8_t cmd[2];
+        cmd[0] = 0x92;
+        cmd[1] = (motorId + 0x92) & 0xFF;
+        can.sendMsgBuf(motorId, 0, 2, cmd);
+
+        // 等待回覆
+        uint32_t start = millis();
+        while (millis() - start < 50) {
+            if (can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long rxId;
+                uint8_t rxLen;
+                uint8_t rxBuf[8];
+                can.readMsgBuf(&rxId, &rxLen, rxBuf);
+                if ((rxId & 0x7FF) == motorId && rxBuf[0] == 0x92) {
+                    return rxBuf[1] == 1;
+                }
+            }
+        }
+        return false;
+    }
+
+    // 絕對坐標位置指令 (0xF5)
+    // speed: 0-3000 RPM（最大移動速度）, acc: 0-255, coord: int24_t 絕對坐標值 (16384 counts/turn)
+    void setAbsoluteCoord(uint8_t motorId, uint16_t speed, uint8_t acc, int32_t coord) {
+        if (speed > 3000) speed = 3000;
+        if (coord > 8388607) coord = 8388607;
+        if (coord < -8388607) coord = -8388607;
+
+        uint8_t cmd[8];
+        cmd[0] = 0xF5;
+        cmd[1] = (speed >> 8) & 0xFF;
+        cmd[2] = speed & 0xFF;
+        cmd[3] = acc;
+        cmd[4] = (coord >> 16) & 0xFF;
+        cmd[5] = (coord >> 8) & 0xFF;
+        cmd[6] = coord & 0xFF;
+        cmd[7] = motorId;
+        for (int i = 0; i < 7; i++) cmd[7] += cmd[i];
+        cmd[7] &= 0xFF;
+        can.sendMsgBuf(motorId, 0, 8, cmd);
+    }
+
+    // 停止絕對坐標運動 (0xF5 speed=0)
+    void stopAbsoluteCoord(uint8_t motorId, uint8_t acc = 5) {
+        uint8_t cmd[8];
+        cmd[0] = 0xF5;
+        cmd[1] = 0; cmd[2] = 0; // speed = 0
+        cmd[3] = acc;
+        cmd[4] = 0; cmd[5] = 0; cmd[6] = 0; // coord = 0
+        cmd[7] = motorId;
+        for (int i = 0; i < 7; i++) cmd[7] += cmd[i];
+        cmd[7] &= 0xFF;
+        can.sendMsgBuf(motorId, 0, 8, cmd);
+    }
+
+    void stopAllPosition(uint8_t acc = 5) {
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            stopAbsoluteCoord(MOTOR_ADDR[i], acc);
+        }
+    }
+
+    // 設定 vFOC 模式 PID 參數 (0x96)
+    // Kp, Ki: 位置環比例和積分
+    void setVFOC_KpKi(uint8_t motorId, uint16_t kp, uint16_t ki) {
+        uint8_t cmd[7];
+        cmd[0] = 0x96;
+        cmd[1] = 0x00; // CMD = set Kp/Ki
+        cmd[2] = (kp >> 8) & 0xFF;
+        cmd[3] = kp & 0xFF;
+        cmd[4] = (ki >> 8) & 0xFF;
+        cmd[5] = ki & 0xFF;
+        cmd[6] = motorId;
+        for (int i = 0; i < 6; i++) cmd[6] += cmd[i];
+        cmd[6] &= 0xFF;
+        can.sendMsgBuf(motorId, 0, 7, cmd);
+    }
+
+    // Kd, Kv: 位置環微分和速度環增益
+    void setVFOC_KdKv(uint8_t motorId, uint16_t kd, uint16_t kv) {
+        uint8_t cmd[7];
+        cmd[0] = 0x96;
+        cmd[1] = 0x01; // CMD = set Kd/Kv
+        cmd[2] = (kd >> 8) & 0xFF;
+        cmd[3] = kd & 0xFF;
+        cmd[4] = (kv >> 8) & 0xFF;
+        cmd[5] = kv & 0xFF;
+        cmd[6] = motorId;
+        for (int i = 0; i < 6; i++) cmd[6] += cmd[i];
+        cmd[6] &= 0xFF;
+        can.sendMsgBuf(motorId, 0, 7, cmd);
     }
 };

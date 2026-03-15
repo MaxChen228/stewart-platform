@@ -330,11 +330,11 @@ canvas {
       </div>
     </div>
 
-    <!-- PID Control Card -->
+    <!-- Position Control Card -->
     <div class="ui-card">
-      <div class="ui-card-title">PID Control</div>
+      <div class="ui-card-title">Position Control</div>
       <div class="chip-group" style="margin-bottom:16px">
-        <button class="chip zbtn" id="btnPidEnable" onclick="togglePID()" disabled>Enable</button>
+        <button class="chip zbtn" id="btnPosEnable" onclick="togglePos()" disabled>Enable</button>
         <button class="chip danger zbtn" onclick="sendCmd('S')" disabled>Stop</button>
       </div>
       <div class="dev-label" style="margin-bottom:8px">Target Pose</div>
@@ -346,13 +346,20 @@ canvas {
         <span>Pitch</span><input type="range" id="sl-pitch" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-pitch">0</span>
         <span>Yaw</span><input type="range" id="sl-yaw" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-yaw">0</span>
       </div>
-      <div class="dev-label" style="margin:12px 0 8px">PID Gains</div>
-      <div style="display:grid;grid-template-columns:30px 1fr 30px 1fr 30px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>Kp</span><input type="number" id="pid-kp" value="3" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
-        <span>Ki</span><input type="number" id="pid-ki" value="0" step="0.1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
-        <span>Kd</span><input type="number" id="pid-kd" value="1" step="0.5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateGains()">
+      <div class="dev-label" style="margin:12px 0 8px">Motion Params</div>
+      <div style="display:grid;grid-template-columns:50px 1fr 50px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
+        <span>Speed</span><input type="number" id="pos-speed" value="30" min="1" max="200" step="5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
+        <span>Acc</span><input type="number" id="pos-acc" value="5" min="1" max="255" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
       </div>
-      <div id="pid-status" class="inset-panel" style="margin-top:12px">PID OFF</div>
+      <div class="dev-label" style="margin:12px 0 8px">Motor PID (vFOC)</div>
+      <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr 24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
+        <span>Kp</span><input type="number" id="m-kp" value="220" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Ki</span><input type="number" id="m-ki" value="100" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Kd</span><input type="number" id="m-kd" value="270" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Kv</span><input type="number" id="m-kv" value="320" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <button class="chip zbtn" style="margin-top:8px" onclick="updateMotorPID()" disabled>Apply Motor PID</button>
+      <div id="pos-status" class="inset-panel" style="margin-top:12px">POS OFF</div>
     </div>
 
     <!-- FK Debug Card -->
@@ -662,8 +669,8 @@ platGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Arr
 const platMesh = new THREE.Mesh(platGeo, new THREE.MeshPhongMaterial({color:0xC0392B, transparent:true, opacity:0.35, side:THREE.DoubleSide}));
 scene.add(platMesh);
 
-function updatePlatform(Q) {
-  const p = platGeo.attributes.position.array;
+function updatePlatMesh(geo, Q) {
+  const p = geo.attributes.position.array;
   let cx=0,cy=0,cz=0;
   for(let i=0;i<6;i++){cx+=Q[i].x;cy+=Q[i].y;cz+=Q[i].z;}
   cx/=6;cy/=6;cz/=6;
@@ -673,8 +680,56 @@ function updatePlatform(Q) {
     p[k+3]=Q[i].x;p[k+4]=Q[i].y;p[k+5]=Q[i].z;
     p[k+6]=Q[j].x;p[k+7]=Q[j].y;p[k+8]=Q[j].z;
   }
-  platGeo.attributes.position.needsUpdate = true;
-  platGeo.computeVertexNormals();
+  geo.attributes.position.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+function updatePlatform(Q) { updatePlatMesh(platGeo, Q); }
+
+// ===== Ghost（IK 目標疊影）=====
+const ghostMat = new THREE.LineBasicMaterial({color:0x27AE60, transparent:true, opacity:0.5});
+const ghostLines = [];
+for (let i = 0; i < 12; i++) { // 6 lower + 6 upper
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0,0,0,0],3));
+  const line = new THREE.Line(geo, ghostMat);
+  line.visible = false;
+  scene.add(line);
+  ghostLines.push(line);
+}
+const ghostPlatGeo = new THREE.BufferGeometry();
+ghostPlatGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
+const ghostPlatMesh = new THREE.Mesh(ghostPlatGeo, new THREE.MeshPhongMaterial({color:0x27AE60, transparent:true, opacity:0.15, side:THREE.DoubleSide}));
+ghostPlatMesh.visible = false;
+scene.add(ghostPlatMesh);
+
+let ghostTarget = null; // [x,y,z,r,p,y] from slider
+
+function updateGhost() {
+  if (!ghostTarget) {
+    ghostPlatMesh.visible = false;
+    ghostLines.forEach(l => l.visible = false);
+    return;
+  }
+  const angles = ik(ghostTarget);
+  const Apt = computeA(angles);
+  const [x,y,z,roll,pitch,yaw] = ghostTarget;
+  const cr=Math.cos(roll*DEG),sr=Math.sin(roll*DEG);
+  const cp=Math.cos(pitch*DEG),sp=Math.sin(pitch*DEG);
+  const cy2=Math.cos(yaw*DEG),sy2=Math.sin(yaw*DEG);
+  const R=[[cy2*cp,cy2*sp*sr-sy2*cr,cy2*sp*cr+sy2*sr],[sy2*cp,sy2*sp*sr+cy2*cr,sy2*sp*cr-cy2*sr],[-sp,cp*sr,cp*cr]];
+  const Q = P.map(p => new THREE.Vector3(
+    R[0][0]*p.x+R[0][1]*p.y+R[0][2]*p.z+x,
+    R[1][0]*p.x+R[1][1]*p.y+R[1][2]*p.z+y,
+    R[2][0]*p.x+R[2][1]*p.y+R[2][2]*p.z+z
+  ));
+  for (let i = 0; i < 6; i++) {
+    updateLine(ghostLines[i], B[i], Apt[i]);
+    updateLine(ghostLines[i+6], Apt[i], Q[i]);
+    ghostLines[i].visible = true;
+    ghostLines[i+6].visible = true;
+  }
+  updatePlatMesh(ghostPlatGeo, Q);
+  ghostPlatMesh.visible = true;
 }
 
 // ===== 更新視覺化 =====
@@ -722,6 +777,8 @@ function updateViz(motorAngles) {
 }
 
 // 初始顯示中立
+ghostTarget = [0, 0, NEUTRAL_Z, 0, 0, 0];
+updateGhost();
 updateViz(ik([0,0,NEUTRAL_Z,0,0,0]));
 
 // Self-test
@@ -774,15 +831,15 @@ function connectWS() {
         document.getElementById('raw').textContent =
           `Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}`;
       }
-      if (data.pid !== undefined) {
-        const el = document.getElementById('pid-status');
-        const btn = document.getElementById('btnPidEnable');
-        if (data.pid) {
-          el.textContent = data.err ? `ERR: ${data.err.map(e=>e.toFixed(1)).join(' ')} | RPM: ${data.rpm.map(r=>r.toFixed(0)).join(' ')}` : 'PID ON';
+      if (data.pos !== undefined) {
+        const el = document.getElementById('pos-status');
+        const btn = document.getElementById('btnPosEnable');
+        if (data.pos) {
+          el.textContent = data.tgt ? `TGT: ${data.tgt.map(t=>t.toFixed(1)).join(' ')}` : 'POS ON';
           el.style.color = 'var(--contra)';
           if (btn) btn.textContent = 'Running';
         } else {
-          el.textContent = 'PID OFF';
+          el.textContent = 'POS OFF';
           el.style.color = '';
           if (btn) btn.textContent = 'Enable';
         }
@@ -795,8 +852,8 @@ function connectWS() {
         }
       }
       if (data.error) {
-        document.getElementById('pid-status').textContent = data.error;
-        document.getElementById('pid-status').style.color = 'var(--dev)';
+        document.getElementById('pos-status').textContent = data.error;
+        document.getElementById('pos-status').style.color = 'var(--dev)';
       }
     } catch(e) {}
   };
@@ -814,29 +871,38 @@ window.sendCmd = function(cmd) {
 };
 
 window.updateTarget = function() {
-  const x = document.getElementById('sl-x').value;
-  const y = document.getElementById('sl-y').value;
-  const z = document.getElementById('sl-z').value;
-  const roll = document.getElementById('sl-roll').value;
-  const pitch = document.getElementById('sl-pitch').value;
-  const yaw = document.getElementById('sl-yaw').value;
+  const x = +document.getElementById('sl-x').value;
+  const y = +document.getElementById('sl-y').value;
+  const z = +document.getElementById('sl-z').value;
+  const roll = +document.getElementById('sl-roll').value;
+  const pitch = +document.getElementById('sl-pitch').value;
+  const yaw = +document.getElementById('sl-yaw').value;
   document.getElementById('sv-x').textContent = x;
   document.getElementById('sv-y').textContent = y;
   document.getElementById('sv-z').textContent = z;
   document.getElementById('sv-roll').textContent = roll;
   document.getElementById('sv-pitch').textContent = pitch;
   document.getElementById('sv-yaw').textContent = yaw;
+  ghostTarget = [x, y, z, roll, pitch, yaw];
+  updateGhost();
   sendCmd(`P ${x} ${y} ${z} ${roll} ${pitch} ${yaw}`);
 };
 
-window.updateGains = function() {
-  const kp = document.getElementById('pid-kp').value;
-  const ki = document.getElementById('pid-ki').value;
-  const kd = document.getElementById('pid-kd').value;
-  sendCmd(`K ${kp} ${ki} ${kd}`);
+window.updateMotionParams = function() {
+  const speed = document.getElementById('pos-speed').value;
+  const acc = document.getElementById('pos-acc').value;
+  sendCmd(`V ${speed} ${acc}`);
 };
 
-window.togglePID = function() {
+window.updateMotorPID = function() {
+  const kp = document.getElementById('m-kp').value;
+  const ki = document.getElementById('m-ki').value;
+  const kd = document.getElementById('m-kd').value;
+  const kv = document.getElementById('m-kv').value;
+  sendCmd(`K ${kp} ${ki} ${kd} ${kv}`);
+};
+
+window.togglePos = function() {
   sendCmd('E');
 };
 
