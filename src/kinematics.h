@@ -13,27 +13,30 @@ constexpr float NEUTRAL_Z = 105.0f;
 constexpr float DEG2RAD = M_PI / 180.0f;
 constexpr float RAD2DEG = 180.0f / M_PI;
 
-// 馬達平面角（度）— CW 排列：pair@0°, pair@-120°, pair@+120°
-constexpr float MOTOR_PLANE_ANGLE[6] = {-90, 90, -210, -30, 30, 210};
+// 馬達平面角（度）— CW 排列：pair@210°, pair@90°, pair@-30°
+// 實體俯視：M1,M2 左下 / M3,M4 上方 / M5,M6 右側
+// CW 走向：奇數馬達在 pair_center+90°，偶數在 pair_center-90°
+constexpr float MOTOR_PLANE_ANGLE[6] = {300, 120, 180, 0, 60, 240};
 
 // 底座附著點角度（度）— CW
+// 奇數馬達在 pair_center + BASE_ANGLE/2，偶數在 pair_center - BASE_ANGLE/2
 constexpr float BASE_ANGLES[6] = {
-    -BASE_ANGLE / 2,
-     BASE_ANGLE / 2,
-    -BASE_ANGLE / 2 - 120,
-     BASE_ANGLE / 2 - 120,
-    -BASE_ANGLE / 2 + 120,
-     BASE_ANGLE / 2 + 120
+     BASE_ANGLE / 2 + 210,
+    -BASE_ANGLE / 2 + 210,
+     BASE_ANGLE / 2 + 90,
+    -BASE_ANGLE / 2 + 90,
+     BASE_ANGLE / 2 - 30,
+    -BASE_ANGLE / 2 - 30
 };
 
 // 平台附著點角度（度）— CW
 constexpr float PLATFORM_ANGLES[6] = {
-    -PLATFORM_ANGLE / 2,
-     PLATFORM_ANGLE / 2,
-    -PLATFORM_ANGLE / 2 - 120,
-     PLATFORM_ANGLE / 2 - 120,
-    -PLATFORM_ANGLE / 2 + 120,
-     PLATFORM_ANGLE / 2 + 120
+     PLATFORM_ANGLE / 2 + 210,
+    -PLATFORM_ANGLE / 2 + 210,
+     PLATFORM_ANGLE / 2 + 90,
+    -PLATFORM_ANGLE / 2 + 90,
+     PLATFORM_ANGLE / 2 - 30,
+    -PLATFORM_ANGLE / 2 - 30
 };
 
 struct Pose {
