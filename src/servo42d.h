@@ -34,7 +34,7 @@ public:
     bool debugDumped = false;
 
     // 讀取單顆馬達的編碼器原始值（14-bit, 0~16383）
-    // 回傳 -1 表示通訊失敗
+    // 回傳 -1 表示通訊失敗，-2 表示 CRC 錯誤
     int32_t readEncoderRaw(uint8_t motorId) {
         uint8_t cmd[2];
         cmd[0] = 0x30;
@@ -42,7 +42,6 @@ public:
 
         if (can.sendMsgBuf(motorId, 0, 2, cmd) != CAN_OK) return -1;
 
-        // 等待回覆
         uint32_t start = millis();
         while (millis() - start < 10) {
             if (can.checkReceive() == CAN_MSGAVAIL) {
@@ -51,20 +50,24 @@ public:
                 uint8_t rxBuf[8];
                 can.readMsgBuf(&rxId, &rxLen, rxBuf);
 
-                if ((rxId & 0x7FF) == motorId) {
-                    // Debug: 印出前幾次的原始回覆
-                    if (!debugDumped) {
-                        Serial.printf("{\"debug\":\"id=0x%02lX len=%d data=\"", rxId, rxLen);
-                        for (int k = 0; k < rxLen; k++) Serial.printf("%02X ", rxBuf[k]);
-                        Serial.println("\"}");
-                    }
+                if ((rxId & 0x7FF) != motorId) continue;    // 不是這顆馬達
+                if (rxBuf[0] != 0x30) continue;             // 不是 encoder 回覆（可能是 F5 回覆）
+                if (rxLen < 8) continue;                     // 長度不對
 
-                    if (rxLen >= 7) {
-                        // 格式: [0x30, carry×4, val_hi, val_lo, CRC] = 8 bytes
-                        uint16_t value = ((uint16_t)rxBuf[5] << 8) | rxBuf[6];
-                        return value & 0x3FFF;
-                    }
+                // Debug: 印出前幾次的原始回覆
+                if (!debugDumped) {
+                    Serial.printf("{\"debug\":\"id=0x%02lX len=%d data=\"", rxId, rxLen);
+                    for (int k = 0; k < rxLen; k++) Serial.printf("%02X ", rxBuf[k]);
+                    Serial.println("\"}");
                 }
+
+                // CRC 驗證：CRC = (motorId + data[0..6]) & 0xFF
+                uint8_t crc = motorId;
+                for (int k = 0; k < 7; k++) crc += rxBuf[k];
+                if ((crc & 0xFF) != rxBuf[7]) return -2;    // CRC 錯誤
+
+                uint16_t value = ((uint16_t)rxBuf[5] << 8) | rxBuf[6];
+                return value & 0x3FFF;
             }
         }
         return -1;
@@ -111,15 +114,62 @@ public:
         }
     }
 
-    // 讀取所有馬達編碼器原始值
-    // 回傳成功讀取的馬達數
+    // 讀取所有馬達編碼器原始值（0x30，保留供相容）
     int readAllEncoders(int32_t rawValues[NUM_MOTORS]) {
         int ok = 0;
         for (int i = 0; i < NUM_MOTORS; i++) {
             rawValues[i] = readEncoderRaw(MOTOR_ADDR[i]);
             if (rawValues[i] >= 0) ok++;
         }
-        debugDumped = true; // 只 dump 第一輪
+        debugDumped = true;
+        return ok;
+    }
+
+    // ===== 0x35: 讀取 RAW 累計編碼器值（不受 0x92 影響）=====
+    // 回傳 INT64_MIN 表示失敗
+    int64_t readRawEncoderValue(uint8_t motorId) {
+        uint8_t cmd[2];
+        cmd[0] = 0x35;
+        cmd[1] = (motorId + 0x35) & 0xFF;
+
+        if (can.sendMsgBuf(motorId, 0, 2, cmd) != CAN_OK) return INT64_MIN;
+
+        uint32_t start = millis();
+        while (millis() - start < 10) {
+            if (can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long rxId;
+                uint8_t rxLen;
+                uint8_t rxBuf[8];
+                can.readMsgBuf(&rxId, &rxLen, rxBuf);
+
+                if ((rxId & 0x7FF) != motorId) continue;
+                if (rxBuf[0] != 0x35) continue;
+                if (rxLen < 8) continue;
+
+                // CRC 驗證
+                uint8_t crc = motorId;
+                for (int k = 0; k < 7; k++) crc += rxBuf[k];
+                if ((crc & 0xFF) != rxBuf[7]) continue;
+
+                // 解析 int48 大端序，符號擴展
+                int64_t val = (int64_t)(int8_t)rxBuf[1];
+                val = (val << 8) | rxBuf[2];
+                val = (val << 8) | rxBuf[3];
+                val = (val << 8) | rxBuf[4];
+                val = (val << 8) | rxBuf[5];
+                val = (val << 8) | rxBuf[6];
+                return val;
+            }
+        }
+        return INT64_MIN;
+    }
+
+    int readAllRawEncoders(int64_t rawValues[NUM_MOTORS]) {
+        int ok = 0;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            rawValues[i] = readRawEncoderValue(MOTOR_ADDR[i]);
+            if (rawValues[i] != INT64_MIN) ok++;
+        }
         return ok;
     }
 

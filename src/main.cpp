@@ -6,17 +6,16 @@
 Servo42D servos;
 Preferences prefs;
 
-int32_t zeroRaw[NUM_MOTORS] = {0};
+int64_t zeroRaw[NUM_MOTORS] = {0};  // 0x35 raw encoder at Z calibration
 float neutralAngles[NUM_MOTORS] = {0};
 bool zeroed = false;
+bool angleJumpGuardReset = false;   // 校正後重置跳變防護
 
 // ===== 位置模式控制 =====
 Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 Pose smoothedTarget = {0, 0, NEUTRAL_Z, 0, 0, 0};
 
 bool posEnabled = false;
-float motorZeroAngle[NUM_MOTORS] = {0}; // 啟動時各馬達的角度
-int32_t sessionZeroRaw[NUM_MOTORS] = {0}; // 0x92 後調整的 zeroRaw（不存 NVS）
 
 uint16_t posSpeed = 30;   // 最大移動速度 (RPM)
 uint8_t  posAcc   = 5;    // 加減速參數
@@ -24,14 +23,11 @@ uint8_t  posAcc   = 5;    // 加減速參數
 constexpr float SMOOTH_TIME = 0.5f; // setpoint 平滑時間（秒）
 
 // ===== 自適應追蹤 =====
-float prevAngles[NUM_MOTORS] = {0};  // 上一 cycle 的角度（算速度用）
-float trackingMu = 0.5f;            // 震動懲罰係數（越大越優先穩定）
-float trackingKd = 3.0f;            // 速度阻尼係數（僅在過衝時作用）
-float smoothKinetic = 0;            // 低通濾波後的動能（偵測持續震盪）
+float prevAngles[NUM_MOTORS] = {0};
+float trackingMu = 0.5f;
+float trackingKd = 3.0f;
+float smoothKinetic = 0;
 bool adaptiveFirstCycle = true;
-
-// 逐馬達速度方向：1=正常, -1=翻轉
-int8_t speedDir[NUM_MOTORS] = {1, 1, 1, 1, 1, 1};
 
 void computeNeutralAngles() {
     Pose neutral = {0, 0, NEUTRAL_Z, 0, 0, 0};
@@ -43,13 +39,13 @@ void computeNeutralAngles() {
 
 void saveZeroToNVS() {
     prefs.begin("stewart", false);
-    prefs.putBytes("zeroRaw", zeroRaw, sizeof(zeroRaw));
+    prefs.putBytes("zeroRaw64", zeroRaw, sizeof(zeroRaw));
     prefs.end();
 }
 
 bool loadZeroFromNVS() {
     prefs.begin("stewart", true);
-    size_t len = prefs.getBytes("zeroRaw", zeroRaw, sizeof(zeroRaw));
+    size_t len = prefs.getBytes("zeroRaw64", zeroRaw, sizeof(zeroRaw));
     prefs.end();
     return len == sizeof(zeroRaw);
 }
@@ -78,11 +74,16 @@ static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
     sm.yaw  += alpha * (tgt.yaw  - sm.yaw);
 }
 
-// 角度 → 馬達絕對坐標值
-// Enable 時 0x92 設零 → coordBase=0 → coord 直接是相對 enable 位置的偏移
+// 角度 → F5 絕對座標（永遠相對於 Z 校正位置，angle=90° ↔ coord=0）
 int32_t angleToCoord(int motorIdx, float targetAngle) {
-    float deltaAngle = targetAngle - motorZeroAngle[motorIdx];
+    float deltaAngle = targetAngle - 90.0f;
     return (int32_t)roundf(deltaAngle / (float)MOTOR_SIGN[motorIdx] * 16384.0f / 360.0f);
+}
+
+// 0x35 raw → 角度（純粹映射，只有 zeroRaw 決定）
+float rawToAngle(int motorIdx, int64_t raw) {
+    int64_t d = raw - zeroRaw[motorIdx];
+    return MOTOR_SIGN[motorIdx] * (float)d * 360.0f / 16384.0f + 90.0f;
 }
 
 void setup() {
@@ -91,8 +92,6 @@ void setup() {
 
     computeNeutralAngles();
     zeroed = loadZeroFromNVS();
-    // sessionZeroRaw 初始化為 NVS 的 zeroRaw（0x92 呼叫前兩者相同）
-    for (int i = 0; i < NUM_MOTORS; i++) sessionZeroRaw[i] = zeroRaw[i];
 
     Serial.printf("{\"status\":\"init\",\"calibrated\":%s}\n",
                   zeroed ? "true" : "false");
@@ -112,7 +111,7 @@ void handleSerial() {
     cmd.trim();
 
     if (cmd == "Z") {
-        // 設定馬達 F5 零點（0x92）— 在校正位置做是安全的
+        // 1. Enable + 0x92（設 F5 座標零點）
         for (int i = 0; i < NUM_MOTORS; i++) {
             servos.setEnable(MOTOR_ADDR[i], true);
             delay(5);
@@ -122,25 +121,39 @@ void handleSerial() {
             delay(10);
         }
         servos.disableAll();
+        delay(20);
 
-        // 0x92 之後重讀 encoder — 拿到的是 0x92 後的一致值
-        int32_t raw[NUM_MOTORS];
-        servos.readAllEncoders(raw);
+        // 2. 清掉殘留回覆，用 0x35 讀 RAW encoder
+        servos.flushReceiveBuffer();
+        int64_t raw[NUM_MOTORS];
+        int ok = servos.readAllRawEncoders(raw);
+
+        // 3. 驗證全部讀取成功
+        bool allOk = true;
         for (int i = 0; i < NUM_MOTORS; i++) {
-            zeroRaw[i] = raw[i];
-            sessionZeroRaw[i] = raw[i]; // 同步，此刻兩者一致
+            if (raw[i] == INT64_MIN) { allOk = false; break; }
         }
+        if (!allOk) {
+            Serial.printf("{\"error\":\"encoder read failed (%d/6 ok)\"}\n", ok);
+            return;
+        }
+
+        for (int i = 0; i < NUM_MOTORS; i++) zeroRaw[i] = raw[i];
         zeroed = true;
+        angleJumpGuardReset = true;
         saveZeroToNVS();
         Serial.println("{\"status\":\"zeroed all\",\"saved\":true}");
     } else if (cmd.startsWith("Z") && cmd.length() == 2) {
         int idx = cmd.charAt(1) - '0';
         if (idx >= 0 && idx < NUM_MOTORS) {
-            int32_t val = servos.readEncoderRaw(MOTOR_ADDR[idx]);
-            if (val >= 0) {
+            int64_t val = servos.readRawEncoderValue(MOTOR_ADDR[idx]);
+            if (val != INT64_MIN) {
                 zeroRaw[idx] = val;
-                sessionZeroRaw[idx] = val;
+            } else {
+                Serial.printf("{\"error\":\"M%d read failed\"}\n", idx + 1);
+                return;
             }
+            angleJumpGuardReset = true;
             saveZeroToNVS();
             Serial.printf("{\"status\":\"zeroed M%d\",\"saved\":true}\n", idx + 1);
         }
@@ -153,49 +166,34 @@ void handleSerial() {
             return;
         }
 
-        // 1. 讀取 0x92 前的 encoder
-        int32_t rawBefore[NUM_MOTORS];
-        servos.readAllEncoders(rawBefore);
-
-        // 2. 啟用馬達 + 設定零點
+        // 只啟用馬達，不碰 0x92，不碰校正值
         for (int i = 0; i < NUM_MOTORS; i++)
             servos.setEnable(MOTOR_ADDR[i], true);
         delay(20);
+        servos.flushReceiveBuffer();
+
+        // 讀當前角度初始化追蹤
+        int64_t raw[NUM_MOTORS];
+        servos.readAllRawEncoders(raw);
+        float initAngles[NUM_MOTORS];
         for (int i = 0; i < NUM_MOTORS; i++) {
-            servos.setZeroPoint(MOTOR_ADDR[i]);
-            delay(10);
+            if (raw[i] != INT64_MIN) {
+                initAngles[i] = rawToAngle(i, raw[i]);
+            } else {
+                initAngles[i] = 90.0f;
+            }
         }
 
-        // 3. 讀取 0x92 後的 encoder，計算偏移量
-        int32_t rawAfter[NUM_MOTORS];
-        servos.readAllEncoders(rawAfter);
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            int32_t shift = rawAfter[i] - rawBefore[i];
-            if (shift > 8192) shift -= 16384;
-            if (shift < -8192) shift += 16384;
-            // 調整 session zeroRaw，使角度計算結果不變
-            sessionZeroRaw[i] = ((int32_t)zeroRaw[i] + shift + 16384) % 16384;
-        }
-
-        // 4. 用調整後的 zeroRaw 算當前角度
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            int32_t d = rawAfter[i] - sessionZeroRaw[i];
-            if (d > 8192) d -= 16384;
-            if (d < -8192) d += 16384;
-            motorZeroAngle[i] = MOTOR_SIGN[i] * (float)d * 360.0f / 16384.0f + 90.0f;
-        }
-
-        // 5. 初始化自適應追蹤
         smoothedTarget = targetPose;
         for (int i = 0; i < NUM_MOTORS; i++)
-            prevAngles[i] = motorZeroAngle[i];
+            prevAngles[i] = initAngles[i];
         adaptiveFirstCycle = true;
         posEnabled = true;
 
         Serial.printf("{\"status\":\"pos enabled\",\"speed\":%d,\"acc\":%d,\"angles\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
             posSpeed, posAcc,
-            motorZeroAngle[0],motorZeroAngle[1],motorZeroAngle[2],
-            motorZeroAngle[3],motorZeroAngle[4],motorZeroAngle[5]);
+            initAngles[0],initAngles[1],initAngles[2],
+            initAngles[3],initAngles[4],initAngles[5]);
     } else if (cmd == "S") {
         posStop();
         Serial.println("{\"status\":\"pos stopped\"}");
@@ -207,7 +205,6 @@ void handleSerial() {
                 v[0],v[1],v[2],v[3],v[4],v[5]);
         }
     } else if (cmd.startsWith("K ")) {
-        // 設定馬達內部 PID: K kp ki kd kv
         int kp, ki, kd, kv;
         if (sscanf(cmd.c_str(), "K %d %d %d %d", &kp, &ki, &kd, &kv) == 4) {
             for (int i = 0; i < NUM_MOTORS; i++) {
@@ -220,7 +217,6 @@ void handleSerial() {
                 kp, ki, kd, kv);
         }
     } else if (cmd.startsWith("V ")) {
-        // 設定位置模式速度和加速度: V speed acc
         int spd, ac;
         if (sscanf(cmd.c_str(), "V %d %d", &spd, &ac) == 2) {
             posSpeed = constrain(spd, 1, 200);
@@ -228,7 +224,6 @@ void handleSerial() {
             Serial.printf("{\"status\":\"pos params\",\"speed\":%d,\"acc\":%d}\n", posSpeed, posAcc);
         }
     } else if (cmd.startsWith("M ")) {
-        // 設定自適應追蹤參數: M mu [kd]
         float mu, kd = -1;
         int n = sscanf(cmd.c_str(), "M %f %f", &mu, &kd);
         if (n >= 1) {
@@ -242,24 +237,26 @@ void handleSerial() {
             servos.setEnable(MOTOR_ADDR[idx], true);
             delay(10);
 
-            int32_t rawBefore = servos.readEncoderRaw(MOTOR_ADDR[idx]);
+            int64_t rawBefore = servos.readRawEncoderValue(MOTOR_ADDR[idx]);
 
             servos.setSpeed(MOTOR_ADDR[idx], 3, 0, 0);
             delay(500);
             servos.setSpeed(MOTOR_ADDR[idx], 0, 0, 0);
 
-            int32_t rawAfter = servos.readEncoderRaw(MOTOR_ADDR[idx]);
+            int64_t rawAfter = servos.readRawEncoderValue(MOTOR_ADDR[idx]);
             servos.setEnable(MOTOR_ADDR[idx], false);
 
-            int32_t delta = rawAfter - rawBefore;
-            if (delta > 8192) delta -= 16384;
-            if (delta < -8192) delta += 16384;
+            int64_t delta = rawAfter - rawBefore;
             float degChange = MOTOR_SIGN[idx] * (float)delta * 360.0f / 16384.0f;
 
-            Serial.printf("{\"status\":\"test M%d\",\"raw_delta\":%ld,\"deg_change\":%.2f,\"note\":\"%s\"}\n",
+            Serial.printf("{\"status\":\"test M%d\",\"raw_delta\":%lld,\"deg_change\":%.2f,\"note\":\"%s\"}\n",
                 idx + 1, delta, degChange,
                 degChange > 0 ? "CCW=angle+" : "CCW=angle-");
         }
+    } else if (cmd == "I") {
+        Serial.print("{\"diag\":{\"zeroRaw\":[");
+        for (int i = 0; i < NUM_MOTORS; i++) Serial.printf("%s%lld", i?",":"", zeroRaw[i]);
+        Serial.printf("],\"posEnabled\":%d}}\n", posEnabled ? 1 : 0);
     }
 }
 
@@ -272,29 +269,36 @@ void loop() {
     uint32_t elapsed = millis() - lastRead;
     lastRead = millis();
 
-    // 若實際間隔過大，跳過此 cycle
     if (elapsed > 50) return;
 
-    // 清掉上一 cycle 的 F5 回覆，避免塞爆 MCP2515 buffer
     servos.flushReceiveBuffer();
 
-    int32_t raw[NUM_MOTORS];
-    int ok = servos.readAllEncoders(raw);
+    // 用 0x35 讀 RAW encoder（不受 0x92 影響）
+    int64_t raw[NUM_MOTORS];
+    int ok = servos.readAllRawEncoders(raw);
 
-    // 計算當前馬達角度（posEnabled 時用 sessionZeroRaw，否則用 zeroRaw）
-    static float angles[NUM_MOTORS] = {0};  // static: 讀取失敗時保持上一次值
+    // 角度計算：angle = MOTOR_SIGN × (raw - zeroRaw) × 360/16384 + 90
+    // zeroRaw 只有 Z 指令會改，其他任何操作都不會動到
+    static float angles[NUM_MOTORS] = {0};
+    static bool anglesInit = false;
+    if (angleJumpGuardReset) {
+        anglesInit = false;
+        angleJumpGuardReset = false;
+    }
     for (int i = 0; i < NUM_MOTORS; i++) {
-        if (raw[i] < 0) {
-            // 保持上一次的 angles[i]，不覆蓋為 neutralAngle
+        if (raw[i] == INT64_MIN) continue; // 通訊失敗，保持上一次值
+
+        float newAngle = rawToAngle(i, raw[i]);
+
+        // 跳變防護：單 cycle >15° 視為異常
+        if (anglesInit && fabsf(newAngle - angles[i]) > 15.0f) {
+            Serial.printf("{\"warn\":\"M%d jump %.1f->%.1f, discarded\"}\n",
+                          i+1, angles[i], newAngle);
             continue;
         }
-        int32_t ref = sessionZeroRaw[i];
-        int32_t d = raw[i] - ref;
-        if (d > 8192) d -= 16384;
-        if (d < -8192) d += 16384;
-        float delta = (float)d * 360.0f / 16384.0f;
-        angles[i] = MOTOR_SIGN[i] * delta + 90.0f;
+        angles[i] = newAngle;
     }
+    anglesInit = true;
 
     // 位置模式控制
     float targetAngles[NUM_MOTORS] = {0};
@@ -310,7 +314,6 @@ void loop() {
             posStop();
             Serial.println("{\"error\":\"IK invalid, pos stopped\"}");
         } else {
-            // 初始化 prevAngles（第一個 cycle）
             if (adaptiveFirstCycle) {
                 for (int i = 0; i < NUM_MOTORS; i++)
                     prevAngles[i] = angles[i];
@@ -318,16 +321,13 @@ void loop() {
                 adaptiveFirstCycle = false;
             }
 
-            // 計算逐馬達速度 + 整體震動指標
             float vel[NUM_MOTORS];
             float kinetic = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
-                vel[i] = angles[i] - prevAngles[i]; // 度/cycle
+                vel[i] = angles[i] - prevAngles[i];
                 kinetic += vel[i] * vel[i];
             }
 
-            // 低通濾波動能：偵測持續震盪，忽略單次大移動
-            // α=0.1 → 時間常數 200ms，持續震盪 >300ms 才大幅壓 gain
             smoothKinetic = 0.9f * smoothKinetic + 0.1f * kinetic;
             gain = 1.0f / (1.0f + trackingMu * smoothKinetic);
 
@@ -335,14 +335,11 @@ void loop() {
                 targetAngles[i] = target.angles[i];
 
                 float error = target.angles[i] - angles[i];
-                // 方向性阻尼：僅在過衝時煞車（vel 方向與 error 相反）
-                // 朝目標移動時不阻尼 → 大幅移動不再 chatter
                 float damp = (error * vel[i] < 0) ? trackingKd * vel[i] : 0.0f;
                 adjustedAngles[i] = angles[i] + gain * error - damp;
 
                 coords[i] = angleToCoord(i, adjustedAngles[i]);
 
-                // 安全限制
                 if (abs(coords[i]) > 8192) {
                     posStop();
                     Serial.println("{\"error\":\"coord out of range, pos stopped\"}");
@@ -358,7 +355,7 @@ void loop() {
 
     // JSON 輸出
     Serial.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
-                  "\"r\":[%ld,%ld,%ld,%ld,%ld,%ld],"
+                  "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
                   "\"ok\":%d,\"z\":%d,\"pos\":%d",
         angles[0], angles[1], angles[2], angles[3], angles[4], angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
