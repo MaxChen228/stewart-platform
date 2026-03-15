@@ -24,22 +24,25 @@
 
 ### 控制哲學
 
-**集中式控制**：ESP32 統一做位置閉環，馬達只跑速度模式 (0xF6)。
-不使用馬達內建位置控制 (0xFE/0xFD)，因為 Stewart platform 六軸高度耦合——六個獨立 PID 會互相打架。
+**馬達內部位置控制**：ESP32 做軌跡協調，馬達用 0xF5 位置模式 + 內部 10kHz 三環 PID。
+ESP32 不做 PID — 只算 IK 目標角度 → 轉換為馬達坐標 → 發 0xF5。
+馬達的位置環(Kp/Ki/Kd) + 速度環(Kv) 提供力矩級控制，解決了舊 0xF6 速度模式整數 RPM 量化問題。
+
+**自適應追蹤**：ESP32 監測六軸總動能 `Σ velocity²`，震動時自動降低追蹤增益（放棄精度換穩定）。
 
 ### 系統拓撲
 
 ```
-Web UI (target pose sliders)
+Web UI (target pose sliders + μ/speed/acc/motor PID)
     │ WebSocket
     ▼
-Node.js server (server.js:3000)  ←→  REST /api/latest (供 agent 讀取)
+Node.js server (server.js:3000)  ←→  REST /api/latest
     │ Serial
     ▼
-ESP32 (20ms PID loop)
+ESP32 (20ms trajectory coordinator)
     │ CAN bus (MCP2515, 500kbps)
     ▼
-SERVO42D ×6 (0xF6 speed mode)
+SERVO42D ×6 (0xF5 position mode, internal 10kHz PID)
 ```
 
 ### 開發迴圈
@@ -71,11 +74,29 @@ MOTOR_SIGN:           [1, -1, 1, -1, 1, -1]
 | 指令 | DLC | 格式 | 用途 |
 |------|-----|------|------|
 | 0x30 | 2 | `[0x30, CRC]` | 讀編碼器（回覆 8 bytes: carry×4 + val_hi + val_lo + CRC） |
-| 0xF6 | 5 | `[0xF6, dir\|speed_hi, speed_lo, acc, CRC]` | 速度模式（speed 0-3000 RPM, dir b7, acc 0-255, 0=instant） |
+| 0x92 | 2 | `[0x92, CRC]` | 設當前位置為坐標零點（僅在 Z 校正時呼叫） |
+| 0x96 | 7 | `[0x96, CMD, param×4, CRC]` | 設 vFOC PID（CMD=0:Kp/Ki, CMD=1:Kd/Kv, 各 0-1024） |
 | 0xF3 | 3 | `[0xF3, enable, CRC]` | 使能(01)/禁用(00) |
+| 0xF5 | 8 | `[0xF5, speed×2, acc, coord×3, CRC]` | 絕對坐標位置模式（支援即時更新） |
+| 0xF6 | 5 | `[0xF6, dir\|speed_hi, speed_lo, acc, CRC]` | 速度模式（保留用於 T 測試指令） |
 | 0xF7 | 2 | `[0xF7, CRC]` | 緊急停止 |
 
 CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
+
+### 馬達內部三環控制 (vFOC 模式)
+
+```
+位置環 (10kHz): Kp=220, Ki=100, Kd=270  → 目標速度
+速度環 (10kHz): Kv=320                  → 目標電流
+力矩環 (20kHz):                         → PWM → 馬達轉動
+```
+
+透過 0x96 可即時調整。降 Kp + 升 Kd = 柔順阻尼感。
+
+### MCP2515 注意事項
+
+- 只有 2 個接收 buffer，F5 回覆會塞爆 → 每 cycle 開頭必須 flushReceiveBuffer()
+- encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
 
 手冊路徑：`/Users/chenliangyu/Downloads/MKS SERVO42&57D_CAN User Manual V1.0.9.pdf`
 
@@ -83,9 +104,16 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 
 - 14-bit 絕對磁編碼器 (0-16383 = 一圈)
 - 零點校正值 `zeroRaw[6]` 存 ESP32 NVS，重開機不丟失
-- 角度公式：`angle[i] = MOTOR_SIGN[i] * (raw - zeroRaw) * 360/16384 + 90`
+- 角度公式：`angle[i] = MOTOR_SIGN[i] * (raw - sessionZeroRaw) * 360/16384 + 90`
 - 校正假設：Zero All 時所有下腿朝上 = 90°
 - ±180° wrapping 限制：馬達不可轉超過半圈
+
+### zeroRaw vs sessionZeroRaw
+
+- `zeroRaw`：存 NVS 的校正值，只有 Z/Z0~Z5 指令會改
+- `sessionZeroRaw`：運行時使用的值，開機時 = zeroRaw
+- Enable 時 0x92 可能改變 0x30 讀數 → sessionZeroRaw 自動補償偏移
+- **只有 Z/Z0~Z5 會改變校正映射**，其他操作不影響
 
 ## 逆向運動學 (IK)
 
@@ -117,63 +145,54 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 
 | 指令 | 說明 |
 |------|------|
-| `Z` | Zero All（存 NVS） |
+| `Z` | Zero All（0x92 設零 + 存 NVS） |
 | `Z0`~`Z5` | 單顆歸零 |
-| `D` | Disable 所有馬達 |
-| `E` | 啟動 PID（先 0xF3 enable） |
-| `S` | 停止 PID（0xF6 speed=0 → 0xF3 disable） |
+| `D` | Disable 所有馬達（斷電，可自由轉動） |
+| `E` | 啟動位置控制（0x92 + enable + 開始發 F5） |
+| `S` | 停止追蹤（馬達保持使能，有保持力矩） |
 | `P x y z roll pitch yaw` | 設定目標姿態 |
-| `K kp ki kd` | 設定 PID 增益 |
+| `K kp ki kd kv` | 設定馬達內部 vFOC PID（0x96，範圍 0-1024） |
+| `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
+| `M mu` | 設定自適應追蹤震動懲罰係數 |
 | `T0`~`T5` | 單馬達方向測試（以 3 RPM 轉 0.5 秒，回報角度變化） |
 
-## 六軸協作 PID — 現狀與下一步
+## 位置控制 — 現狀
 
-### 已完成
+### 架構
 
-- PID 框架：20ms loop, 讀 encoder → IK(target) → error → PID → 0xF6
-- 方向測試工具 (`T` 指令)
-- 安全限制：maxError=20° 急停, maxRPM=10
-- 死區 1.5°（防低速抖動）
-- Web UI：target pose 滑桿 + PID gains + enable/stop
+```
+targetPose → smoothPose → IK → idealAngles[6]
+                                    ↓
+                          自適應追蹤 (gain based on Σvel²)
+                                    ↓
+                          adjustedAngles[6] → angleToCoord → F5
+                                    ↓
+                          馬達內部 10kHz PID → 力矩 → 運動
+```
 
-### 已驗證
+### 自適應追蹤
 
-- 馬達確實會動，PID 指令鏈完整
-- 六顆馬達方向測試結果一致：奇數馬達 CCW=angle-, 偶數 CCW=angle+
-- MOTOR_SIGN 映射正確
+```
+kinetic = Σ (angle[i] - prevAngle[i])²   // 度/cycle，不除以 dt
+gain = 1 / (1 + μ × kinetic)             // 0~1
+adjustedAngle = current + gain × (ideal - current)
+```
 
-### 待解決：為什麼 PID 還在振盪
+- μ=0：純追蹤，不做自適應
+- μ=0.5（預設）：輕度自適應
+- μ>1：強力抑震，犧牲追蹤精度
 
-1. **幾何排列剛修正為 CW**——修正後尚未實際測試 PID。之前 PID 振盪/跑飛的根因就是 CCW/CW 不匹配，IK 目標角度發給錯的馬達。
+### 已知問題與待調整
 
-2. **參數初始值**：Kp=3, Ki=0, Kd=1, maxRPM=10。修正排列後預期可以正常收斂，但仍需調參：
-   - 先 P-only (Ki=0, Kd=0) 確認方向全對
-   - 加 Kd 壓過衝
-   - 最後加微量 Ki 消除穩態誤差
+1. **F5 方向是否正確**：尚未 100% 驗證 angleToCoord 的 coord 正負是否對應正確的馬達物理方向。若推動後暴走，可能是 coord 符號需翻轉。
+2. **posSpeed/posAcc 調參**：預設 speed=30, acc=5，可能太快導致過沖。建議先用 speed=5, acc=2 測試。
+3. **馬達內部 PID 調參**：降 Kp(→100) + 升 Kd(→400) = 柔順阻尼感。
 
-3. **0xF6 速度解析度限制**：speed 參數為整數 RPM (0-3000)。1 RPM = 6°/s，低速控制的最小單位就是 6°/s。使用 `roundf()` + 死區 1.5° 處理。
+### 進化路徑
 
-### 六軸聯動 PID 的宏大理念
-
-Stewart platform 的本質困難：**六軸耦合**。移動一個馬達會同時改變所有六條腿的受力。
-
-目前的架構是「IK 空間解耦」：
-1. 在 task space 定義目標 `[x, y, z, roll, pitch, yaw]`
-2. IK 轉換為 6 個獨立的馬達目標角度
-3. 每個馬達獨立 PID 追自己的目標角度
-
-這個架構在以下條件下可以工作：
-- **低速**：耦合效應被忽略（靜態假設）
-- **保守增益**：不追求快速響應
-- **目標變化平滑**：避免六個馬達同時大幅移動
-
-如果未來需要更高性能（快速、大幅度運動），需要進化到**task-space 控制**：
-- 在 task space 直接做 PID（誤差在 x,y,z,r,p,y 空間）
-- 透過 Jacobian 將 task-space 力/速度映射到 joint-space
-- 加入 feedforward（重力補償、慣性前饋）
-- 考慮耦合動力學
-
-但現階段，IK 解耦 + 保守增益 + 低速運動就足夠了。先讓它穩定地動起來。
+- **Phase 1**（當前）：Joint-space 位置控制 + 自適應追蹤
+- **Phase 2**：Task-space PID（需要 FK 移植到 ESP32）
+- **Phase 3**：Computed torque 前饋（需要動力學模型）
 
 ## 建置與燒錄
 

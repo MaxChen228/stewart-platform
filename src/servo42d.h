@@ -101,6 +101,16 @@ public:
         return INT32_MIN;
     }
 
+    // 清空 CAN 接收緩衝區（丟棄所有待讀訊息）
+    void flushReceiveBuffer() {
+        unsigned long rxId;
+        uint8_t rxLen;
+        uint8_t rxBuf[8];
+        while (can.checkReceive() == CAN_MSGAVAIL) {
+            can.readMsgBuf(&rxId, &rxLen, rxBuf);
+        }
+    }
+
     // 讀取所有馬達編碼器原始值
     // 回傳成功讀取的馬達數
     int readAllEncoders(int32_t rawValues[NUM_MOTORS]) {
