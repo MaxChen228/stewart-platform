@@ -71,34 +71,25 @@ MOTOR_SIGN:           [1, -1, 1, -1, 1, -1]
 
 ## CAN 指令
 
-| 指令 | DLC | 格式 | 用途 |
-|------|-----|------|------|
-| 0x30 | 2 | `[0x30, CRC]` | 讀編碼器（回覆 8 bytes: carry×4 + val_hi + val_lo + CRC） |
-| 0x92 | 2 | `[0x92, CRC]` | 設當前位置為坐標零點（僅在 Z 校正時呼叫） |
-| 0x96 | 7 | `[0x96, CMD, param×4, CRC]` | 設 vFOC PID（CMD=0:Kp/Ki, CMD=1:Kd/Kv, 各 0-1024） |
-| 0xF3 | 3 | `[0xF3, enable, CRC]` | 使能(01)/禁用(00) |
-| 0xF5 | 8 | `[0xF5, speed×2, acc, coord×3, CRC]` | 絕對坐標位置模式（支援即時更新） |
-| 0xF6 | 5 | `[0xF6, dir\|speed_hi, speed_lo, acc, CRC]` | 速度模式（保留用於 T 測試指令） |
-| 0xF7 | 2 | `[0xF7, CRC]` | 緊急停止 |
+完整 CAN 指令手冊：`docs/servo42d/00-index.md`（按指令碼查表 + 歧義消除 + 常見任務流程）
+
+本專案常用指令摘要：
+
+| 指令 | 用途 |
+|------|------|
+| 0x35 | 讀 RAW 累積編碼器（不受 0x92 影響） |
+| 0x92 | 設當前位置為坐標零點 |
+| 0x96 | 設 vFOC PID（Kp/Ki/Kd/Kv, 0-1024） |
+| 0xF3 | 使能(01)/禁用(00) |
+| 0xF5 | 絕對坐標位置模式（支援即時更新） |
+| 0xF7 | 緊急停止 |
 
 CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
-
-### 馬達內部三環控制 (vFOC 模式)
-
-```
-位置環 (10kHz): Kp=220, Ki=100, Kd=270  → 目標速度
-速度環 (10kHz): Kv=320                  → 目標電流
-力矩環 (20kHz):                         → PWM → 馬達轉動
-```
-
-透過 0x96 可即時調整。降 Kp + 升 Kd = 柔順阻尼感。
 
 ### MCP2515 注意事項
 
 - 只有 2 個接收 buffer，F5 回覆會塞爆 → 每 cycle 開頭必須 flushReceiveBuffer()
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
-
-手冊路徑：`/Users/chenliangyu/Downloads/MKS SERVO42&57D_CAN User Manual V1.0.9.pdf`
 
 ## 編碼器與校正
 
