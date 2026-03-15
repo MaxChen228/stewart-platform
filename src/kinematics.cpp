@@ -17,7 +17,7 @@ static void get_platform_point(int i, float out[3]) {
 }
 
 // R = Rz(yaw) * Ry(pitch) * Rx(roll)，與參考專案一致
-static void rotation_matrix(float roll_deg, float pitch_deg, float yaw_deg, float R[3][3]) {
+void rotation_matrix(float roll_deg, float pitch_deg, float yaw_deg, float R[3][3]) {
     float cr = cosf(roll_deg * DEG2RAD),  sr = sinf(roll_deg * DEG2RAD);
     float cp = cosf(pitch_deg * DEG2RAD), sp = sinf(pitch_deg * DEG2RAD);
     float cy = cosf(yaw_deg * DEG2RAD),   sy = sinf(yaw_deg * DEG2RAD);
@@ -73,4 +73,26 @@ IKResult inverse_kinematics(const Pose& pose) {
     }
 
     return result;
+}
+
+void rotation_matrix_derivs(float roll_deg, float pitch_deg, float yaw_deg,
+                             float dRr[3][3], float dRp[3][3], float dRyw[3][3]) {
+    float cr = cosf(roll_deg * DEG2RAD),  sr = sinf(roll_deg * DEG2RAD);
+    float cp = cosf(pitch_deg * DEG2RAD), sp = sinf(pitch_deg * DEG2RAD);
+    float cy = cosf(yaw_deg * DEG2RAD),   sy = sinf(yaw_deg * DEG2RAD);
+
+    // dR/droll
+    dRr[0][0] = 0;           dRr[0][1] = cy*sp*cr+sy*sr;   dRr[0][2] = -cy*sp*sr+sy*cr;
+    dRr[1][0] = 0;           dRr[1][1] = sy*sp*cr-cy*sr;   dRr[1][2] = -sy*sp*sr-cy*cr;
+    dRr[2][0] = 0;           dRr[2][1] = cp*cr;            dRr[2][2] = -cp*sr;
+
+    // dR/dpitch
+    dRp[0][0] = -cy*sp;      dRp[0][1] = cy*cp*sr;         dRp[0][2] = cy*cp*cr;
+    dRp[1][0] = -sy*sp;      dRp[1][1] = sy*cp*sr;         dRp[1][2] = sy*cp*cr;
+    dRp[2][0] = -cp;         dRp[2][1] = -sp*sr;           dRp[2][2] = -sp*cr;
+
+    // dR/dyaw
+    dRyw[0][0] = -sy*cp;     dRyw[0][1] = -sy*sp*sr-cy*cr; dRyw[0][2] = -sy*sp*cr+cy*sr;
+    dRyw[1][0] = cy*cp;      dRyw[1][1] = cy*sp*sr-sy*cr;  dRyw[1][2] = cy*sp*cr+sy*sr;
+    dRyw[2][0] = 0;          dRyw[2][1] = 0;               dRyw[2][2] = 0;
 }

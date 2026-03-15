@@ -2,6 +2,7 @@
 #include "servo42d.h"
 #include "kinematics.h"
 #include "encoder.h"
+#include "forward_kinematics.h"
 
 Servo42D servos;
 EncoderState enc;
@@ -185,6 +186,13 @@ void handleSerial() {
                 idx + 1, delta, degChange,
                 degChange > 0 ? "CCW=angle+" : "CCW=angle-");
         }
+    } else if (cmd == "F") {
+        // FK 測試：從當前角度反算平台姿態
+        FKSolver fk;
+        Pose p = fk.solve(enc.angles);
+        Serial.printf("{\"fk\":[%.2f,%.2f,%.2f,%.3f,%.3f,%.3f],\"iter\":%d,\"err\":%.3f,\"ok\":%d}\n",
+            p.x, p.y, p.z, p.roll, p.pitch, p.yaw,
+            fk.iterations, fk.residual, fk.converged ? 1 : 0);
     } else if (cmd == "I") {
         Serial.print("{\"diag\":{\"zeroRaw\":[");
         for (int i = 0; i < NUM_MOTORS; i++) Serial.printf("%s%lld", i?",":"", enc.zeroRaw[i]);

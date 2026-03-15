@@ -51,3 +51,10 @@ struct IKResult {
 
 // 逆向運動學：輸入姿態，輸出六個馬達角度
 IKResult inverse_kinematics(const Pose& pose);
+
+// 旋轉矩陣 R = Rz(yaw) * Ry(pitch) * Rx(roll)（IK/FK 共用）
+void rotation_matrix(float roll_deg, float pitch_deg, float yaw_deg, float R[3][3]);
+
+// 旋轉矩陣偏導數（FK Jacobian 用）
+void rotation_matrix_derivs(float roll_deg, float pitch_deg, float yaw_deg,
+                             float dRr[3][3], float dRp[3][3], float dRyw[3][3]);
