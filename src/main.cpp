@@ -26,6 +26,7 @@ constexpr float SMOOTH_TIME = 0.5f; // setpoint 平滑時間（秒）
 // ===== 自適應追蹤 =====
 float prevAngles[NUM_MOTORS] = {0};  // 上一 cycle 的角度（算速度用）
 float trackingMu = 0.5f;            // 震動懲罰係數（越大越優先穩定）
+float trackingKd = 3.0f;            // 速度阻尼係數（抵抗當前運動方向）
 bool adaptiveFirstCycle = true;
 
 // 逐馬達速度方向：1=正常, -1=翻轉
@@ -226,11 +227,13 @@ void handleSerial() {
             Serial.printf("{\"status\":\"pos params\",\"speed\":%d,\"acc\":%d}\n", posSpeed, posAcc);
         }
     } else if (cmd.startsWith("M ")) {
-        // 設定自適應追蹤參數: M mu
-        float mu;
-        if (sscanf(cmd.c_str(), "M %f", &mu) == 1) {
+        // 設定自適應追蹤參數: M mu [kd]
+        float mu, kd = -1;
+        int n = sscanf(cmd.c_str(), "M %f %f", &mu, &kd);
+        if (n >= 1) {
             trackingMu = fmaxf(0.0f, mu);
-            Serial.printf("{\"status\":\"tracking mu\",\"mu\":%.2f}\n", trackingMu);
+            if (n >= 2) trackingKd = fmaxf(0.0f, kd);
+            Serial.printf("{\"status\":\"tracking params\",\"mu\":%.2f,\"kd\":%.2f}\n", trackingMu, trackingKd);
         }
     } else if (cmd.startsWith("T")) {
         int idx = cmd.charAt(1) - '0';
@@ -313,22 +316,23 @@ void loop() {
                 adaptiveFirstCycle = false;
             }
 
-            // 計算整體震動指標：Σ velocity²
+            // 計算逐馬達速度 + 整體震動指標
+            float vel[NUM_MOTORS];
             float kinetic = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
-                float vel = angles[i] - prevAngles[i]; // 度/cycle，不除以 dt
-                kinetic += vel * vel;
+                vel[i] = angles[i] - prevAngles[i]; // 度/cycle
+                kinetic += vel[i] * vel[i];
             }
 
             // 自適應增益：震動越大 → gain 越小 → 目標越保守
-            // gain = 1 / (1 + μ × kinetic)
             gain = 1.0f / (1.0f + trackingMu * kinetic);
 
             for (int i = 0; i < NUM_MOTORS; i++) {
                 targetAngles[i] = target.angles[i];
 
-                // 調整目標：不直接送 IK 角度，按 gain 從當前位置靠近
-                adjustedAngles[i] = angles[i] + gain * (target.angles[i] - angles[i]);
+                // PD 控制：P = gain × error（自適應衰減），D = Kd × velocity（始終阻尼）
+                float error = target.angles[i] - angles[i];
+                adjustedAngles[i] = angles[i] + gain * error - trackingKd * vel[i];
 
                 coords[i] = angleToCoord(i, adjustedAngles[i]);
 
@@ -357,12 +361,12 @@ void loop() {
     if (posEnabled) {
         Serial.printf(",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                       "\"adj\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                      "\"g\":%.3f",
+                      "\"g\":%.3f,\"kd\":%.1f",
             targetAngles[0],targetAngles[1],targetAngles[2],
             targetAngles[3],targetAngles[4],targetAngles[5],
             adjustedAngles[0],adjustedAngles[1],adjustedAngles[2],
             adjustedAngles[3],adjustedAngles[4],adjustedAngles[5],
-            gain);
+            gain, trackingKd);
     }
 
     Serial.println("}");
