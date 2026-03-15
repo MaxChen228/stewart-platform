@@ -1,103 +1,82 @@
 #pragma once
 #include "kinematics.h"
 #include "forward_kinematics.h"
+#include "trajectory.h"
 
-struct TaskSpacePD {
-    // 增益：[x, y, z, roll, pitch, yaw]
-    // Kp = 每 cycle 修正的誤差比例（0~1）
-    // Kd = 阻尼係數（秒），Kd/dt 為速度懲罰比例
-    float Kp[6] = {0.15f, 0.15f, 0.15f, 0.15f, 0.15f, 0.15f};
-    float Kd[6] = {0.01f, 0.01f, 0.01f, 0.01f, 0.01f, 0.01f};
+struct TrajectoryController {
+    // 增益（task-space 回饋修正用，小值即可）
+    float Kp = 0.1f;
 
     FKSolver fk;
-    Pose prevPose;
-    bool firstCycle = true;
+    Trajectory traj;
     int fkFailCount = 0;
 
-    // 遙測（供 JSON 輸出）
-    Pose currentPose, poseError, controlPose;
+    // 遙測
+    Pose plannedPose;     // 軌跡規劃的當前點
+    Pose actualPose;      // FK 估算的實際姿態
+    Pose trackingError;   // planned - actual
 
-    TaskSpacePD() : prevPose{0, 0, NEUTRAL_Z, 0, 0, 0} {}
+    TrajectoryController() {}
 
     void reset(const float angles[6]) {
         fk.reset();
-        currentPose = fk.solve(angles);
-        prevPose = currentPose;
-        firstCycle = true;
+        actualPose = fk.solve(angles);
         fkFailCount = 0;
     }
 
-    // 核心：從當前角度 + 目標姿態 → 輸出馬達目標角度
-    // 回傳 false = FK 或 IK 失敗
-    bool update(const float currentAngles[6], const Pose& target,
-                float outAngles[6]) {
-        constexpr float DT = 0.02f;
+    // 開始新軌跡（從當前 FK 姿態到 target，持續 duration 秒）
+    void startTrajectory(const float angles[6], const Pose& target, float duration) {
+        actualPose = fk.solve(angles);
+        traj.start(actualPose, target, duration);
+    }
 
-        // 1. FK：從馬達角度恢復平台姿態
-        currentPose = fk.solve(currentAngles);
-        if (!fk.converged) {
-            fkFailCount++;
-            return false;
-        }
+    // 核心：每 cycle 呼叫
+    // 輸出：outIncrements[6] = 每個馬達的 encoder count 增量（用於 F4）
+    // 回傳 false = FK 或 IK 失敗
+    bool update(const float currentAngles[6], float dt, int32_t outIncrements[6]) {
+        // 1. FK：估算實際姿態
+        actualPose = fk.solve(currentAngles);
+        if (!fk.converged) { fkFailCount++; return false; }
         fkFailCount = 0;
 
-        // 2. Task-space 誤差
-        float err[6] = {
-            target.x    - currentPose.x,
-            target.y    - currentPose.y,
-            target.z    - currentPose.z,
-            target.roll - currentPose.roll,
-            target.pitch- currentPose.pitch,
-            target.yaw  - currentPose.yaw
+        // 2. 軌跡推進
+        plannedPose = traj.advance(dt);
+
+        // 3. Task-space 追蹤誤差
+        trackingError = {
+            plannedPose.x     - actualPose.x,
+            plannedPose.y     - actualPose.y,
+            plannedPose.z     - actualPose.z,
+            plannedPose.roll  - actualPose.roll,
+            plannedPose.pitch - actualPose.pitch,
+            plannedPose.yaw   - actualPose.yaw
         };
-        poseError = {err[0], err[1], err[2], err[3], err[4], err[5]};
 
-        // 3. Task-space 速度（有限差分）
-        float vel[6] = {0};
-        if (!firstCycle) {
-            vel[0] = (currentPose.x     - prevPose.x)     / DT;
-            vel[1] = (currentPose.y     - prevPose.y)     / DT;
-            vel[2] = (currentPose.z     - prevPose.z)     / DT;
-            vel[3] = (currentPose.roll  - prevPose.roll)  / DT;
-            vel[4] = (currentPose.pitch - prevPose.pitch) / DT;
-            vel[5] = (currentPose.yaw   - prevPose.yaw)   / DT;
-        }
-
-        // 4. PD 控制：controlPose = currentPose + Kp·error - Kd·velocity
-        float cp[6] = {
-            currentPose.x,     currentPose.y,     currentPose.z,
-            currentPose.roll,  currentPose.pitch,  currentPose.yaw
+        // 4. 修正後的目標姿態 = planned + 小量回饋修正
+        Pose corrected = {
+            plannedPose.x     + Kp * trackingError.x,
+            plannedPose.y     + Kp * trackingError.y,
+            plannedPose.z     + Kp * trackingError.z,
+            plannedPose.roll  + Kp * trackingError.roll,
+            plannedPose.pitch + Kp * trackingError.pitch,
+            plannedPose.yaw   + Kp * trackingError.yaw
         };
-        for (int i = 0; i < 6; i++) {
-            cp[i] += Kp[i] * err[i] - Kd[i] * vel[i];
-        }
-        controlPose = {cp[0], cp[1], cp[2], cp[3], cp[4], cp[5]};
 
-        // 5. IK：controlPose → 馬達目標角度
-        IKResult ik = inverse_kinematics(controlPose);
+        // 5. IK → 目標馬達角度
+        IKResult ik = inverse_kinematics(corrected);
         if (!ik.valid) {
-            // IK 無解 → 嘗試折半（currentPose 和 target 的中點）
-            Pose mid = {
-                (currentPose.x + target.x) * 0.5f,
-                (currentPose.y + target.y) * 0.5f,
-                (currentPose.z + target.z) * 0.5f,
-                (currentPose.roll + target.roll) * 0.5f,
-                (currentPose.pitch + target.pitch) * 0.5f,
-                (currentPose.yaw + target.yaw) * 0.5f
-            };
-            ik = inverse_kinematics(mid);
-            if (!ik.valid) {
-                prevPose = currentPose;
-                firstCycle = false;
-                return false;
-            }
-            controlPose = mid;
+            // 回退：用 plannedPose 不加修正
+            ik = inverse_kinematics(plannedPose);
+            if (!ik.valid) return false;
         }
 
-        for (int i = 0; i < 6; i++) outAngles[i] = ik.angles[i];
+        // 6. 計算 F4 增量 = (目標角度 - 實際角度) 轉 encoder counts
+        for (int i = 0; i < 6; i++) {
+            float deltaAngle = ik.angles[i] - currentAngles[i];
+            outIncrements[i] = (int32_t)roundf(
+                deltaAngle / (float)MOTOR_SIGN[i] * 16384.0f / 360.0f);
+        }
 
-        prevPose = currentPose;
-        firstCycle = false;
         return true;
     }
 };

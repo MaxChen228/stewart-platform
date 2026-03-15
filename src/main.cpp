@@ -11,28 +11,14 @@ EncoderState enc;
 // ===== 位置模式控制 =====
 Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 bool posEnabled = false;
-float enableAngle[NUM_MOTORS] = {0};
 
 uint16_t posSpeed = 30;
 uint8_t  posAcc   = 5;
+float trajDuration = 1.0f;  // 軌跡持續時間（秒）
 
-// ===== 控制模式 =====
-// 0 = joint-space（舊版自適應追蹤）
-// 1 = task-space PD（FK + IK）
-int controlMode = 1;
-
-// Task-space controller
-TaskSpacePD tsController;
-
-// Joint-space 備用參數
-Pose smoothedTarget = {0, 0, NEUTRAL_Z, 0, 0, 0};
-constexpr float SMOOTH_TIME = 0.5f;
-float prevAngles[NUM_MOTORS] = {0};
-float trackingMu = 0.5f;
-float trackingKd = 3.0f;
-float maxGain = 0.3f;
-float smoothKinetic = 0;
-bool adaptiveFirstCycle = true;
+// ===== 控制器 =====
+TrajectoryController controller;
+bool syncEnabled = false;
 
 void posStop() {
     posEnabled = false;
@@ -43,17 +29,9 @@ void posDisable() {
     posEnabled = false;
     servos.stopAllPosition(5);
     delay(50);
+    servos.enableSync(false);
+    syncEnabled = false;
     servos.disableAll();
-}
-
-static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
-    float alpha = fminf(1.0f, dt / SMOOTH_TIME);
-    sm.x    += alpha * (tgt.x    - sm.x);
-    sm.y    += alpha * (tgt.y    - sm.y);
-    sm.z    += alpha * (tgt.z    - sm.z);
-    sm.roll += alpha * (tgt.roll - sm.roll);
-    sm.pitch+= alpha * (tgt.pitch- sm.pitch);
-    sm.yaw  += alpha * (tgt.yaw  - sm.yaw);
 }
 
 void setup() {
@@ -103,6 +81,7 @@ void handleSerial() {
             return;
         }
 
+        // 啟用馬達 + 0x92（F5/F4 座標零點）
         for (int i = 0; i < NUM_MOTORS; i++)
             servos.setEnable(MOTOR_ADDR[i], true);
         delay(20);
@@ -112,48 +91,46 @@ void handleSerial() {
         }
         servos.flushReceiveBuffer();
 
-        int64_t raw[NUM_MOTORS];
-        servos.readAllRawEncoders(raw);
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            enableAngle[i] = (raw[i] != INT64_MIN)
-                ? enc.rawToAngle(i, raw[i]) : 90.0f;
-        }
+        // 啟用同步模式
+        servos.enableSync(true);
+        syncEnabled = true;
+        delay(10);
 
         // 初始化控制器
-        if (controlMode == 1) {
-            tsController.reset(enc.angles);
-        } else {
-            smoothedTarget = targetPose;
-            for (int i = 0; i < NUM_MOTORS; i++)
-                prevAngles[i] = enableAngle[i];
-            adaptiveFirstCycle = true;
-        }
+        controller.reset(enc.angles);
+        // 開始軌跡：從當前位置到 targetPose
+        controller.startTrajectory(enc.angles, targetPose, trajDuration);
 
         posEnabled = true;
-        Serial.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d}\n",
-            controlMode, posSpeed, posAcc);
+        Serial.printf("{\"status\":\"pos enabled\",\"speed\":%d,\"acc\":%d,\"dur\":%.1f}\n",
+            posSpeed, posAcc, trajDuration);
     } else if (cmd == "S") {
         posStop();
+        if (syncEnabled) {
+            servos.enableSync(false);
+            syncEnabled = false;
+        }
         Serial.println("{\"status\":\"pos stopped\"}");
     } else if (cmd.startsWith("P ")) {
         float v[6];
         if (sscanf(cmd.c_str(), "P %f %f %f %f %f %f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]) == 6) {
             targetPose = {v[0], v[1], v[2], v[3], v[4], v[5]};
+            // 若正在控制中，啟動新軌跡
+            if (posEnabled) {
+                controller.startTrajectory(enc.angles, targetPose, trajDuration);
+            }
             Serial.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
                 v[0],v[1],v[2],v[3],v[4],v[5]);
         }
     } else if (cmd.startsWith("C ")) {
-        // 控制模式切換：C 0 = joint-space, C 1 [kp kd] = task-space PD
-        float mode_f, kp = -1, kd = -1;
-        int n = sscanf(cmd.c_str(), "C %f %f %f", &mode_f, &kp, &kd);
+        // 控制參數：C kp [duration]
+        float kp = -1, dur = -1;
+        int n = sscanf(cmd.c_str(), "C %f %f", &kp, &dur);
         if (n >= 1) {
-            controlMode = (int)mode_f;
-            if (controlMode == 1 && n >= 2) {
-                for (int i = 0; i < 6; i++) tsController.Kp[i] = fmaxf(0.01f, fminf(1.0f, kp));
-                if (n >= 3) for (int i = 0; i < 6; i++) tsController.Kd[i] = fmaxf(0.0f, kd);
-            }
-            Serial.printf("{\"status\":\"control mode\",\"mode\":%d,\"kp\":%.3f,\"kd\":%.3f}\n",
-                controlMode, tsController.Kp[0], tsController.Kd[0]);
+            controller.Kp = fmaxf(0.0f, fminf(1.0f, kp));
+            if (n >= 2) trajDuration = fmaxf(0.1f, dur);
+            Serial.printf("{\"status\":\"control params\",\"kp\":%.3f,\"dur\":%.1f}\n",
+                controller.Kp, trajDuration);
         }
     } else if (cmd.startsWith("K ")) {
         int kp, ki, kd, kv;
@@ -173,17 +150,6 @@ void handleSerial() {
             posSpeed = constrain(spd, 1, 200);
             posAcc = constrain(ac, 1, 255);
             Serial.printf("{\"status\":\"pos params\",\"speed\":%d,\"acc\":%d}\n", posSpeed, posAcc);
-        }
-    } else if (cmd.startsWith("M ")) {
-        // Joint-space 參數（C 0 模式用）
-        float mu, kd = -1, mg = -1;
-        int n = sscanf(cmd.c_str(), "M %f %f %f", &mu, &kd, &mg);
-        if (n >= 1) {
-            trackingMu = fmaxf(0.0f, mu);
-            if (n >= 2) trackingKd = fmaxf(0.0f, kd);
-            if (n >= 3) maxGain = fmaxf(0.05f, fminf(1.0f, mg));
-            Serial.printf("{\"status\":\"tracking params\",\"mu\":%.2f,\"kd\":%.2f,\"maxGain\":%.2f}\n",
-                trackingMu, trackingKd, maxGain);
         }
     } else if (cmd.startsWith("T")) {
         int idx = cmd.charAt(1) - '0';
@@ -225,7 +191,7 @@ void handleSerial() {
     } else if (cmd == "I") {
         Serial.print("{\"diag\":{\"zeroRaw\":[");
         for (int i = 0; i < NUM_MOTORS; i++) Serial.printf("%s%lld", i?",":"", enc.zeroRaw[i]);
-        Serial.printf("],\"mode\":%d,\"posEnabled\":%d}}\n", controlMode, posEnabled ? 1 : 0);
+        Serial.printf("],\"posEnabled\":%d,\"sync\":%d}}\n", posEnabled ? 1 : 0, syncEnabled ? 1 : 0);
     }
 }
 
@@ -238,82 +204,45 @@ void loop() {
     lastRead = millis();
     if (elapsed > 50) return;
 
+    constexpr float DT = 0.02f;
+
     servos.flushReceiveBuffer();
 
     int64_t raw[NUM_MOTORS];
     int ok = servos.readAllRawEncoders(raw);
     enc.updateAngles(raw);
 
-    float motorTargets[NUM_MOTORS] = {0};
-    int32_t coords[NUM_MOTORS] = {0};
-
     if (posEnabled) {
-        bool controlOk = false;
+        int32_t increments[NUM_MOTORS] = {0};
+        bool controlOk = controller.update(enc.angles, DT, increments);
 
-        if (controlMode == 1) {
-            // ===== Task-space PD =====
-            controlOk = tsController.update(enc.angles, targetPose, motorTargets);
-
-            // FK 連續失敗 5 次 → 自動降回 joint-space
-            if (tsController.fkFailCount >= 5) {
-                controlMode = 0;
-                smoothedTarget = targetPose;
-                for (int i = 0; i < NUM_MOTORS; i++)
-                    prevAngles[i] = enc.angles[i];
-                adaptiveFirstCycle = true;
-                Serial.println("{\"warn\":\"FK fail x5, fallback to joint-space\"}");
-            }
+        if (controller.fkFailCount >= 5) {
+            posStop();
+            Serial.println("{\"error\":\"FK fail x5, stopped\"}");
         }
 
-        if (controlMode == 0) {
-            // ===== Joint-space 備用 =====
-            constexpr float FIXED_DT = 0.02f;
-            smoothPose(smoothedTarget, targetPose, FIXED_DT);
-
-            IKResult target = inverse_kinematics(smoothedTarget);
-            if (!target.valid) {
-                posStop();
-                Serial.println("{\"error\":\"IK invalid, pos stopped\"}");
-            } else {
-                if (adaptiveFirstCycle) {
-                    for (int i = 0; i < NUM_MOTORS; i++)
-                        prevAngles[i] = enc.angles[i];
-                    smoothKinetic = 0;
-                    adaptiveFirstCycle = false;
-                }
-
-                float vel[NUM_MOTORS];
-                float kinetic = 0;
-                for (int i = 0; i < NUM_MOTORS; i++) {
-                    vel[i] = enc.angles[i] - prevAngles[i];
-                    kinetic += vel[i] * vel[i];
-                }
-
-                smoothKinetic = 0.9f * smoothKinetic + 0.1f * kinetic;
-                float gain = fminf(maxGain, 1.0f / (1.0f + trackingMu * smoothKinetic));
-
-                for (int i = 0; i < NUM_MOTORS; i++) {
-                    float error = target.angles[i] - enc.angles[i];
-                    float dampRatio = (error * vel[i] < 0) ? 1.0f : 0.3f;
-                    float damp = trackingKd * vel[i] * dampRatio;
-                    motorTargets[i] = enc.angles[i] + gain * error - damp;
-                    prevAngles[i] = enc.angles[i];
-                }
-                controlOk = true;
-            }
-        }
-
-        // 發送 F5 指令
         if (controlOk) {
+            // 安全限制：單 cycle 增量不超過 ±500 counts (≈11°)
+            bool safe = true;
             for (int i = 0; i < NUM_MOTORS; i++) {
-                coords[i] = enc.angleToCoord(i, motorTargets[i], enableAngle[i]);
-                if (abs(coords[i]) > 8192) {
+                if (abs(increments[i]) > 500) {
                     posStop();
-                    Serial.println("{\"error\":\"coord out of range, pos stopped\"}");
-                    controlOk = false;
+                    Serial.printf("{\"error\":\"increment too large M%d=%d, stopped\"}\n",
+                        i + 1, increments[i]);
+                    safe = false;
                     break;
                 }
-                servos.setAbsoluteCoord(MOTOR_ADDR[i], posSpeed, posAcc, coords[i]);
+            }
+
+            if (safe) {
+                // F4 相對座標 → 各馬達（同步模式下緩衝）
+                for (int i = 0; i < NUM_MOTORS; i++) {
+                    servos.setRelativeCoord(MOTOR_ADDR[i], posSpeed, posAcc, increments[i]);
+                }
+                // 觸發同步執行
+                servos.triggerSync();
+                delayMicroseconds(500);
+                servos.triggerSync(); // 重複確保收到
             }
         }
     }
@@ -321,30 +250,21 @@ void loop() {
     // JSON 輸出
     Serial.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
-                  "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d",
+                  "\"ok\":%d,\"z\":%d,\"pos\":%d",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-        ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode);
+        ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0);
 
-    if (posEnabled && controlMode == 1) {
-        const Pose& fk = tsController.currentPose;
-        const Pose& er = tsController.poseError;
+    if (posEnabled) {
+        const Pose& fp = controller.actualPose;
+        const Pose& te = controller.trackingError;
         Serial.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
-                      "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
-                      "\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                      "\"fki\":%d",
-            fk.x, fk.y, fk.z, fk.roll, fk.pitch, fk.yaw,
-            er.x, er.y, er.z, er.roll, er.pitch, er.yaw,
-            motorTargets[0],motorTargets[1],motorTargets[2],
-            motorTargets[3],motorTargets[4],motorTargets[5],
-            tsController.fk.iterations);
-    } else if (posEnabled && controlMode == 0) {
-        Serial.printf(",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                      "\"g\":%.3f",
-            motorTargets[0],motorTargets[1],motorTargets[2],
-            motorTargets[3],motorTargets[4],motorTargets[5],
-            maxGain);
+                      "\"err\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                      "\"prog\":%.2f,\"fki\":%d",
+            fp.x, fp.y, fp.z, fp.roll, fp.pitch, fp.yaw,
+            te.x, te.y, te.z, te.roll, te.pitch, te.yaw,
+            controller.traj.progress(), controller.fk.iterations);
     }
 
     Serial.println("}");

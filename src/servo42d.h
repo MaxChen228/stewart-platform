@@ -316,4 +316,43 @@ public:
         cmd[6] &= 0xFF;
         can.sendMsgBuf(motorId, 0, 7, cmd);
     }
+
+    // ===== F4 相對坐標位置指令 =====
+    // relCoord: 相對當前位置的增量 (int24, 16384 counts/turn)
+    void setRelativeCoord(uint8_t motorId, uint16_t speed, uint8_t acc, int32_t relCoord) {
+        if (speed > 3000) speed = 3000;
+        if (relCoord > 8388607) relCoord = 8388607;
+        if (relCoord < -8388607) relCoord = -8388607;
+
+        uint8_t cmd[8];
+        cmd[0] = 0xF4;
+        cmd[1] = (speed >> 8) & 0xFF;
+        cmd[2] = speed & 0xFF;
+        cmd[3] = acc;
+        cmd[4] = (relCoord >> 16) & 0xFF;
+        cmd[5] = (relCoord >> 8) & 0xFF;
+        cmd[6] = relCoord & 0xFF;
+        cmd[7] = motorId;
+        for (int i = 0; i < 7; i++) cmd[7] += cmd[i];
+        cmd[7] &= 0xFF;
+        can.sendMsgBuf(motorId, 0, 8, cmd);
+    }
+
+    // ===== 多馬達同步 =====
+    // 啟用同步模式：馬達收到 F4/F5 後緩衝但不執行，等 trigger
+    void enableSync(bool enable = true) {
+        uint8_t cmd[3];
+        cmd[0] = 0x4A;
+        cmd[1] = enable ? 0x01 : 0x00;
+        cmd[2] = (cmd[0] + cmd[1]) & 0xFF; // broadcast CRC (ID=0)
+        can.sendMsgBuf(0x00, 0, 3, cmd);   // broadcast
+    }
+
+    // 觸發同步執行（建議連發 2-3 次，間隔 1ms）
+    void triggerSync() {
+        uint8_t cmd[2];
+        cmd[0] = 0x4B;
+        cmd[1] = 0x4B; // broadcast CRC (ID=0, 0x00+0x4B=0x4B)
+        can.sendMsgBuf(0x00, 0, 2, cmd);
+    }
 };
