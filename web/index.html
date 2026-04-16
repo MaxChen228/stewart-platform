@@ -346,17 +346,16 @@ canvas {
         <span>Pitch</span><input type="range" id="sl-pitch" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-pitch">0</span>
         <span>Yaw</span><input type="range" id="sl-yaw" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-yaw">0</span>
       </div>
-      <div class="dev-label" style="margin:12px 0 8px">Trajectory</div>
-      <div style="display:grid;grid-template-columns:60px 1fr 50px;gap:4px 8px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>Duration</span><input type="range" id="sl-dur" min="0.2" max="5" value="1.0" step="0.1" oninput="updateControl()"><span id="sv-dur">1.0</span>
-        <span>Kp</span><input type="range" id="sl-kp" min="0" max="0.5" value="0.1" step="0.01" oninput="updateControl()"><span id="sv-kp">0.1</span>
-      </div>
       <div class="dev-label" style="margin:12px 0 8px">Motion Params</div>
       <div style="display:grid;grid-template-columns:50px 1fr 50px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
         <span>Speed</span><input type="number" id="pos-speed" value="30" min="1" max="200" step="5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
         <span>Acc</span><input type="number" id="pos-acc" value="5" min="1" max="255" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
       </div>
-      <div id="tracking-display" class="inset-panel" style="margin-top:8px;font-size:11px">—</div>
+      <div class="dev-label" style="margin:12px 0 8px">Adaptive Tracking</div>
+      <div style="display:grid;grid-template-columns:30px 1fr 50px;gap:4px 8px;align-items:center;font-family:var(--font-mono);font-size:11px">
+        <span>μ</span><input type="range" id="sl-mu" min="0" max="5" value="0.5" step="0.1" oninput="updateMu()"><span id="sv-mu">0.5</span>
+      </div>
+      <div id="gain-display" class="inset-panel" style="margin-top:8px;font-size:11px">gain: —</div>
       <div class="dev-label" style="margin:12px 0 8px">Motor PID (vFOC)</div>
       <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr 24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
         <span>Kp</span><input type="number" id="m-kp" value="220" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
@@ -840,26 +839,20 @@ function connectWS() {
       if (data.pos !== undefined) {
         const el = document.getElementById('pos-status');
         const btn = document.getElementById('btnPosEnable');
-        const td = document.getElementById('tracking-display');
         if (data.pos) {
-          if (btn) btn.textContent = 'Running';
+          el.textContent = data.adj ? `ADJ: ${data.adj.map(t=>t.toFixed(1)).join(' ')}` : 'POS ON';
           el.style.color = 'var(--contra)';
-          if (data.err) {
-            const e = data.err;
-            el.textContent = `ERR: ${e[0].toFixed(1)} ${e[1].toFixed(1)} ${e[2].toFixed(1)} | ${e[3].toFixed(1)}° ${e[4].toFixed(1)}° ${e[5].toFixed(1)}°`;
-          } else {
-            el.textContent = 'POS ON';
-          }
-          if (data.prog !== undefined && td) {
-            const pct = (data.prog * 100).toFixed(0);
-            td.textContent = `traj: ${pct}% | fk: ${data.fki || 0} iter`;
-            td.style.color = data.prog < 1 ? 'var(--contra)' : '';
+          if (btn) btn.textContent = 'Running';
+          if (data.g !== undefined) {
+            const gEl = document.getElementById('gain-display');
+            const pct = (data.g * 100).toFixed(1);
+            gEl.textContent = `gain: ${pct}% | ${data.g < 0.5 ? 'DAMPING' : data.g > 0.9 ? 'TRACKING' : 'BLEND'}`;
+            gEl.style.color = data.g < 0.3 ? 'var(--dev)' : '';
           }
         } else {
           el.textContent = 'POS OFF';
           el.style.color = '';
           if (btn) btn.textContent = 'Enable';
-          if (td) { td.textContent = '—'; td.style.color = ''; }
         }
       }
       if (data.status) {
@@ -912,12 +905,10 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
-window.updateControl = function() {
-  const kp = document.getElementById('sl-kp').value;
-  const dur = document.getElementById('sl-dur').value;
-  document.getElementById('sv-kp').textContent = kp;
-  document.getElementById('sv-dur').textContent = dur;
-  sendCmd(`C ${kp} ${dur}`);
+window.updateMu = function() {
+  const mu = document.getElementById('sl-mu').value;
+  document.getElementById('sv-mu').textContent = mu;
+  sendCmd(`M ${mu}`);
 };
 
 window.updateMotorPID = function() {
