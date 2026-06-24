@@ -1,30 +1,34 @@
 # 當前進度與下一步
 
-## 已完成 ✓
+## 現狀
 
-- ESP32 韌體：CAN 通訊、SERVO42D 驅動、編碼器讀取
-- IK (逆向運動學)：pose → 6 motor angles
-- FK (正向運動學)：距離約束 Newton-Raphson，解析 Jacobian
-- NVS 校正持久化
-- Node.js WebSocket 中繼 server
-- Web UI：3D 視覺化 + PID 控制面板
-- PID 框架 + 安全機制
-- 幾何 CW 排列修正
+平台**未達穩定平衡**。輕微擾動下追蹤可運作，稍大擾動即發散且不會自行恢復。
+IK / FK / CAN / 編碼器 / 序列協議 / Web UI 的基礎設施跑得起來，但整體閉環穩定性沒到可宣稱「完成」的程度。
 
-## 進行中 — 六軸 PID 調參
+## 已寫好但未驗證穩定的部分
 
-### 立即要做
+- ESP32 韌體：CAN、SERVO42D 驅動、編碼器、NVS 校正
+- IK 與距離約束 Newton-Raphson FK
+- Joint-space 自適應追蹤（mode 0）
+- Task-space PD（mode 1，預設）+ FK 失敗 fallback
+- Node.js WebSocket 中繼 + Web UI
 
-1. **燒錄 CW 修正後的韌體 + 重新 Zero All**
-2. **單軸驗證**：逐一 enable 單顆馬達，確認方向正確
-3. **六軸 PID 調參**：
-   - P-only 開始 (Kp=3, Ki=0, Kd=0)
-   - 確認六軸全部正確收斂後再加 Kd
-   - 目標：穩定收斂到 ±1° 以內
+「寫好」≠「調穩」。以下都還需逐一驗證。
 
-### 調參策略
+## 下一步
 
-- 先求穩，再求快
-- maxRPM=10 限速，確保安全
-- 死區 1.5° 防低速抖動
-- maxError=20° 急停保護
+1. **單軸方向交叉驗證**：T0~T5 + 六軸同時微動，確認 `MOTOR_SIGN` 與 `angleToCoord` 在耦合下也正確
+2. **找穩定點**：
+   - 先把 controlMode 切回 0，trackingMu 拉高、maxGain 壓低，找一組「擾動下不發散」的參數
+   - 確認 joint-space 能撐住擾動後，再開 mode 1 並從極低 Kp 重新掃
+3. **隔離震盪源**：
+   - 把 posSpeed 從 30 降到 5、posAcc 從 5 降到 2，看震盪是否消失
+   - 若降速能穩 → 馬達內部 vFOC PID 過硬，調 0x96
+   - 若降速也震 → 是 ESP32 外環增益或 FK 雜訊問題
+4. **不要先調精度**：穩定收斂之前，任何 ±X° 的目標都沒意義
+
+## 策略
+
+- 先求不發散，再求收斂，最後才談精度
+- 每次只動一個變數，並記錄擾動下的行為（不是穩態誤差）
+- maxError 急停與工作空間限制保留，不為了「看起來會動」放寬安全機制

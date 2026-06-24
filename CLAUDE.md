@@ -22,13 +22,17 @@
 
 ## 架構
 
-### 控制哲學
+### 控制分層
 
-**馬達內部位置控制**：ESP32 做軌跡協調，馬達用 0xF5 位置模式 + 內部 10kHz 三環 PID。
-ESP32 不做 PID — 只算 IK 目標角度 → 轉換為馬達坐標 → 發 0xF5。
-馬達的位置環(Kp/Ki/Kd) + 速度環(Kv) 提供力矩級控制，解決了舊 0xF6 速度模式整數 RPM 量化問題。
+**馬達內部位置控制**：ESP32 做軌跡協調，馬達用 0xF5 位置模式 + 內部三環 PID。
+ESP32 端不跑 PID，只算 IK 目標角度 → 轉成馬達坐標 → 發 0xF5。
+0xF5 走脈衝量，避開 0xF6 速度模式 1 RPM 的整數量化邊界（量化問題本身仍存在於底層速度環，僅是不再由 ESP32 直接設定）。
 
-**自適應追蹤**：ESP32 監測六軸總動能 `Σ velocity²`，震動時自動降低追蹤增益（放棄精度換穩定）。
+**控制模式**：main.cpp 同時保留兩種模式，預設 `controlMode = 1`：
+- `0` — Joint-space：IK → 直接餵馬達角度 + 自適應追蹤增益
+- `1` — Task-space PD：FK 回算當前 pose → 與 target pose 算誤差 → PD → IK
+
+Task-space PD 連續 FK 失敗 5 次會自動降回 joint-space。
 
 ### 系統拓撲
 
@@ -130,7 +134,7 @@ f_i = |R·P_i + T - A_i|² - UPPER² = 0   (6 方程, 6 未知)
 Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 ```
 
-無 asin、無奇異、任何構型都收斂。
+沒有 IK 的 asin clamp 奇異；Jacobian 在工作空間邊緣仍會病態。實測在 ±15° 操作範圍內收斂良好，邊緣外未驗證。
 
 ## 序列協議
 
@@ -149,7 +153,18 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 
 ## 位置控制 — 現狀
 
-### 架構
+### 現狀（不穩定）
+
+平台尚未達到穩定平衡。**只要有稍大的外部擾動，誤差就會發散、不可恢復**。任何在這之上做的精度/延遲承諾都是假的，調參前先正視這件事。
+
+可能的根因（未逐一證實，按懷疑度排）：
+1. Task-space PD 的 Kp/Kd 過高或 FK 雜訊放大形成正回饋
+2. F5 的 posSpeed/posAcc 設定造成階梯式過沖，疊加成震盪
+3. 馬達內部 vFOC PID 增益與 ESP32 外環頻寬未隔離（內外環頻率太接近）
+4. `angleToCoord` 方向 / `MOTOR_SIGN` 個別馬達錯置（單軸測過但未六軸交叉驗）
+5. IK 在工作空間邊緣 asin 靈敏度爆炸（report-notes §3.1）
+
+### Joint-space 模式（mode 0，備援）
 
 ```
 targetPose → smoothPose → IK → idealAngles[6]
@@ -157,33 +172,29 @@ targetPose → smoothPose → IK → idealAngles[6]
                           自適應追蹤 (gain based on Σvel²)
                                     ↓
                           adjustedAngles[6] → angleToCoord → F5
-                                    ↓
-                          馬達內部 10kHz PID → 力矩 → 運動
 ```
 
-### 自適應追蹤
-
+自適應追蹤公式：
 ```
 kinetic = Σ (angle[i] - prevAngle[i])²   // 度/cycle，不除以 dt
-gain = 1 / (1 + μ × kinetic)             // 0~1
-adjustedAngle = current + gain × (ideal - current)
+smoothKinetic = 0.9·smoothKinetic + 0.1·kinetic
+gain = min(maxGain, 1 / (1 + μ × smoothKinetic))
+adjustedAngle = current + gain × (ideal - current) - Kd × vel × dampRatio
 ```
 
-- μ=0：純追蹤，不做自適應
-- μ=0.5（預設）：輕度自適應
-- μ>1：強力抑震，犧牲追蹤精度
+`dampRatio = 1.0`（vel 與 error 反向，幫助減速）或 `0.3`（同向，避免阻尼造成的相位滯後）。
 
-### 已知問題與待調整
+### Task-space PD 模式（mode 1，預設）
 
-1. **F5 方向是否正確**：尚未 100% 驗證 angleToCoord 的 coord 正負是否對應正確的馬達物理方向。若推動後暴走，可能是 coord 符號需翻轉。
-2. **posSpeed/posAcc 調參**：預設 speed=30, acc=5，可能太快導致過沖。建議先用 speed=5, acc=2 測試。
-3. **馬達內部 PID 調參**：降 Kp(→100) + 升 Kd(→400) = 柔順阻尼感。
+`enc.angles → FK → currentPose → poseError = target - current → PD → ΔPose → IK → motorTargets`
 
-### 進化路徑
+FK 連續失敗 5 次自動 fallback 到 mode 0。
 
-- **Phase 1**（當前）：Joint-space 位置控制 + 自適應追蹤
-- **Phase 2**：Task-space PID（需要 FK 移植到 ESP32）
-- **Phase 3**：Computed torque 前饋（需要動力學模型）
+### 待驗證項
+
+- F5 方向：`angleToCoord` 的 coord 正負是否對應每顆馬達的物理方向（單軸 T 指令過，六軸耦合下未驗）
+- `posSpeed/posAcc`：預設 30 / 5，未做掃描
+- 馬達內部 vFOC PID 與 ESP32 外環頻寬隔離度
 
 ## 建置與燒錄
 

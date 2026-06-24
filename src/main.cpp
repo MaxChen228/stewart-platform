@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <SPI.h>
 #include "servo42d.h"
 #include "kinematics.h"
 #include "encoder.h"
@@ -13,13 +14,22 @@ Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 bool posEnabled = false;
 float enableAngle[NUM_MOTORS] = {0};
 
-uint16_t posSpeed = 30;
-uint8_t  posAcc   = 5;
+uint16_t posSpeed = 120;
+uint8_t  posAcc   = 100;
+
+// ===== HOLD 模式 =====
+// 純 passthrough：snapshot 當前 enc.angles，每 cycle 直送 F5，跳過 PD/IK/平滑
+// 用來測馬達內環硬度
+bool holdMode = false;
+float holdAngles[NUM_MOTORS] = {0};
+float maxHoldErr = 0;
 
 // ===== 控制模式 =====
 // 0 = joint-space（舊版自適應追蹤）
 // 1 = task-space PD（FK + IK）
-int controlMode = 1;
+int controlMode = 0;
+int silentBootTotal = 0;
+int silentBootPerId[7] = {0};
 
 // Task-space controller
 TaskSpacePD tsController;
@@ -36,11 +46,13 @@ bool adaptiveFirstCycle = true;
 
 void posStop() {
     posEnabled = false;
+    holdMode = false;
     servos.stopAllPosition(5);
 }
 
 void posDisable() {
     posEnabled = false;
+    holdMode = false;
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -59,6 +71,13 @@ static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
 void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
+    delay(200); // 給 FreeRTOS / SPI mutex 完全初始化的時間，避免 paramLock NULL
+
+    // 明確 init SPI bus（VSPI 預設腳位 SCK=18 MISO=19 MOSI=23 SS=5）
+    // 必須在任何 MCP_CAN SPI 操作前呼叫，確保 SPI 的 paramLock mutex 已建立
+    SPI.begin(18, 19, 23, 5);
+    SPI.setFrequency(10000000);
+    delay(50);
 
     enc.init();
 
@@ -70,7 +89,27 @@ void setup() {
         delay(2000);
     }
 
+    // DIAGNOSTIC: 不送任何 cmd，只 begin CAN + listen 5s，看 motor 是否從通電就自發 spam
+    {
+        uint32_t st = millis();
+        while (millis() - st < 5000) {
+            if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long id; uint8_t len; uint8_t buf[8];
+                servos.can.readMsgBuf(&id, &len, buf);
+                silentBootTotal++;
+                if (id >= 1 && id <= 6) silentBootPerId[id]++;
+            }
+        }
+    }
+    // 之後恢復一般流程
     servos.disableAll();
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        servos.setResponseMode(MOTOR_ADDR[i], 1, 0);
+        delay(10);
+    }
+    delay(200);
+    servos.flushReceiveBuffer();
+
     Serial.println("{\"status\":\"ready\"}");
 }
 
@@ -103,14 +142,14 @@ void handleSerial() {
             return;
         }
 
-        for (int i = 0; i < NUM_MOTORS; i++)
-            servos.setEnable(MOTOR_ADDR[i], true);
+        uint8_t enMask = servos.enableAll();
+        int enCnt = __builtin_popcount(enMask);
         delay(20);
         for (int i = 0; i < NUM_MOTORS; i++) {
             servos.setZeroPoint(MOTOR_ADDR[i]);
             delay(10);
+            servos.flushReceiveBuffer();
         }
-        servos.flushReceiveBuffer();
 
         int64_t raw[NUM_MOTORS];
         servos.readAllRawEncoders(raw);
@@ -131,11 +170,70 @@ void handleSerial() {
         }
 
         posEnabled = true;
-        Serial.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d}\n",
-            controlMode, posSpeed, posAcc);
+        Serial.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d,"
+            "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
+            controlMode, posSpeed, posAcc,
+            (enMask>>0)&1,(enMask>>1)&1,(enMask>>2)&1,(enMask>>3)&1,(enMask>>4)&1,(enMask>>5)&1,
+            enCnt);
     } else if (cmd == "S") {
         posStop();
         Serial.println("{\"status\":\"pos stopped\"}");
+    } else if (cmd == "H") {
+        // HOLD: snapshot 當前角度，enable + 0x92 + 鎖位
+        if (!enc.zeroed) {
+            Serial.println("{\"error\":\"not calibrated, run Z first\"}");
+            return;
+        }
+        // 先確保 enc.angles 是新鮮的
+        servos.flushReceiveBuffer();
+        int64_t raw0[NUM_MOTORS];
+        servos.readAllRawEncoders(raw0);
+        enc.updateAngles(raw0);
+        for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = enc.angles[i];
+
+        // Enable 馬達 + 設零點
+        uint8_t enMask = servos.enableAll();
+        int enCnt = __builtin_popcount(enMask);
+        delay(20);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            servos.setZeroPoint(MOTOR_ADDR[i]);
+            delay(10);
+            servos.flushReceiveBuffer();
+        }
+
+        // 重抓 enableAngle（0x92 之後的當前角度）
+        int64_t raw[NUM_MOTORS];
+        servos.readAllRawEncoders(raw);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            enableAngle[i] = (raw[i] != INT64_MIN)
+                ? enc.rawToAngle(i, raw[i]) : holdAngles[i];
+        }
+
+        holdMode = true;
+        posEnabled = true;
+        maxHoldErr = 0;
+        Serial.printf("{\"status\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+            "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
+            holdAngles[0],holdAngles[1],holdAngles[2],
+            holdAngles[3],holdAngles[4],holdAngles[5],
+            (enMask>>0)&1,(enMask>>1)&1,(enMask>>2)&1,(enMask>>3)&1,(enMask>>4)&1,(enMask>>5)&1,
+            enCnt);
+    } else if (cmd.startsWith("J ")) {
+        int mA;
+        if (sscanf(cmd.c_str(), "J %d", &mA) == 1) {
+            mA = constrain(mA, 100, 3000);
+            int okMask[NUM_MOTORS] = {0};
+            int okCnt = 0;
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                bool ok = servos.setWorkingCurrent(MOTOR_ADDR[i], (uint16_t)mA);
+                okMask[i] = ok ? 1 : 0;
+                if (ok) okCnt++;
+                delay(8);
+                servos.flushReceiveBuffer();
+            }
+            Serial.printf("{\"tune\":\"current\",\"mA\":%d,\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                mA, okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+        }
     } else if (cmd.startsWith("P ")) {
         float v[6];
         if (sscanf(cmd.c_str(), "P %f %f %f %f %f %f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]) == 6) {
@@ -159,21 +257,31 @@ void handleSerial() {
     } else if (cmd.startsWith("K ")) {
         int kp, ki, kd, kv;
         if (sscanf(cmd.c_str(), "K %d %d %d %d", &kp, &ki, &kd, &kv) == 4) {
+            int okMask[NUM_MOTORS] = {0};
+            int okCnt = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
-                servos.setVFOC_KpKi(MOTOR_ADDR[i], kp, ki);
-                delay(5);
-                servos.setVFOC_KdKv(MOTOR_ADDR[i], kd, kv);
-                delay(5);
+                bool a = servos.setVFOC_KpKi(MOTOR_ADDR[i], kp, ki);
+                delay(8);
+                servos.flushReceiveBuffer();
+                bool b = servos.setVFOC_KdKv(MOTOR_ADDR[i], kd, kv);
+                delay(8);
+                servos.flushReceiveBuffer();
+                okMask[i] = (a && b) ? 1 : 0;
+                if (okMask[i]) okCnt++;
             }
-            Serial.printf("{\"status\":\"motor PID set\",\"kp\":%d,\"ki\":%d,\"kd\":%d,\"kv\":%d}\n",
-                kp, ki, kd, kv);
+            Serial.printf("{\"tune\":\"pid\",\"kp\":%d,\"ki\":%d,\"kd\":%d,\"kv\":%d,"
+                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                kp, ki, kd, kv,
+                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
         }
     } else if (cmd.startsWith("V ")) {
         int spd, ac;
         if (sscanf(cmd.c_str(), "V %d %d", &spd, &ac) == 2) {
             posSpeed = constrain(spd, 1, 200);
             posAcc = constrain(ac, 1, 255);
-            Serial.printf("{\"status\":\"pos params\",\"speed\":%d,\"acc\":%d}\n", posSpeed, posAcc);
+            // V 是 ESP32 本地變數，下個 cycle 才會用到 → 永遠 ok（無 CAN 動作）
+            Serial.printf("{\"tune\":\"motion\",\"speed\":%d,\"acc\":%d,"
+                "\"ok\":[1,1,1,1,1,1],\"okCnt\":6,\"local\":1}\n", posSpeed, posAcc);
         }
     } else if (cmd.startsWith("M ")) {
         // Joint-space 參數（C 0 模式用）
@@ -227,6 +335,328 @@ void handleSerial() {
         Serial.print("{\"diag\":{\"zeroRaw\":[");
         for (int i = 0; i < NUM_MOTORS; i++) Serial.printf("%s%lld", i?",":"", enc.zeroRaw[i]);
         Serial.printf("],\"mode\":%d,\"posEnabled\":%d}}\n", controlMode, posEnabled ? 1 : 0);
+    } else if (cmd == "B") {
+        Serial.printf("{\"silent_boot\":{\"total\":%d,\"per_id\":[%d,%d,%d,%d,%d,%d]}}\n",
+                      silentBootTotal,
+                      silentBootPerId[1],silentBootPerId[2],silentBootPerId[3],
+                      silentBootPerId[4],silentBootPerId[5],silentBootPerId[6]);
+    } else if (cmd == "X") {
+        // 深度診斷已完成（根因 = 某顆 motor firmware auto-broadcast bug，~78% reply rate）
+        // 保留輕量化版供日後快速健診：只跑 listen + 6 顆 baseline
+        bool savedPos = posEnabled, savedHold = holdMode;
+        posEnabled = false; holdMode = false;
+        delay(100);
+        servos.flushReceiveBuffer();
+        Serial.println("{\"xdiag\":\"start\"}");
+
+        // 三段對比：normal/active(ACK) vs listen-only(no-ACK) vs filter to id=99
+        auto countListen = [&](uint32_t ms) -> int {
+            uint32_t st = millis();
+            int n = 0;
+            while (millis() - st < ms) {
+                if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                    unsigned long id; uint8_t len; uint8_t buf[8];
+                    servos.can.readMsgBuf(&id, &len, buf);
+                    n++;
+                }
+            }
+            return n;
+        };
+
+        // (a) normal mode 基準
+        int normalRx = countListen(1500);
+
+        // (b) listen-only mode — 我們不 ACK 任何東西，看 spam 是否消失
+        bool lo = servos.can.setListenOnly();
+        int listenOnlyRx = countListen(1500);
+
+        // SANITY 3: 5 次 write-read 看是否穩定 + mode change 行為
+        servos.can.setNormal();
+        servos.can.rawSetMode(0x80);
+        for (int t = 0; t < 5; t++) {
+            uint8_t pat = 0x55 << (t & 1);  // 0x55 / 0xAA alternating
+            servos.can.rawWriteReg(0x20, pat);
+            uint8_t r1 = servos.can.rawReadReg(0x20);
+            uint8_t r2 = servos.can.rawReadReg(0x20);  // 再讀一次
+            Serial.printf("{\"san3_inconfig\":{\"t\":%d,\"wrote\":\"0x%02X\",\"r1\":\"0x%02X\",\"r2\":\"0x%02X\"}}\n",
+                          t, pat, r1, r2);
+        }
+        // 寫 0xAA，然後切 normal，再讀
+        servos.can.rawWriteReg(0x20, 0xAA);
+        uint8_t conf_r = servos.can.rawReadReg(0x20);
+        servos.can.rawSetMode(0x00);
+        uint8_t norm_r1 = servos.can.rawReadReg(0x20);
+        uint8_t norm_r2 = servos.can.rawReadReg(0x20);
+        Serial.printf("{\"san3_modechange\":{\"conf\":\"0x%02X\",\"norm1\":\"0x%02X\",\"norm2\":\"0x%02X\"}}\n",
+                      conf_r, norm_r1, norm_r2);
+
+        // TEST 1: dynamic filter to id=3, listen 1.5s, check id distribution
+        servos.can.rawSetHardwareFilter(3);
+        uint32_t lstart = millis();
+        int idCnt[8] = {0};
+        int filterRx = 0;
+        while (millis() - lstart < 1500) {
+            if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long id; uint8_t len; uint8_t buf[8];
+                servos.can.readMsgBuf(&id, &len, buf);
+                filterRx++;
+                if (id < 8) idCnt[id]++;
+            }
+        }
+        Serial.printf("{\"dyn_filter_to_3\":{\"total\":%d,\"per_id\":[%d,%d,%d,%d,%d,%d,%d,%d]}}\n",
+                      filterRx, idCnt[0],idCnt[1],idCnt[2],idCnt[3],idCnt[4],idCnt[5],idCnt[6],idCnt[7]);
+
+        // TEST 2: per-motor 100 query with per-query dynamic filter
+        // (filter changes before each query to target motor)
+        Serial.println("{\"xdiag\":\"per_motor_with_dyn_filter\"}");
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            servos.can.rawSetHardwareFilter(MOTOR_ADDR[i]);
+            servos.flushReceiveBuffer();
+            int ok=0;
+            for (int k = 0; k < 100; k++) {
+                if (servos.readRawEncoderValue(MOTOR_ADDR[i], 20) != INT64_MIN) ok++;
+            }
+            Serial.printf("{\"xdiag\":\"dyn_m%d\",\"ok\":%d}\n", i+1, ok);
+        }
+        servos.can.rawSetFilterAcceptAll();
+
+        Serial.printf("{\"xdiag\":\"bus_test\",\"normal_rx\":%d,\"listen_only_rx\":%d,\"filter99_rx\":%d,"
+                      "\"lo_ok\":%d,\"f_ok\":%d}\n",
+                      normalRx, listenOnlyRx, filterRx, lo?1:0, 1);
+        Serial.printf("{\"xdiag\":\"spam\",\"baseline\":%d}\n", normalRx);
+
+        // 失敗分類：nf=完全沒收到 frame, wm=收到別顆 frame, wc=對的 motor 錯 cmd
+        servos.flushReceiveBuffer();
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            int ok=0, nf=0, wm=0, wc=0, cf=0;
+            for (int k = 0; k < 100; k++) {
+                uint8_t txCmd[2] = {0x35, (uint8_t)((MOTOR_ADDR[i]+0x35) & 0xFF)};
+                if (servos.can.sendMsgBuf(MOTOR_ADDR[i], 0, 2, txCmd) != CAN_OK) { nf++; continue; }
+                uint32_t t0 = micros();
+                bool got=false, sawAny=false;
+                int lwm=0, lwc=0, lcf=0;
+                while ((micros()-t0) < 30000) {
+                    if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                        sawAny = true;
+                        unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
+                        servos.can.readMsgBuf(&rxId, &rxLen, rxBuf);
+                        if ((rxId & 0x7FF) != MOTOR_ADDR[i]) { lwm++; continue; }
+                        if (rxLen < 1 || rxBuf[0] != 0x35) { lwc++; continue; }
+                        if (rxLen < 8) { lcf++; continue; }
+                        uint8_t crc = MOTOR_ADDR[i];
+                        for (int j = 0; j < 7; j++) crc += rxBuf[j];
+                        if ((crc & 0xFF) != rxBuf[7]) { lcf++; continue; }
+                        ok++; got=true; break;
+                    }
+                }
+                if (!got) {
+                    if (!sawAny) nf++;
+                    else if (lwm) wm++;
+                    else if (lwc) wc++;
+                    else cf++;
+                }
+            }
+            Serial.printf("{\"xdiag\":\"m%d\",\"ok\":%d,\"nf\":%d,\"wm\":%d,\"wc\":%d,\"cf\":%d}\n",
+                          i+1, ok, nf, wm, wc, cf);
+        }
+
+        // 再 listen 1s 看 query 過程是否誘發 spam
+        servos.flushReceiveBuffer();
+        uint32_t lstart2 = millis();
+        int idCnt2[7] = {0};
+        while (millis() - lstart2 < 1000) {
+            if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long id; uint8_t len; uint8_t buf[8];
+                servos.can.readMsgBuf(&id, &len, buf);
+                if (id >= 1 && id <= 6) idCnt2[id]++;
+            }
+        }
+        Serial.printf("{\"xdiag\":\"spam_after_query\",\"per_id\":[%d,%d,%d,%d,%d,%d]}\n",
+                      idCnt2[1],idCnt2[2],idCnt2[3],idCnt2[4],idCnt2[5],idCnt2[6]);
+        Serial.println("{\"xdiag\":\"done\"}");
+        posEnabled = savedPos; holdMode = savedHold;
+    } else if (cmd == "_LEGACY_X_") {
+        // ===== 深度 CAN 診斷：失敗原因分類 + latency 分佈 + listen-only =====
+        bool savedPos = posEnabled;
+        bool savedHold = holdMode;
+        posEnabled = false;
+        holdMode = false;
+        delay(100);
+        servos.flushReceiveBuffer();
+        servos.can.clearRXOverflow();
+
+        Serial.println("{\"xdiag\":\"start\"}");
+
+        // Phase A1: listen 1.5s + dump 前 5 個 full frame
+        {
+            uint32_t lstart = millis();
+            int total = 0;
+            int idCnt[7] = {0};
+            int codeCnt[256] = {0};
+            char dumpBuf[600] = {0};
+            int dn = 0;
+            while (millis() - lstart < 1500) {
+                if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                    unsigned long id; uint8_t len; uint8_t buf[8];
+                    servos.can.readMsgBuf(&id, &len, buf);
+                    total++;
+                    int mi = (id >= 1 && id <= 6) ? id : 0;
+                    idCnt[mi]++;
+                    if (len > 0) codeCnt[buf[0]]++;
+                    if (total <= 5 && dn < 500) {
+                        dn += snprintf(dumpBuf+dn, 600-dn, "%sid=%lu len=%u [", dn?" | ":"", id, len);
+                        for (int j = 0; j < len; j++)
+                            dn += snprintf(dumpBuf+dn, 600-dn, "%s%02X", j?" ":"", buf[j]);
+                        dn += snprintf(dumpBuf+dn, 600-dn, "]");
+                    }
+                }
+            }
+            Serial.printf("{\"xdiag\":\"listen_before\",\"total\":%d,\"per_id\":[%d,%d,%d,%d,%d,%d,%d],\"first5\":\"%s\"}\n",
+                          total, idCnt[0],idCnt[1],idCnt[2],idCnt[3],idCnt[4],idCnt[5],idCnt[6], dumpBuf);
+        }
+
+        // Phase A2: 先嗅一次找出真正在 auto-report 的 (motor, code) 配對；
+        // 然後只 disable 那個特定組合，避免級聯
+        Serial.println("{\"xdiag\":\"sniff_active\"}");
+        struct Hit { uint8_t motor; uint8_t code; int count; };
+        Hit hits[8] = {{0,0,0}};
+        int hitN = 0;
+        uint32_t sstart = millis();
+        while (millis() - sstart < 1000) {
+            if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long id; uint8_t len; uint8_t buf[8];
+                servos.can.readMsgBuf(&id, &len, buf);
+                if (len < 1 || id < 1 || id > 6) continue;
+                uint8_t mo = id & 0xFF;
+                uint8_t co = buf[0];
+                bool found = false;
+                for (int j = 0; j < hitN; j++) {
+                    if (hits[j].motor == mo && hits[j].code == co) {
+                        hits[j].count++; found = true; break;
+                    }
+                }
+                if (!found && hitN < 8) hits[hitN++] = {mo, co, 1};
+            }
+        }
+        Serial.print("{\"xdiag\":\"sniff_done\",\"hits\":[");
+        for (int j = 0; j < hitN; j++)
+            Serial.printf("%s{\"m\":%u,\"c\":\"0x%02X\",\"n\":%d}",
+                          j?",":"", hits[j].motor, hits[j].code, hits[j].count);
+        Serial.println("]}");
+
+        // 對 spamming motor 發 0x41 Reset (preserves config, just reboots)
+        Serial.println("{\"xdiag\":\"motor_reset_41\"}");
+        for (int j = 0; j < hitN; j++) {
+            if (hits[j].count < 10) continue;
+            uint8_t mo = hits[j].motor;
+            // 連發 5 次提高成功率
+            for (int rep = 0; rep < 5; rep++) {
+                uint8_t buf[2] = {0x41, (uint8_t)((mo + 0x41) & 0xFF)};
+                servos.can.sendMsgBuf(mo, 0, 2, buf);
+                delay(20);
+            }
+        }
+        // 等馬達重啟（~1.5s）
+        delay(1500);
+        servos.flushReceiveBuffer();
+
+        // Phase A3: listen 2s — 確認 silent + dump 前 5 個 full frame
+        {
+            uint32_t lstart = millis();
+            int total = 0;
+            char dumpBuf[600] = {0};
+            int dn = 0;
+            while (millis() - lstart < 2000) {
+                if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                    unsigned long id; uint8_t len; uint8_t buf[8];
+                    servos.can.readMsgBuf(&id, &len, buf);
+                    total++;
+                    if (total <= 5 && dn < 500) {
+                        dn += snprintf(dumpBuf+dn, 600-dn, "%sid=%lu len=%u [", dn?" | ":"", id, len);
+                        for (int j = 0; j < len; j++)
+                            dn += snprintf(dumpBuf+dn, 600-dn, "%s%02X", j?" ":"", buf[j]);
+                        dn += snprintf(dumpBuf+dn, 600-dn, "]");
+                    }
+                }
+            }
+            Serial.printf("{\"xdiag\":\"listen_after\",\"total\":%d,\"first5\":\"%s\"}\n", total, dumpBuf);
+        }
+
+        // Phase B: per-motor 200 次，分類失敗 + 量 reply latency
+        // 開啟硬體 ID filter：每顆查詢前設成只接受該 ID 的 frame
+        const int N = 200;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            bool filterOk = servos.can.setHardwareFilterToId(MOTOR_ADDR[i]);
+            Serial.printf("{\"xdiag\":\"hw_filter\",\"m\":%d,\"ok\":%d}\n", i+1, filterOk?1:0);
+            servos.flushReceiveBuffer();
+            int ok = 0, noFrame = 0, wrongMotor = 0, wrongCmd = 0, crcFail = 0;
+            uint32_t latSum = 0, latMin = 0xFFFFFFFF, latMax = 0;
+            // latency histogram buckets (us): <500, 500-1k, 1k-2k, 2k-5k, 5k-10k, >10k
+            int bucket[6] = {0};
+
+            for (int k = 0; k < N; k++) {
+                uint8_t txCmd[2] = {0x35, (uint8_t)((MOTOR_ADDR[i] + 0x35) & 0xFF)};
+                if (servos.can.sendMsgBuf(MOTOR_ADDR[i], 0, 2, txCmd) != CAN_OK) {
+                    noFrame++;
+                    continue;
+                }
+                uint32_t t0 = micros();
+                bool got = false;
+                bool sawAnyFrame = false;
+                int localWrongMotor = 0, localWrongCmd = 0, localCrc = 0;
+
+                while ((micros() - t0) < 20000) {  // 20ms timeout
+                    if (servos.can.checkReceive() == CAN_MSGAVAIL) {
+                        sawAnyFrame = true;
+                        unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
+                        servos.can.readMsgBuf(&rxId, &rxLen, rxBuf);
+                        if ((rxId & 0x7FF) != MOTOR_ADDR[i]) { localWrongMotor++; continue; }
+                        if (rxBuf[0] != 0x35)               { localWrongCmd++;   continue; }
+                        if (rxLen < 8)                       { localCrc++;        continue; }
+                        uint8_t crc = MOTOR_ADDR[i];
+                        for (int j = 0; j < 7; j++) crc += rxBuf[j];
+                        if ((crc & 0xFF) != rxBuf[7])       { localCrc++;        continue; }
+                        // success
+                        uint32_t lat = micros() - t0;
+                        ok++;
+                        latSum += lat;
+                        if (lat < latMin) latMin = lat;
+                        if (lat > latMax) latMax = lat;
+                        if      (lat < 500)   bucket[0]++;
+                        else if (lat < 1000)  bucket[1]++;
+                        else if (lat < 2000)  bucket[2]++;
+                        else if (lat < 5000)  bucket[3]++;
+                        else if (lat < 10000) bucket[4]++;
+                        else                  bucket[5]++;
+                        got = true;
+                        break;
+                    }
+                }
+                if (!got) {
+                    if (!sawAnyFrame) noFrame++;
+                    else {
+                        // 把這次 query 的所有 misfit 各自加總一次（簡化：只取最後一個分類就好）
+                        if (localWrongMotor) wrongMotor++;
+                        else if (localWrongCmd) wrongCmd++;
+                        else if (localCrc) crcFail++;
+                        else noFrame++;
+                    }
+                }
+            }
+            uint32_t avg = ok ? (latSum / ok) : 0;
+            Serial.printf("{\"xdiag\":\"m%d\",\"ok\":%d,\"nf\":%d,\"wm\":%d,\"wc\":%d,\"cf\":%d,"
+                          "\"latUs\":[%lu,%lu,%lu],\"hist\":[%d,%d,%d,%d,%d,%d]}\n",
+                          i+1, ok, noFrame, wrongMotor, wrongCmd, crcFail,
+                          (unsigned long)(latMin==0xFFFFFFFF?0:latMin), (unsigned long)avg, (unsigned long)latMax,
+                          bucket[0],bucket[1],bucket[2],bucket[3],bucket[4],bucket[5]);
+        }
+        // 還原「accept all」filter，避免後續正常運作受影響
+        servos.can.setHardwareFilterAcceptAll();
+        Serial.println("{\"xdiag\":\"done\"}");
+        posEnabled = savedPos;
+        holdMode = savedHold;
+        posEnabled = savedPos;
+        holdMode = savedHold;
     }
 }
 
@@ -242,7 +672,9 @@ void loop() {
     servos.flushReceiveBuffer();
 
     int64_t raw[NUM_MOTORS];
+    uint32_t _canT0 = micros();
     int ok = servos.readAllRawEncoders(raw);
+    uint32_t canReadUs = micros() - _canT0;   // 讀 6 顆編碼器的純 CAN 來回時間（頻寬指紋核心）
     enc.updateAngles(raw);
 
     float motorTargets[NUM_MOTORS] = {0};
@@ -251,7 +683,19 @@ void loop() {
     if (posEnabled) {
         bool controlOk = false;
 
-        if (controlMode == 1) {
+        if (holdMode) {
+            // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                motorTargets[i] = holdAngles[i];
+            }
+            float maxAbs = 0;
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                float e = fabsf(enc.angles[i] - holdAngles[i]);
+                if (e > maxAbs) maxAbs = e;
+            }
+            if (maxAbs > maxHoldErr) maxHoldErr = maxAbs;
+            controlOk = true;
+        } else if (controlMode == 1) {
             // ===== Task-space PD =====
             controlOk = tsController.update(enc.angles, targetPose, motorTargets);
 
@@ -266,7 +710,7 @@ void loop() {
             }
         }
 
-        if (controlMode == 0) {
+        if (!holdMode && controlMode == 0) {
             // ===== Joint-space 備用 =====
             constexpr float FIXED_DT = 0.02f;
             smoothPose(smoothedTarget, targetPose, FIXED_DT);
@@ -319,16 +763,35 @@ void loop() {
         }
     }
 
-    // JSON 輸出
+    // JSON 輸出（加 CAN 錯誤計數：ef=EFLG, tx=TEC, rx=REC）
+    uint8_t eflg = servos.can.getEFLG();
+    uint8_t tec  = servos.can.getTEC();
+    uint8_t rec  = servos.can.getREC();
+    if (eflg & 0xC0) servos.can.clearRXOverflow();  // 清 RX overflow 才能繼續看新事件
+
     Serial.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
-                  "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d",
+                  "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
+                  "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+                  "\"t\":%u,\"dt\":%u,\"cus\":%u",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-        ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode);
+        ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode,
+        eflg, tec, rec,
+        lastRead, elapsed, canReadUs);
 
-    if (posEnabled && controlMode == 1) {
+    if (posEnabled && holdMode) {
+        float herr[NUM_MOTORS];
+        for (int i = 0; i < NUM_MOTORS; i++) herr[i] = enc.angles[i] - holdAngles[i];
+        Serial.printf(",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                      "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                      "\"hmax\":%.2f",
+            holdAngles[0],holdAngles[1],holdAngles[2],
+            holdAngles[3],holdAngles[4],holdAngles[5],
+            herr[0],herr[1],herr[2],herr[3],herr[4],herr[5],
+            maxHoldErr);
+    } else if (posEnabled && controlMode == 1) {
         const Pose& fk = tsController.currentPose;
         const Pose& er = tsController.poseError;
         Serial.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"

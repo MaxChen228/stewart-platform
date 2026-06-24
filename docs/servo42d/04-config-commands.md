@@ -107,7 +107,7 @@ In default mode (XX=1/YY=1), motor sends both immediate response AND completion 
 ## 0x8F — Set Key Lock
 
 DLC=3: `[8F, enable, CRC]`
-- 0x00=lock, 0x01=lock (both lock the keys)
+- 0x00=unlock, 0x01=lock
 
 ## 0x95 — Set Position Reach Threshold
 

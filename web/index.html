@@ -82,6 +82,12 @@ body {
 .nav-status.disconnected { color: var(--dev); }
 .nav-status.connected { color: var(--contra); }
 
+/* ===== Button feedback states ===== */
+@keyframes btn-pulse { 0%,100%{opacity:1} 50%{opacity:0.55} }
+.btn-pending { background: var(--accent) !important; color: #000 !important; border-color: var(--accent) !important; animation: btn-pulse 0.6s infinite; }
+.btn-ok      { background: var(--contra) !important; color: #fff !important; border-color: var(--contra) !important; transition: background 0.2s; }
+.btn-fail    { background: var(--dev) !important; color: #fff !important; border-color: var(--dev) !important; transition: background 0.2s; }
+
 /* ===== Content ===== */
 .content {
   flex: 1;
@@ -281,97 +287,90 @@ canvas {
   <!-- Sidebar -->
   <aside class="sidebar">
 
-    <!-- Commands Card -->
-    <div class="ui-card">
-      <div class="ui-card-title">Commands</div>
-      <div class="chip-group">
-        <button class="chip zbtn" onclick="sendCmd('Z')" disabled>Zero All</button>
-        <button class="chip danger zbtn" onclick="sendCmd('D')" disabled>Disable</button>
-        <button class="chip" onclick="resetFK()">Reset FK</button>
-      </div>
+    <!-- 1. STATE & PRIMARY ACTION -->
+    <div class="ui-card" id="state-card">
+      <div id="state-label" style="font-family:var(--font-mono);font-size:24px;font-weight:700;text-align:center;letter-spacing:2px;padding:8px 0">IDLE</div>
+      <div id="state-hmax" style="font-family:var(--font-mono);font-size:13px;text-align:center;color:var(--sub);margin-bottom:14px">—</div>
+      <button id="btn-hold" class="chip zbtn" onclick="toggleHold()" disabled
+        style="display:block;width:100%;font-size:14px;padding:10px;letter-spacing:1px">HOLD HERE</button>
     </div>
 
-    <!-- Individual Motors Card -->
+    <!-- 2. LIVE TELEMETRY -->
     <div class="ui-card">
-      <div class="ui-card-title">Individual Zero</div>
-      <div class="chip-group">
-        <button class="chip zbtn" onclick="sendCmd('Z0')" disabled>M1</button>
-        <button class="chip zbtn" onclick="sendCmd('Z1')" disabled>M2</button>
-        <button class="chip zbtn" onclick="sendCmd('Z2')" disabled>M3</button>
-        <button class="chip zbtn" onclick="sendCmd('Z3')" disabled>M4</button>
-        <button class="chip zbtn" onclick="sendCmd('Z4')" disabled>M5</button>
-        <button class="chip zbtn" onclick="sendCmd('Z5')" disabled>M6</button>
+      <div class="ui-card-title">Live</div>
+      <div class="dev-label" style="margin-bottom:6px">Joint Error (actual − target, °)</div>
+      <div id="hold-error" class="matrix-grid cols-6" style="margin-bottom:12px">
+        <div class="matrix-cell" id="he-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
       </div>
-    </div>
-
-    <!-- Motor Angles Card -->
-    <div class="ui-card">
-      <div class="ui-card-title">Motor Angles</div>
-      <div id="angles" class="matrix-grid cols-6">
-        <div class="matrix-cell" id="ang-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="ang-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="ang-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="ang-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="ang-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="ang-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
-      </div>
-    </div>
-
-    <!-- Pose Card -->
-    <div class="ui-card">
-      <div class="ui-card-title">Platform Pose</div>
-      <div id="pose-display" class="matrix-grid cols-3">
+      <div class="dev-label" style="margin-bottom:6px">Platform Pose (FK)</div>
+      <div id="pose-display" class="matrix-grid cols-6">
         <div class="matrix-cell" id="pose-x"><div class="matrix-cell-label">X</div><div class="matrix-cell-value">—</div></div>
         <div class="matrix-cell" id="pose-y"><div class="matrix-cell-label">Y</div><div class="matrix-cell-value">—</div></div>
         <div class="matrix-cell" id="pose-z"><div class="matrix-cell-label">Z</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Roll</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pitch</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Rol</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pit</div><div class="matrix-cell-value">—</div></div>
         <div class="matrix-cell" id="pose-w"><div class="matrix-cell-label">Yaw</div><div class="matrix-cell-value">—</div></div>
       </div>
     </div>
 
-    <!-- Position Control Card -->
+    <!-- 3. TUNING -->
     <div class="ui-card">
-      <div class="ui-card-title">Position Control</div>
-      <div class="chip-group" style="margin-bottom:16px">
-        <button class="chip zbtn" id="btnPosEnable" onclick="togglePos()" disabled>Enable</button>
-        <button class="chip danger zbtn" onclick="sendCmd('S')" disabled>Stop</button>
+      <div class="ui-card-title">Tuning</div>
+
+      <div class="dev-label" style="margin-bottom:6px">Working Current (mA, 0x83)</div>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:12px">
+        <input type="number" id="work-current" value="1600" min="100" max="3000" step="100" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <button class="chip zbtn" onclick="updateWorkingCurrent()" disabled style="padding:2px 8px;font-size:11px">Apply</button>
       </div>
-      <div class="dev-label" style="margin-bottom:8px">Target Pose</div>
-      <div style="display:grid;grid-template-columns:40px 1fr 50px;gap:4px 8px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>X</span><input type="range" id="sl-x" min="-30" max="30" value="0" step="0.5" oninput="updateTarget()"><span id="sv-x">0</span>
-        <span>Y</span><input type="range" id="sl-y" min="-30" max="30" value="0" step="0.5" oninput="updateTarget()"><span id="sv-y">0</span>
-        <span>Z</span><input type="range" id="sl-z" min="70" max="220" value="105" step="0.5" oninput="updateTarget()"><span id="sv-z">105</span>
-        <span>Roll</span><input type="range" id="sl-roll" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-roll">0</span>
-        <span>Pitch</span><input type="range" id="sl-pitch" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-pitch">0</span>
-        <span>Yaw</span><input type="range" id="sl-yaw" min="-20" max="20" value="0" step="0.5" oninput="updateTarget()"><span id="sv-yaw">0</span>
+      <div id="tune-current-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-6px 0 12px 0;min-height:14px"></div>
+
+      <div class="dev-label" style="margin-bottom:6px">F5 Speed / Acc</div>
+      <div style="display:grid;grid-template-columns:36px 1fr 28px 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:12px">
+        <span>Speed</span><input type="number" id="pos-speed" value="120" min="1" max="200" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Acc</span><input type="number" id="pos-acc" value="100" min="1" max="255" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <button class="chip zbtn" onclick="updateMotionParams()" disabled style="padding:2px 8px;font-size:11px">Apply</button>
       </div>
-      <div class="dev-label" style="margin:12px 0 8px">Motion Params</div>
-      <div style="display:grid;grid-template-columns:50px 1fr 50px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>Speed</span><input type="number" id="pos-speed" value="30" min="1" max="200" step="5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
-        <span>Acc</span><input type="number" id="pos-acc" value="5" min="1" max="255" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px" onchange="updateMotionParams()">
-      </div>
-      <div class="dev-label" style="margin:12px 0 8px">Adaptive Tracking</div>
-      <div style="display:grid;grid-template-columns:30px 1fr 50px;gap:4px 8px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>μ</span><input type="range" id="sl-mu" min="0" max="5" value="0.5" step="0.1" oninput="updateMu()"><span id="sv-mu">0.5</span>
-      </div>
-      <div id="gain-display" class="inset-panel" style="margin-top:8px;font-size:11px">gain: —</div>
-      <div class="dev-label" style="margin:12px 0 8px">Motor PID (vFOC)</div>
-      <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr 24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
+      <div id="tune-motion-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-6px 0 12px 0;min-height:14px"></div>
+
+      <div class="dev-label" style="margin-bottom:6px">vFOC PID (0x96)</div>
+      <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
         <span>Kp</span><input type="number" id="m-kp" value="220" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Ki</span><input type="number" id="m-ki" value="100" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
         <span>Kd</span><input type="number" id="m-kd" value="270" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Kv</span><input type="number" id="m-kv" value="320" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
-      <button class="chip zbtn" style="margin-top:8px" onclick="updateMotorPID()" disabled>Apply Motor PID</button>
-      <div id="pos-status" class="inset-panel" style="margin-top:12px">POS OFF</div>
+      <button class="chip zbtn" style="width:100%" onclick="updateMotorPID()" disabled>Apply PID</button>
+      <div id="tune-pid-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:6px 0 0 0;min-height:14px"></div>
     </div>
 
-    <!-- FK Debug Card -->
+    <!-- 4. UTILITY (rare actions + raw diag) -->
     <div class="ui-card">
-      <div class="ui-card-title">Diagnostics</div>
-      <div id="fk-debug" class="inset-panel">—</div>
-      <div id="raw" class="inset-panel" style="margin-top: 8px;">—</div>
+      <div class="ui-card-title">Utility</div>
+      <div class="chip-group" style="margin-bottom:10px">
+        <button class="chip zbtn" onclick="showCal()" disabled title="印出當前 NVS 校正值">Show Cal</button>
+        <button class="chip" onclick="resetFK()" title="重置 3D viz FK warm-start">Reset FK</button>
+        <button class="chip danger zbtn" onclick="zeroAllConfirm()" disabled title="⚠ 重設零點校正，需先擺正六顆腿"
+          style="margin-left:auto">Re-Zero…</button>
+      </div>
+      <div id="can-health" class="inset-panel" style="font-size:11px;font-family:var(--font-mono)">
+        <div style="color:var(--sub);margin-bottom:4px">CAN</div>
+        <div id="can-now" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;line-height:1.4">
+          <span>M1<br>—</span><span>M2<br>—</span><span>M3<br>—</span>
+          <span>M4<br>—</span><span>M5<br>—</span><span>M6<br>—</span>
+        </div>
+        <div id="can-stats" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;color:var(--sub);font-size:10px;margin-top:2px">
+          <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
+        </div>
+      </div>
+      <div id="fk-debug" class="inset-panel" style="margin-top:6px;font-size:11px;font-family:var(--font-mono)">FK —</div>
+      <div id="cal-display" class="inset-panel" style="margin-top:6px;font-size:11px;font-family:var(--font-mono);color:var(--sub)">Cal (pending)</div>
     </div>
 
   </aside>
@@ -761,12 +760,6 @@ function updateViz(motorAngles) {
   }
   updatePlatform(Q);
 
-  // Update matrix cells
-  for(let i=0;i<6;i++) {
-    const cell = document.querySelector(`#ang-${i} .matrix-cell-value`);
-    if(cell) cell.textContent = motorAngles[i].toFixed(1) + '°';
-  }
-
   const poseFields = [
     ['pose-x', x], ['pose-y', y], ['pose-z', z],
     ['pose-r', roll], ['pose-p', pitch], ['pose-w', yaw]
@@ -831,40 +824,95 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
-      if (data.a) updateViz(data.a);
-      if (data.r) {
-        document.getElementById('raw').textContent =
-          `Raw: ${data.r.join(' ')} | ok:${data.ok} z:${data.z}`;
+
+      // Per-motor 角度 cache：失敗時用上次好值（跨 ESP32 reboot 存活）
+      if (data.a && data.r) {
+        const stitched = data.a.map((a, i) => {
+          const failed = data.r[i] < -1e18;
+          if (!failed) lastGoodAngles[i] = a;
+          return lastGoodAngles[i] != null ? lastGoodAngles[i] : a;
+        });
+        updateViz(stitched);
+      } else if (data.a) {
+        updateViz(data.a);
       }
+
+      if (data.r) updateCANHealth(data.r);
+
+      // STATE card: mode + hmax + button
       if (data.pos !== undefined) {
-        const el = document.getElementById('pos-status');
-        const btn = document.getElementById('btnPosEnable');
-        if (data.pos) {
-          el.textContent = data.adj ? `ADJ: ${data.adj.map(t=>t.toFixed(1)).join(' ')}` : 'POS ON';
-          el.style.color = 'var(--contra)';
-          if (btn) btn.textContent = 'Running';
-          if (data.g !== undefined) {
-            const gEl = document.getElementById('gain-display');
-            const pct = (data.g * 100).toFixed(1);
-            gEl.textContent = `gain: ${pct}% | ${data.g < 0.5 ? 'DAMPING' : data.g > 0.9 ? 'TRACKING' : 'BLEND'}`;
-            gEl.style.color = data.g < 0.3 ? 'var(--dev)' : '';
+        const holding = !!(data.pos && data.hold);
+        setHoldingUI(holding, data.hmax);
+      }
+
+      // Per-motor joint error
+      if (data.herr) {
+        for (let i = 0; i < 6; i++) {
+          const cell = document.querySelector(`#he-${i} .matrix-cell-value`);
+          if (cell) {
+            const e = data.herr[i];
+            cell.textContent = (e >= 0 ? '+' : '') + e.toFixed(2);
+            const a = Math.abs(e);
+            cell.style.color = a > 2 ? 'var(--dev)' : a > 0.5 ? 'var(--contra)' : '';
           }
-        } else {
-          el.textContent = 'POS OFF';
-          el.style.color = '';
-          if (btn) btn.textContent = 'Enable';
         }
       }
+
+      // Calibration dump (response to Show Cal)
+      if (data.diag && data.diag.zeroRaw) {
+        const z = data.diag.zeroRaw;
+        const ts = new Date().toLocaleTimeString();
+        document.getElementById('cal-display').innerHTML =
+          `cal @ ${ts}<br>zeroRaw: [${z.join(', ')}]`;
+      }
+
       if (data.status) {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
         if (data.status.includes('zeroed')) {
           lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
         }
+        // enCnt < 6 表示部分 enable frame 失敗 → 按鈕走 fail
+        const enableFailed = (data.enCnt !== undefined && data.enCnt < 6);
+        btnResolve(enableFailed ? 'fail' : 'ok');
+        if (enableFailed && data.enOk) {
+          const missing = data.enOk.map((v,i)=>v?null:('M'+(i+1))).filter(Boolean).join(',');
+          document.getElementById('status').textContent = `ENABLE FAIL: ${missing} (${data.enCnt}/6)`;
+        }
+      }
+      if (data.tune) {
+        // Apply 成功就把當下值存 localStorage，重整後復原
+        try {
+          if (data.tune === 'current' && data.okCnt === 6) localStorage.setItem('tune.mA', data.mA);
+          if (data.tune === 'motion'  && data.okCnt === 6) { localStorage.setItem('tune.speed', data.speed); localStorage.setItem('tune.acc', data.acc); }
+          if (data.tune === 'pid'     && data.okCnt === 6) { localStorage.setItem('tune.kp', data.kp); localStorage.setItem('tune.ki', data.ki); localStorage.setItem('tune.kd', data.kd); localStorage.setItem('tune.kv', data.kv); }
+        } catch(e) {}
+        const targetMap = {
+          current: { el: 'tune-current-status', label: `${data.mA}mA` },
+          motion:  { el: 'tune-motion-status',  label: `spd=${data.speed} acc=${data.acc}` },
+          pid:     { el: 'tune-pid-status',     label: `Kp=${data.kp} Ki=${data.ki} Kd=${data.kd} Kv=${data.kv}` },
+        };
+        const t = targetMap[data.tune];
+        if (t) {
+          const el = document.getElementById(t.el);
+          const ok = data.ok || [];
+          const okCnt = data.okCnt || 0;
+          const ts = new Date().toLocaleTimeString();
+          const marks = ok.map((v,i) => `<span style="color:${v?'var(--contra)':'var(--dev)'}">M${i+1}${v?'✓':'✗'}</span>`).join(' ');
+          const allOk = okCnt === 6;
+          const tag = data.local ? '(local)' : (allOk ? 'OK' : `FAIL ${6-okCnt}/6`);
+          el.innerHTML = `<span style="color:${allOk?'var(--contra)':'var(--dev)'}">[${ts}] ${t.label} → ${tag}</span> ${marks}`;
+          // 直接綁對應 Apply 按鈕，避免依賴 pendingBtn 順序
+          const tbtn = btnForTune(data.tune);
+          if (tbtn === pendingBtn) btnResolve(null); // 清 pending timer
+          btnSetState(tbtn, allOk ? 'ok' : 'fail');
+        }
       }
       if (data.error) {
-        document.getElementById('pos-status').textContent = data.error;
-        document.getElementById('pos-status').style.color = 'var(--dev)';
+        document.getElementById('state-label').textContent = 'ERROR';
+        document.getElementById('state-hmax').textContent = data.error;
+        document.getElementById('state-hmax').style.color = 'var(--dev)';
+        btnResolve('fail');
       }
     } catch(e) {}
   };
@@ -877,38 +925,117 @@ function connectWS() {
   };
 }
 
+// ===== Per-button feedback =====
+// 任何 sendCmd 觸發 → 取當下被按的 button → 進入 pending；
+// 下一次收到 status/error/tune 在 3s 內 → 對應切 ok/fail；timeout 也歸 fail
+let pendingBtn = null;
+let pendingTimer = null;
+function btnSetState(btn, state) {
+  if (!btn) return;
+  btn.classList.remove('btn-pending', 'btn-ok', 'btn-fail');
+  if (state) btn.classList.add('btn-' + state);
+  if (state === 'ok' || state === 'fail') {
+    setTimeout(() => btn.classList.remove('btn-ok', 'btn-fail'), 1500);
+  }
+}
+function btnResolve(state) {
+  if (!pendingBtn) return;
+  const b = pendingBtn;
+  pendingBtn = null;
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  btnSetState(b, state);
+}
+
 window.sendCmd = function(cmd) {
+  // event.currentTarget = 被按的 button（若是按鈕觸發）
+  const btn = (typeof event !== 'undefined' && event && event.currentTarget && event.currentTarget.tagName === 'BUTTON')
+              ? event.currentTarget : null;
+  if (btn) {
+    btnResolve(null); // 清掉上一個未解決的
+    pendingBtn = btn;
+    btnSetState(btn, 'pending');
+    pendingTimer = setTimeout(() => {
+      // 3s 沒回覆 → 視為 fail
+      const b = pendingBtn; pendingBtn = null; pendingTimer = null;
+      btnSetState(b, 'fail');
+    }, 3000);
+  }
   if (ws && ws.readyState === 1) ws.send(cmd);
 };
 
-window.updateTarget = function() {
-  const x = +document.getElementById('sl-x').value;
-  const y = +document.getElementById('sl-y').value;
-  const z = +document.getElementById('sl-z').value;
-  const roll = +document.getElementById('sl-roll').value;
-  const pitch = +document.getElementById('sl-pitch').value;
-  const yaw = +document.getElementById('sl-yaw').value;
-  document.getElementById('sv-x').textContent = x;
-  document.getElementById('sv-y').textContent = y;
-  document.getElementById('sv-z').textContent = z;
-  document.getElementById('sv-roll').textContent = roll;
-  document.getElementById('sv-pitch').textContent = pitch;
-  document.getElementById('sv-yaw').textContent = yaw;
-  ghostTarget = [x, y, z, roll, pitch, yaw];
-  updateGhost();
-  sendCmd(`P ${x} ${y} ${z} ${roll} ${pitch} ${yaw}`);
+// Apply 按鈕 → 直接綁 tune type，避免被中間其他 status 搶走 resolve
+function btnForTune(t) {
+  if (t === 'current') return document.querySelector('button[onclick="updateWorkingCurrent()"]');
+  if (t === 'motion')  return document.querySelector('button[onclick="updateMotionParams()"]');
+  if (t === 'pid')     return document.querySelector('button[onclick="updateMotorPID()"]');
+  return null;
+}
+
+// ===== Per-motor 最後好值 cache（跨 reboot 平滑 3D viz）=====
+const lastGoodAngles = [null, null, null, null, null, null];
+
+// ===== CAN health: per-motor success ring (50-frame window) =====
+const CAN_WINDOW = 50;
+const canHist = [[],[],[],[],[],[]]; // each motor: array of 0/1
+function updateCANHealth(rawArr) {
+  const nowCells = document.getElementById('can-now').children;
+  const statCells = document.getElementById('can-stats').children;
+  for (let i = 0; i < 6; i++) {
+    const ok = !(rawArr[i] < -1e18); // INT64_MIN check
+    canHist[i].push(ok ? 1 : 0);
+    if (canHist[i].length > CAN_WINDOW) canHist[i].shift();
+
+    // current cycle indicator
+    const mark = ok ? '✓' : '✗';
+    const color = ok ? 'var(--contra)' : 'var(--dev)';
+    nowCells[i].innerHTML = `M${i+1}<br><span style="color:${color}">${mark}</span>`;
+
+    // rolling % over window
+    const sum = canHist[i].reduce((a,b)=>a+b, 0);
+    const pct = Math.round(100 * sum / canHist[i].length);
+    const pctColor = pct >= 95 ? 'var(--sub)' : pct >= 80 ? 'var(--contra)' : 'var(--dev)';
+    statCells[i].textContent = pct + '%';
+    statCells[i].style.color = pctColor;
+  }
+}
+
+// ===== Hold state-aware toggle =====
+let isHolding = false;
+
+function setHoldingUI(holding, hmax) {
+  isHolding = holding;
+  const label = document.getElementById('state-label');
+  const sub = document.getElementById('state-hmax');
+  const btn = document.getElementById('btn-hold');
+  const card = document.getElementById('state-card');
+
+  if (holding) {
+    label.textContent = 'HOLDING';
+    label.style.color = 'var(--contra)';
+    card.style.borderColor = 'var(--contra)';
+    sub.textContent = `max |err|: ${(hmax||0).toFixed(2)}°`;
+    sub.style.color = (hmax||0) > 5 ? 'var(--dev)' : (hmax||0) > 1 ? 'var(--contra)' : 'var(--sub)';
+    btn.textContent = 'RELEASE';
+    btn.classList.add('danger');
+  } else {
+    label.textContent = 'IDLE';
+    label.style.color = '';
+    card.style.borderColor = '';
+    sub.textContent = '—';
+    sub.style.color = 'var(--sub)';
+    btn.textContent = 'HOLD HERE';
+    btn.classList.remove('danger');
+  }
+}
+
+window.toggleHold = function() {
+  sendCmd(isHolding ? 'D' : 'H');
 };
 
 window.updateMotionParams = function() {
   const speed = document.getElementById('pos-speed').value;
   const acc = document.getElementById('pos-acc').value;
   sendCmd(`V ${speed} ${acc}`);
-};
-
-window.updateMu = function() {
-  const mu = document.getElementById('sl-mu').value;
-  document.getElementById('sv-mu').textContent = mu;
-  sendCmd(`M ${mu}`);
 };
 
 window.updateMotorPID = function() {
@@ -919,8 +1046,25 @@ window.updateMotorPID = function() {
   sendCmd(`K ${kp} ${ki} ${kd} ${kv}`);
 };
 
-window.togglePos = function() {
-  sendCmd('E');
+window.updateWorkingCurrent = function() {
+  const mA = document.getElementById('work-current').value;
+  sendCmd(`J ${mA}`);
+};
+
+window.zeroAllConfirm = function() {
+  const ok = confirm(
+    "⚠ 重新校正零點\n\n" +
+    "這會覆寫 NVS 裡的 zeroRaw 值，舊校正會永久消失。\n" +
+    "確認前請：\n" +
+    "  1. 馬達已 Disable（按 Disable 鈕，腿可自由轉）\n" +
+    "  2. 六顆 lower leg 都已物理擺到「朝上、平台水平置中」的 home 姿態\n\n" +
+    "確定要重設嗎？"
+  );
+  if (ok) sendCmd('Z');
+};
+
+window.showCal = function() {
+  sendCmd('I');
 };
 
 window.resetFK = function() {
@@ -931,6 +1075,28 @@ window.resetFK = function() {
 };
 
 window.connectSerial = connectWS;
+// Restore tuning inputs from localStorage（覆蓋 HTML 預設值）
+(function restoreTuning() {
+  try {
+    const map = [
+      ['tune.mA',    'work-current'],
+      ['tune.speed', 'pos-speed'],
+      ['tune.acc',   'pos-acc'],
+      ['tune.kp',    'm-kp'],
+      ['tune.ki',    'm-ki'],
+      ['tune.kd',    'm-kd'],
+      ['tune.kv',    'm-kv'],
+    ];
+    for (const [k, id] of map) {
+      const v = localStorage.getItem(k);
+      if (v !== null) {
+        const el = document.getElementById(id);
+        if (el) el.value = v;
+      }
+    }
+  } catch(e) {}
+})();
+
 connectWS();
 </script>
 </body>
