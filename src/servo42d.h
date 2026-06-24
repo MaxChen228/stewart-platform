@@ -371,6 +371,47 @@ public:
         return n;
     }
 
+    // 設定馬達定時主動上報唯讀參數（0x01）。code=0x35 位置；periodMs=0 停用。
+    bool setAutoReturn(uint8_t motorId, uint8_t code, uint16_t periodMs) {
+        uint8_t cmd[5];
+        cmd[0] = 0x01;
+        cmd[1] = code;
+        cmd[2] = (periodMs >> 8) & 0xFF;
+        cmd[3] = periodMs & 0xFF;
+        uint8_t crc = motorId;
+        for (int k = 0; k < 4; k++) crc += cmd[k];
+        cmd[4] = crc & 0xFF;
+        return can.sendMsgBuf(motorId, 0, 5, cmd) == CAN_OK;
+    }
+
+    // 連續排空：把 RX buffer 內所有 0x35 上報幀「覆蓋寫入」latest[]（永遠保留最新值）。
+    // 與 drainEncoderReplies 差別：不跳過已收的，總是更新。供 auto-return 高頻呼叫。
+    int drainInto(int64_t latest[NUM_MOTORS]) {
+        int n = 0;
+        while (can.checkReceive() == CAN_MSGAVAIL) {
+            unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
+            can.readMsgBuf(&rxId, &rxLen, rxBuf);
+            uint16_t id = rxId & 0x7FF;
+            if (rxBuf[0] != 0x35 || rxLen < 8) continue;
+            int idx = -1;
+            for (int i = 0; i < NUM_MOTORS; i++)
+                if (MOTOR_ADDR[i] == id) { idx = i; break; }
+            if (idx < 0) continue;
+            uint8_t crc = id;
+            for (int k = 0; k < 7; k++) crc += rxBuf[k];
+            if ((crc & 0xFF) != rxBuf[7]) continue;
+            int64_t val = (int64_t)(int8_t)rxBuf[1];
+            val = (val << 8) | rxBuf[2];
+            val = (val << 8) | rxBuf[3];
+            val = (val << 8) | rxBuf[4];
+            val = (val << 8) | rxBuf[5];
+            val = (val << 8) | rxBuf[6];
+            latest[idx] = val;
+            n++;
+        }
+        return n;
+    }
+
     // Pipelining：送一個 0x35 查詢就立刻排空已到回覆，避免 2-buffer MCP2515
     // 在 send 期間溢位（naive「先全送再收」實測 18% 掉幀、撞 timeout）。
     int readAllRawEncoders(int64_t rawValues[NUM_MOTORS]) {

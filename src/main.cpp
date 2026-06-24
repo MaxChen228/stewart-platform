@@ -11,6 +11,18 @@ EncoderState enc;
 
 // ===== 位置模式控制 =====
 Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
+
+// ===== Auto-return（item 1）：馬達定時主動上報，ESP32 連續排空、控制環只取快照 =====
+// MCP2515 只有 2 RX buffer，6 顆 streaming 必須「高頻連續排空」才不溢位——靠 loop()
+// 本身快速空轉（20ms gate 只節流控制，不節流 loop 迭代）達成，無需 ISR/task。
+// 預設關閉：行為與輪詢版完全相同，燒錄安全。需馬達上電後 A1 啟用才生效。
+int64_t latestRaw[NUM_MOTORS];
+bool autoReturnMode = false;
+uint16_t arPeriodMs = 3;              // 馬達主動上報週期，可調（AR 指令）
+
+// ===== 可調速率（item 2 of 本輪）=====
+uint32_t loopPeriodUs = 20000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）
+const uint32_t TELE_PERIOD_MS = 30;  // 遙測輸出週期（與控制解耦，固定 ~33Hz，免塞爆 115200 序列埠）
 bool posEnabled = false;
 float enableAngle[NUM_MOTORS] = {0};
 
@@ -133,6 +145,36 @@ void handleSerial() {
                 Serial.printf("{\"error\":\"M%d read failed\"}\n", idx + 1);
             }
         }
+    } else if (cmd == "A1") {
+        // 啟用 auto-return：6 顆每 arPeriodMs 主動上報 0x35 位置
+        for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
+        int okc = 0;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            if (servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs)) okc++;
+            delay(5);
+        }
+        servos.flushReceiveBuffer();
+        autoReturnMode = true;
+        Serial.printf("{\"status\":\"auto-return ON\",\"period_ms\":%d,\"cfg_ok\":%d}\n",
+                      arPeriodMs, okc);
+    } else if (cmd.startsWith("AR ")) {
+        // 調整上報週期（ms）；若已啟用則即時重設
+        arPeriodMs = constrain(cmd.substring(3).toInt(), 1, 100);
+        if (autoReturnMode)
+            for (int i = 0; i < NUM_MOTORS; i++) { servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs); delay(5); }
+        Serial.printf("{\"status\":\"ar period\",\"period_ms\":%d}\n", arPeriodMs);
+    } else if (cmd.startsWith("L ")) {
+        // 調整控制迴圈週期（ms）
+        uint32_t ms = constrain(cmd.substring(2).toInt(), 1, 100);
+        loopPeriodUs = ms * 1000;
+        Serial.printf("{\"status\":\"loop period\",\"period_ms\":%u,\"hz\":%.0f}\n", ms, 1000.0f / ms);
+    } else if (cmd == "A0") {
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            servos.setAutoReturn(MOTOR_ADDR[i], 0x35, 0);  // 0 = 停用上報
+            delay(5);
+        }
+        autoReturnMode = false;
+        Serial.println("{\"status\":\"auto-return OFF (回輪詢)\"}");
     } else if (cmd == "D") {
         posDisable();
         Serial.println("{\"status\":\"disabled all\"}");
@@ -663,18 +705,34 @@ void handleSerial() {
 void loop() {
     handleSerial();
 
-    static uint32_t lastRead = 0;
-    if (millis() - lastRead < 20) return;
-    uint32_t elapsed = millis() - lastRead;
-    lastRead = millis();
-    if (elapsed > 50) return;
+    // auto-return：每次 loop 迭代都排空（高頻），避免 streaming 幀塞爆 2-buffer
+    if (autoReturnMode) servos.drainInto(latestRaw);
 
-    servos.flushReceiveBuffer();
+    // 控制迴圈閘門（micros，週期可調）
+    static uint32_t lastReadUs = 0;
+    static uint32_t ctrlCycles = 0;
+    uint32_t nowUs = micros();
+    if (nowUs - lastReadUs < loopPeriodUs) return;
+    uint32_t elapsed = (nowUs - lastReadUs) / 1000;  // ms
+    lastReadUs = nowUs;
+    ctrlCycles++;
 
     int64_t raw[NUM_MOTORS];
-    uint32_t _canT0 = micros();
-    int ok = servos.readAllRawEncoders(raw);
-    uint32_t canReadUs = micros() - _canT0;   // 讀 6 顆編碼器的純 CAN 來回時間（頻寬指紋核心）
+    int ok = 0;
+    uint32_t canReadUs = 0;
+    if (autoReturnMode) {
+        // 連續排空已在 loop 頂端進行，這裡只取最新快照（感測延遲 ≈ 0）
+        servos.drainInto(latestRaw);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            raw[i] = latestRaw[i];
+            if (raw[i] != INT64_MIN) ok++;
+        }
+    } else {
+        servos.flushReceiveBuffer();
+        uint32_t _canT0 = micros();
+        ok = servos.readAllRawEncoders(raw);
+        canReadUs = micros() - _canT0;   // 讀 6 顆編碼器的純 CAN 來回時間（頻寬指紋核心）
+    }
     enc.updateAngles(raw);
 
     float motorTargets[NUM_MOTORS] = {0};
@@ -763,7 +821,15 @@ void loop() {
         }
     }
 
-    // JSON 輸出（加 CAN 錯誤計數：ef=EFLG, tx=TEC, rx=REC）
+    // 遙測與控制解耦：每 TELE_PERIOD_MS 才輸出（高速迴圈下全遙測會塞爆 115200 序列埠）
+    static uint32_t lastTeleMs = 0;
+    uint32_t nowMs = millis();
+    if (nowMs - lastTeleMs < TELE_PERIOD_MS) return;
+    float lhz = ctrlCycles * 1000.0f / (nowMs - lastTeleMs);  // 實測控制迴圈頻率
+    ctrlCycles = 0;
+    lastTeleMs = nowMs;
+
+    // JSON 輸出（ef=EFLG, tx=TEC, rx=REC, lhz=實測控制Hz, ar=上報週期/0=輪詢）
     uint8_t eflg = servos.can.getEFLG();
     uint8_t tec  = servos.can.getTEC();
     uint8_t rec  = servos.can.getREC();
@@ -773,13 +839,13 @@ void loop() {
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
-                  "\"t\":%u,\"dt\":%u,\"cus\":%u",
+                  "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
         ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode,
         eflg, tec, rec,
-        lastRead, elapsed, canReadUs);
+        nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0);
 
     if (posEnabled && holdMode) {
         float herr[NUM_MOTORS];
