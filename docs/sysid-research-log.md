@@ -148,14 +148,20 @@ enable（Task-space PD，target=當前姿態不暴衝）→ 注入 z +4mm 階躍
 - 100-167Hz 收斂 → 不用 TWAI/1M/auto-return，問題解決（bandwidth-limited 確認且夠用）。
 - 仍發散 → 才證明需要更高速或非控制律問題，TWAI 才有意義。
 
-## 決策與待辦
+## 決策與待辦（現況摘要）
 
-- **item 1（auto-return）**：✅ 已實作、靜態驗證。預設關閉，A1 啟用。
-- **item 3（1M baud）**：⏸ 不在現有 8MHz 晶振盲做（出規格、改馬達鮑率不可逆）。
-  替代：換 16/20MHz MCP2515 模組，或併入 item 2 TWAI。
-- **item 2（換 ESP32 原生 TWAI）**：深 FIFO 可同時拿低延遲+0溢位，未做。
-- **Gate A（核心未答）**：迴圈加速到底有沒有讓平台變穩？需馬達動力電 + Enable + chirp 實測。
+- **🎯 Gate A（核心未答，下一步）**：迴圈加速到底有沒有讓平台變穩？已儀器化 turnkey
+  （`sysid/gate_a.js` + `gate_a_analyze.py`），用乾淨輪詢即可測。**等人在硬體旁：置中位 → 確認姿態對稱
+  （多半免重 Z）→ 手在電源旁 → 執行**。結果分流：100-167Hz 收斂→不用換硬體；仍發散→才需更高速。
+- **item 1（auto-return）**：✅ 實作+靜態驗證（cus→0、掉幀0%）。但 hold 時 MCP2515 redline（TEC~250）。
+  預設關閉，A1 啟用、A0 退回。**結論：不能在高速/hold 長跑**。
+- **0x8C 關 F5 回覆**：✅ 實作（C 指令）。實測**不是** bus-off 元凶（251→245），auto-return 串流本身才是。
+- **item 3（1M baud）**：⏸ 不在現有 8MHz 晶振盲做（出規格、改馬達鮑率不可逆）。替代：16/20MHz MCP 模組或併 TWAI。
+  注意：1M 加頻寬、TWAI 只解溢位不加頻寬——兩者正交。
+- **item 2（換 TWAI）**：深 FIFO 同時拿低延遲+0溢位+乾淨bus。**僅在 Gate A 證明輪詢不夠快時才做**，別超前投資。
 
 ## 硬體接線速查
-ESP32→(SPI: GPIO18 SCK/23 MOSI/19 MISO/5 CS/17 INT)→MCP2515→(內建)→TJA1050→(CANH/CANL,120Ω×2,500k)→6×SERVO42D(0x01-0x06)。
-邏輯電(3.3V) 與 馬達動力電(12-24V) 分離、共地。
+**現用**：ESP32→(SPI: GPIO18 SCK/23 MOSI/19 MISO/5 CS/17 INT)→MCP2515→(內建)→TJA1050→(CANH/CANL,120Ω×2,500k)→6×SERVO42D(0x01-0x06)。
+**TWAI 改裝（若做）**：拔掉整塊 MCP2515，改用 **3.3V 收發器 SN65HVD230**（勿用 5V TJA1050，會燒 ESP32 RX）：
+GPIO21→CTX、GPIO22→CRX、3.3V→VCC、GND→GND；收發器 CANH/CANL 接原匯流排。CAN 線、馬達、終端電阻全不動。
+邏輯電(3.3V) 與 馬達動力電(12-24V) 分離、共地。量 CANH-CANL 應 ~60Ω（兩顆 120Ω 並聯）。
