@@ -163,6 +163,14 @@ void handleSerial() {
         if (autoReturnMode)
             for (int i = 0; i < NUM_MOTORS; i++) { servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs); delay(5); }
         Serial.printf("{\"status\":\"ar period\",\"period_ms\":%d}\n", arPeriodMs);
+    } else if (cmd.startsWith("C ")) {
+        // 設回覆模式：C 0 0=不回覆 / C 1 0=只即時 / C 1 1=預設全回
+        int sp = cmd.indexOf(' ', 2);
+        int xx = cmd.substring(2, sp < 0 ? cmd.length() : sp).toInt();
+        int yy = sp < 0 ? 0 : cmd.substring(sp + 1).toInt();
+        for (int i = 0; i < NUM_MOTORS; i++) { servos.setResponseMode(MOTOR_ADDR[i], xx, yy); delay(5); }
+        servos.flushReceiveBuffer();
+        Serial.printf("{\"status\":\"resp mode\",\"xx\":%d,\"yy\":%d}\n", xx, yy);
     } else if (cmd.startsWith("L ")) {
         // 調整控制迴圈週期（ms）
         uint32_t ms = constrain(cmd.substring(2).toInt(), 1, 100);
