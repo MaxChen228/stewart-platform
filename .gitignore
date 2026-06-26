@@ -7,3 +7,6 @@ node_modules
 report_parsed/
 rag_storage/
 sysid/data/
+
+# 自動偵測學到的 ESP32 WiFi IP（runtime cache，勿提交）
+.esp32-ip

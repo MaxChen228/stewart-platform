@@ -6,19 +6,23 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-const HTTP_PORT = 3000;
+const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
 const BAUD = 115200;
 // 綁定位址：預設 0.0.0.0（方便站在機台旁用手機/平板驅動平台）。
 // 這是會動的實體機械——若在不可信網段，設環境變數 LOOPBACK_ONLY=1 只綁本機。
 const BIND_HOST = process.env.LOOPBACK_ONLY === '1' ? '127.0.0.1' : '0.0.0.0';
 
-// ===== 傳輸選擇（env，預設 serial = 既有行為不變）=====
-const TRANSPORT  = process.env.TRANSPORT || 'serial';        // serial | tcp
-const ESP32_HOST = process.env.ESP32_HOST || '';             // tcp 模式必填
+// ===== 傳輸：自動偵測（有線→serial、沒線→WiFi/TCP）。單一 port、liveness-gated、無 silent fallback =====
+const ESP32_HOST_OVERRIDE = process.env.ESP32_HOST || '';     // 顯式指定 WiFi 主機（跳過自動學 IP）
 const ESP32_PORT = Number(process.env.ESP32_PORT) || 3333;
-const TCP_IDLE_MS = Number(process.env.TCP_IDLE_MS) || 2000; // read-idle 半開偵測
-// 燒錄抑制重連時長：tcp 較長（吸收 WiFi association 延遲）
-const RELEASE_HOLD_MS = Number(process.env.RELEASE_HOLD_MS) || (TRANSPORT === 'tcp' ? 45000 : 30000);
+const IP_CACHE = path.join(__dirname, '.esp32-ip');           // serial 連線時經 WIFI? 學到的 ESP32 WiFi IP（直連最可靠，避本機 Tailscale 對 .local 不穩解析）
+const SERIAL_PATTERN = /usbserial|usbmodem|SLAB|wchusbserial/i;
+const LIVENESS_MS  = 5000;   // 連上後須在此時間內收到有效遙測，否則判死換路（埠開/socket 開 ≠ 會講話）
+const IDLE_MS      = 2500;   // 連線中遙測中斷逾此 → 判斷線
+const RECONNECT_MS = 1500;   // 換路/重連退避
+const SERIAL_POLL_MS = 3000; // WiFi 運行時偵測 USB 插入（有線就用線）
+const TCP_HB_MS    = 1000;   // 對 ESP32 心跳（韌體 failsafe 基準）
+const RELEASE_HOLD_MS = Number(process.env.RELEASE_HOLD_MS) || 30000;
 
 // 最新一筆資料（供 REST API 用）
 let lastData = null;
@@ -147,8 +151,9 @@ wss.on('connection', (ws, req) => {
   clientCount++;
   console.log(`[WS] client connected (${clientCount})`);
 
-  // 立即送出最新資料
+  // 立即送出最新資料 + 當前傳輸鏈狀態（新 client 不必等下次切換才知道走哪條路）
   if (lastData) ws.send(lastData);
+  ws.send(JSON.stringify({ evt: 'transport', ...currentTransport }));
 
   ws.on('message', (msg) => {
     const cmd = msg.toString().trim();
@@ -177,143 +182,172 @@ function onLine(line) {
   broadcast(line);
 }
 
-// Serial transport：實作傳輸介面 { isReady, write, connect, release }。
-// suppressReconnect 取代舊 uploadMode（降為 transport 內部狀態，由 release 控制）。
-function createSerialTransport({ onLine, baud }) {
-  let serial = null;
-  let suppressReconnect = false;
-  let pendingTimer = null;   // 單一待連線 timer：reconnect/release/retry 共用、互斥不堆疊
+// 學到的 ESP32 WiFi IP 持久化：避開本機 Tailscale 對 .local 的不穩解析，直連 IP 最可靠。
+function loadCachedIp() { try { return fs.readFileSync(IP_CACHE, 'utf8').trim() || null; } catch { return null; } }
+function saveCachedIp(ip) { try { fs.writeFileSync(IP_CACHE, ip); } catch {} }
 
-  // 排程下一次 connect；先清前一個 → 雙重 release（雙擊/upload retry）不會堆出多個 socket
-  function schedule(ms, fn) {
-    if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => { pendingTimer = null; (fn || connect)(); }, ms);
-  }
-
-  async function connect() {
-    if (suppressReconnect || serial) return;   // 既有 socket 即返回，防覆蓋洩漏
-    const ports = await SerialPort.list();
-    const usbPort = ports.find(p => p.path.includes('usbserial'));
-    if (!usbPort) {
-      console.error('[Serial] No USB serial port found. Retrying in 3s...');
-      schedule(3000);
-      return;
-    }
-    // macOS: 用 cu. 開啟避免 tty. 的 carrier detect block
-    const portPath = usbPort.path.replace('/dev/tty.', '/dev/cu.');
-    console.log(`[Serial] opening ${portPath}`);
-    serial = new SerialPort({ path: portPath, baudRate: baud });
-    serial.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', onLine);
-
-    const onGone = (why) => {
-      console.log(`[Serial] ${why}. Reconnecting in 3s...`);
-      serial = null;
-      lastData = null;
-      if (!suppressReconnect) schedule(3000);
-    };
-    serial.on('close', () => onGone('disconnected'));
-    serial.on('error', (err) => { console.error(`[Serial] error: ${err.message}`); onGone('error'); });  // error 留 stderr
-  }
-
+// ---- attempt-once 啞連線：只負責「開連線/吐行/報一次生死」，不自排重連（policy 全歸 manager）----
+function openSerial({ path: portPath, baud, onLine, onClose }) {
+  let closed = false;
+  const gone = (why) => { if (closed) return; closed = true; onClose(why); };
+  let sp;
+  try { sp = new SerialPort({ path: portPath, baudRate: baud }); }
+  catch (e) { setImmediate(() => gone('open-fail:' + e.message)); return { write() {}, close() {} }; }
+  sp.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', onLine);
+  sp.on('close', () => gone('disconnected'));
+  sp.on('error', (e) => { console.error(`[Serial] ${e.message}`); gone('error'); });
   return {
-    isReady() { return !!(serial && serial.isOpen); },
-    write(line) { if (serial && serial.isOpen) serial.write(line + '\n'); },
-    connect,
-    release(holdMs) {
-      suppressReconnect = true;
-      if (serial && serial.isOpen) {
-        serial.close();
-        console.log(`[Serial] released for upload (${holdMs}ms hold)`);
-      }
-      schedule(holdMs, () => { suppressReconnect = false; connect(); });
-    },
+    write(line) { if (sp.isOpen) sp.write(line + '\n'); },
+    close() { if (closed) return; closed = true; try { sp.close(); } catch {} },
   };
 }
 
-// TCP transport（P6）：連 ESP32 WiFi 的 :3333，協議與 serial 逐字相同。
-// 半開偵測用「手動 read-idle」（遙測連續流即 liveness）——不可用 socket.setTimeout，
-// 因心跳 write 會重置它而漏判死 peer。心跳 write 獨立，讓韌體可選的 HB 失效保護生效。
-function createTcpTransport({ onLine, host, port }) {
-  let socket = null;
-  let suppressReconnect = false;
-  let hbTimer = null;       // 對 ESP32 週期送 '\n' 心跳（韌體 lastNetRxMs 基準；空行被忽略）
-  let idleTimer = null;     // read-idle 檢查
-  let pendingTimer = null;  // 單一待連線 timer：reconnect/release 共用、互斥不堆疊
-  let lastRead = 0;
+// TCP 啞連線：連 ESP32 :3333（協議與 serial 逐字相同）。心跳 write 獨立於 liveness，
+// 供韌體可選 HB 失效保護；半開/idle 偵測由 manager 統一管（單一 owner，不雙頭）。
+function openTcp({ host, port, onLine, onClose }) {
+  let closed = false, hb = null;
+  const sock = net.connect({ host, port });
+  const gone = (why) => { if (closed) return; closed = true; if (hb) clearInterval(hb); onClose(why); };
+  sock.setNoDelay(true);
+  sock.setKeepAlive(true, 5000);
+  sock.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', onLine);
+  sock.on('connect', () => { hb = setInterval(() => { if (!sock.destroyed && sock.writable) sock.write('\n'); }, TCP_HB_MS); });
+  sock.on('close', () => gone('closed'));
+  sock.on('error', (e) => { console.error(`[TCP] ${e.message}`); });   // close 隨後觸發 gone
+  return {
+    write(line) { if (!sock.destroyed && sock.writable) sock.write(line + '\n'); },
+    close() { if (closed) return; closed = true; if (hb) clearInterval(hb); try { sock.destroy(); } catch {} },
+  };
+}
 
-  function clearTimers() {
-    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+// ===== TransportManager：單一 reconnect/選路擁有者 =====
+// 偵測：有線(USB)→serial，沒線→WiFi(直連學到的 IP)。每次切換/連上/斷線都廣播狀態（無 silent fallback）。
+// liveness gate：埠開/socket 開 ≠ 連上——須在 LIVENESS_MS 內收到有效遙測才算 connected，否則判死換路。
+function createTransportManager({ onLine, onState }) {
+  let conn = null, kind = null, state = 'init', detail = '';
+  let suppressReconnect = false, switching = false;
+  let pendingTimer = null;          // 單一重連 timer（互斥、不堆疊）—— 沿用 e0ecae7 不變式
+  let livenessTimer = null, idleTimer = null, serialPollTimer = null, serialSeen = 0;
+  let lastRx = 0, lastPos = 0;
+
+  function setState(s, k, d) {
+    state = s; if (k !== undefined) kind = k; if (d !== undefined) detail = d;
+    console.log(`[Transport] ${state}${kind ? ' ' + kind : ''}${detail ? ' (' + detail + ')' : ''}`);
+    onState({ kind, state, detail });
+  }
+  function clearWatches() {
+    if (livenessTimer) { clearTimeout(livenessTimer); livenessTimer = null; }
     if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+    if (serialPollTimer) { clearInterval(serialPollTimer); serialPollTimer = null; serialSeen = 0; }
   }
 
-  // 排程下一次 connect；先清前一個 → 雙重 release 不會堆出多個 socket/心跳 interval
-  function schedule(ms, fn) {
+  async function findSerial() {
+    const ports = await SerialPort.list();
+    const p = ports.find(x => SERIAL_PATTERN.test(x.path));
+    return p ? p.path.replace('/dev/tty.', '/dev/cu.') : null;
+  }
+  function wifiHost() { return ESP32_HOST_OVERRIDE || loadCachedIp() || 'stewart.local'; }
+
+  // manager 統一「收到一行」：liveness/idle 計時、學 ESP32 IP、再轉發給匯流排
+  function handleLine(line) {
+    line = (line || '').trim();
+    if (!line) return;
+    lastRx = Date.now();
+    let d = null; try { d = JSON.parse(line); } catch {}
+    if (d && Array.isArray(d.a)) {                 // 有效遙測 = liveness 證據
+      if (typeof d.pos === 'number') lastPos = d.pos;
+      if (state === 'connecting') {                // 首筆遙測 → 確認 connected
+        if (livenessTimer) { clearTimeout(livenessTimer); livenessTimer = null; }
+        setState('connected');
+        startIdleWatch();
+        if (kind === 'wifi') startSerialPoll();    // WiFi 時才需偵測 USB 插入
+      }
+    }
+    if (d && d.wifi && /^\d+\.\d+\.\d+\.\d+$/.test(d.wifi.ip || '') && d.wifi.ip !== '0.0.0.0') {
+      if (loadCachedIp() !== d.wifi.ip) { saveCachedIp(d.wifi.ip); console.log(`[Transport] learned ESP32 IP ${d.wifi.ip}`); }
+    }
+    onLine(line);
+  }
+
+  function startIdleWatch() {
+    if (idleTimer) clearInterval(idleTimer);
+    idleTimer = setInterval(() => {
+      if (state === 'connected' && Date.now() - lastRx > IDLE_MS) { console.log('[Transport] telemetry idle'); dropAndReselect('idle'); }
+    }, 500);
+  }
+
+  // 有線就用線：WiFi 運行時低頻偵測 USB；連 2 次穩定且平台閒置(!pos)→切回 serial（announced）。
+  // 平台控制中不熱切換（關 WiFi socket 會觸發韌體 failsafe）——等閒置。
+  function startSerialPoll() {
+    if (serialPollTimer) clearInterval(serialPollTimer);
+    serialSeen = 0;
+    serialPollTimer = setInterval(async () => {
+      if (kind !== 'wifi' || switching) return;
+      const path = await findSerial();
+      if (!path) { serialSeen = 0; return; }
+      if (++serialSeen < 2) return;                // 防抖
+      if (lastPos) { return; }                     // 平台運動中 → 待閒置
+      console.log(`[Transport] USB 出現且平台閒置 → 切回 serial (${path})`);
+      switching = true; clearWatches();
+      if (conn) { conn.close(); conn = null; }
+      setState('switching', 'serial', path);
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => { switching = false; select(); }, RECONNECT_MS);
+    }, SERIAL_POLL_MS);
+  }
+
+  function dropAndReselect(why) {
+    clearWatches();
+    if (conn) { try { conn.close(); } catch {} conn = null; }
+    setState('down', kind, why);
+    if (suppressReconnect) return;
     if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => { pendingTimer = null; (fn || connect)(); }, ms);
+    pendingTimer = setTimeout(select, RECONNECT_MS);
   }
 
-  function connect() {
-    if (suppressReconnect || socket) return;   // 既有 socket 即返回，防覆蓋洩漏
-    console.log(`[TCP] connecting ${host}:${port}`);
-    socket = net.connect({ host, port });
-    socket.setNoDelay(true);
-    socket.setKeepAlive(true, 5000);
-    socket.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', (line) => {
-      lastRead = Date.now();
-      onLine(line);
-    });
-    socket.on('connect', () => {
-      console.log('[TCP] connected');
-      lastRead = Date.now();
-      hbTimer = setInterval(() => { if (socket && !socket.destroyed && socket.writable) socket.write('\n'); }, 1000);
-      idleTimer = setInterval(() => {
-        if (socket && !socket.destroyed && Date.now() - lastRead > TCP_IDLE_MS) {
-          console.log('[TCP] read-idle, destroying');
-          socket.destroy();   // → close → 重連；ESP32 收 RST → 韌體 socket-close failsafe
-        }
-      }, 500);
-    });
-    const onGone = (why) => {
-      console.log(`[TCP] ${why}. Reconnecting in 3s...`);
-      clearTimers();
-      socket = null;
-      lastData = null;
-      if (!suppressReconnect) schedule(3000);
-    };
-    socket.on('close', () => onGone('closed'));
-    socket.on('error', (err) => console.error('[TCP] error:', err.message));  // close 隨後觸發 onGone
+  async function select() {
+    if (suppressReconnect || conn) return;
+    setState('selecting', null, '');
+    const path = await findSerial();
+    if (path) { setState('connecting', 'serial', path); conn = openSerial({ path, baud: BAUD, onLine: handleLine, onClose: (w) => dropAndReselect(w) }); }
+    else { const host = wifiHost(); setState('connecting', 'wifi', `${host}:${ESP32_PORT}`); conn = openTcp({ host, port: ESP32_PORT, onLine: handleLine, onClose: (w) => dropAndReselect(w) }); }
+    lastRx = Date.now();
+    if (livenessTimer) clearTimeout(livenessTimer);
+    livenessTimer = setTimeout(() => {              // liveness gate：開了但不講話 → 判死換路（非 silent 坐死）
+      if (state === 'connecting') { console.log(`[Transport] ${kind} 開了但 ${LIVENESS_MS}ms 無遙測`); dropAndReselect('no-telemetry'); }
+    }, LIVENESS_MS);
+    setTimeout(() => { if (conn) conn.write('WIFI?'); }, 800);   // 學/刷新 ESP32 的 WiFi IP（供下次直連）
   }
 
   return {
-    isReady() { return !!(socket && !socket.destroyed && socket.writable); },
-    write(line) { if (socket && !socket.destroyed && socket.writable) socket.write(line + '\n'); },
-    connect,
-    release(holdMs) {
+    start() { select(); },
+    isReady() { return state === 'connected'; },
+    write(line) { if (conn && state === 'connected') conn.write(line); },   // 未連上則 drop（同舊行為）
+    release(holdMs) {                               // 燒錄：暫停重連、放掉連線、holdMs 後重選
       suppressReconnect = true;
-      clearTimers();
-      if (socket && !socket.destroyed) {
-        socket.destroy();
-        console.log(`[TCP] released for upload (${holdMs}ms hold)`);
-      }
-      schedule(holdMs, () => { suppressReconnect = false; connect(); });
+      clearWatches();
+      if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+      if (conn) { conn.close(); conn = null; }
+      setState('down', kind, `released ${holdMs}ms`);
+      pendingTimer = setTimeout(() => { suppressReconnect = false; select(); }, holdMs);
     },
+    getState() { return { kind, state, detail }; },
   };
 }
 
-if (TRANSPORT === 'tcp' && !ESP32_HOST) {
-  console.error('[Config] TRANSPORT=tcp 需設 ESP32_HOST（如 ESP32_HOST=192.168.1.50）');
-  process.exit(1);
-}
-const transport = (TRANSPORT === 'tcp')
-  ? createTcpTransport({ onLine, host: ESP32_HOST, port: ESP32_PORT })
-  : createSerialTransport({ onLine, baud: BAUD });
+// 當前傳輸鏈狀態（server↔ESP32）；廣播給 UI、新 client 連上立即補送 → UI 永遠知道走哪條路
+let currentTransport = { kind: null, state: 'init', detail: '' };
+const transport = createTransportManager({
+  onLine,
+  onState: (st) => { currentTransport = st; broadcast(JSON.stringify({ evt: 'transport', ...st })); },
+});
 
 // ===== 啟動 =====
 server.listen(HTTP_PORT, BIND_HOST, () => {
   console.log(`[Server] http://localhost:${HTTP_PORT}  (bind ${BIND_HOST})`);
   console.log(`[Server] REST: http://localhost:${HTTP_PORT}/api/latest`);
-  console.log(`[Server] transport: ${TRANSPORT}${TRANSPORT === 'tcp' ? ` → ${ESP32_HOST}:${ESP32_PORT}` : ''}`);
+  console.log('[Server] transport: 自動偵測（有線→serial / 沒線→WiFi）');
   if (BIND_HOST === '0.0.0.0')
     console.log('[Server] ⚠ 全網段可達。不可信網路請以 LOOPBACK_ONLY=1 啟動只綁本機。');
-  transport.connect();
+  transport.start();
 });

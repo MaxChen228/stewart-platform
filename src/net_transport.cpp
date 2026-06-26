@@ -1,5 +1,6 @@
 #include "net_transport.h"
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -68,9 +69,15 @@ static void netTask(void* arg) {
         }
         if (!started) { server.begin(); server.setNoDelay(true); started = true; }
 
-        if (!client || !client.connected()) {
+        // newest-wins：有新連線就接、並踢掉舊的（含 TCP 半開的死 client）。
+        // 關鍵 robustness——單客戶端 server 否則會卡在偵測不到的死連線上，
+        // 令 server 端每次重連（含 process crash 後）都連不上、需重啟 WiFi 才解。
+        if (server.hasClient()) {
             WiFiClient c = server.available();
-            if (c) { client = c; client.setNoDelay(true); inn = 0; lastNetRxMs = millis(); }
+            if (c) {
+                if (client) client.stop();          // 踢舊（newest-wins，不賭 connected() 準不準）
+                client = c; client.setNoDelay(true); inn = 0; lastNetRxMs = millis();
+            }
         }
         netConnected = (client && client.connected());
 
@@ -140,6 +147,15 @@ void NetCfg::save() const {
     prefs.end();
 }
 
+// mDNS 廣播 stewart.local → ESP32 IP（server 端零設定發現 WiFi 路徑）。
+// 連線/重連成功後單點呼叫；MDNS.end() 先清，重連時可冪等重設。
+static void netAdvertiseMDNS() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    MDNS.end();
+    if (MDNS.begin("stewart"))                  // → stewart.local 解析到本機 IP
+        MDNS.addService("stewart", "tcp", TCP_PORT);   // _stewart._tcp.local:3333 供發現
+}
+
 bool netWifiBegin(uint32_t waitMs) {
     if (netCfg.ssid.length() == 0) return false;
     WiFi.mode(WIFI_STA);
@@ -147,7 +163,9 @@ bool netWifiBegin(uint32_t waitMs) {
     WiFi.begin(netCfg.ssid.c_str(), netCfg.pass.c_str());
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < waitMs) delay(100);
-    return WiFi.status() == WL_CONNECTED;
+    bool ok = (WiFi.status() == WL_CONNECTED);
+    if (ok) netAdvertiseMDNS();                 // boot 與 WIFION 都經此 → mDNS 單一啟動點
+    return ok;
 }
 
 void netWifiStop() {

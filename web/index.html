@@ -83,6 +83,21 @@ body {
 .nav-status.disconnected { color: var(--dev); }
 .nav-status.connected { color: var(--contra); }
 
+/* 傳輸鏈 badge（server↔ESP32：有線 USB / 無線 WiFi）。與 #status(瀏覽器↔server) 分離。 */
+.nav-transport {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  padding: 2px 9px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.nav-transport.up   { color: var(--contra); }                 /* connected */
+.nav-transport.busy { color: var(--sub); }                    /* selecting/connecting/switching */
+.nav-transport.down { color: var(--dev); }                    /* down */
+
 .nav-right { display: flex; align-items: center; gap: 18px; }
 .nav-link {
   font-family: var(--font-mono);
@@ -339,6 +354,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
   <div class="nav-brand">PHYSICS_LAB</div>
   <div class="nav-right">
     <a class="nav-link" href="research/" target="_blank" rel="noopener" title="研究實驗室（受控物理實驗操作台）">⌬ RESEARCH</a>
+    <div id="transport" class="nav-transport busy" title="server↔平台 傳輸鏈">⋯ 偵測中</div>
     <div id="status" class="nav-status disconnected">DISCONNECTED</div>
   </div>
 </nav>
@@ -1007,6 +1023,23 @@ new ResizeObserver(fitCanvas).observe(canvasZone);
 // ===== WebSocket =====
 let ws = null;
 
+// 傳輸鏈 badge：{kind:'serial'|'wifi', state, detail}。selecting/connecting/switching=busy、connected=up、down=down。
+function updateTransportBadge(t) {
+  const el = document.getElementById('transport');
+  if (!el) return;
+  const icon = t.kind === 'serial' ? '🔌' : t.kind === 'wifi' ? '📶' : '⋯';
+  const label = t.kind === 'serial' ? 'USB' : t.kind === 'wifi' ? 'WiFi' : '偵測中';
+  let txt, cls;
+  if (t.state === 'connected')      { txt = `${icon} ${label}`;   cls = 'up'; }
+  else if (t.state === 'down')      { txt = `⚠ 斷線`;             cls = 'down'; }
+  else if (t.state === 'switching') { txt = `⇄ ${label}`;         cls = 'busy'; }
+  else if (t.state === 'selecting') { txt = `⋯ 偵測中`;           cls = 'busy'; }
+  else                              { txt = `${icon} ${label}…`;  cls = 'busy'; }  // connecting
+  el.textContent = txt;
+  el.className = 'nav-transport ' + cls;
+  el.title = `server↔平台：${t.kind || '—'} / ${t.state}${t.detail ? ' · ' + t.detail : ''}`;
+}
+
 function connectWS() {
   const url = `ws://${location.host}`;
   ws = new WebSocket(url);
@@ -1020,6 +1053,9 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
+
+      // 傳輸鏈狀態（server↔ESP32）：非遙測，獨立路由更新 badge
+      if (data.evt === 'transport') { updateTransportBadge(data); return; }
 
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
@@ -1121,6 +1157,7 @@ function connectWS() {
   ws.onclose = () => {
     document.getElementById('status').textContent = 'DISCONNECTED';
     document.getElementById('status').className = 'nav-status disconnected';
+    updateTransportBadge({ kind: null, state: 'selecting', detail: '' });  // server 斷 → 傳輸狀態未知，轉灰
     document.querySelectorAll('.zbtn').forEach(b => b.disabled = true);
     setTimeout(connectWS, 1000);
   };
