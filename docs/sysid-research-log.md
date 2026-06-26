@@ -197,3 +197,56 @@ HOLD 監控看到：
 - 短期 HOLD 實驗優先使用 `C 0 0` + 較保守 loop，例如 `L 20`。
 - 到貨後先做 TWAI 500K，確認上層行為一致，再做 1M migration。
 - 1M 只解 bus bandwidth；TWAI 解 host RX queue/latency。兩者正交，200-300Hz 需要一起評估。
+
+## 2026-06-27 — MPC 可行性判斷與耦合辨識工具
+
+背景：Z/heave 動作截圖顯示能到位但動態過程有明顯 cross-axis wobble；`Ki=20` 能改善靜態貼近目標，
+`Ki=0` 不一定改善動態振盪。結論修正：問題不是單純 PID 某一項，而是 **平台層 MIMO 耦合 + 命令/回授頻寬 +
+馬達黑盒內環** 的綜合問題。
+
+### SERVO42D 對 MPC 的硬體條件
+
+本地手冊確認 SERVO42D 支援外層 MPC 所需的大部分介面：
+
+- `0xF5` 絕對座標位置指令支援 real-time updates，可作為外層控制輸入。
+- `0x35` raw accumulated encoder 可作為位置回授；`0x01` auto-return 可串流唯讀參數。
+- `0x32` real-time speed、`0x39` position angle error 可作為後續狀態觀測補強。
+- `0x4A/0x4B` 支援多馬達同步觸發，將來可減少六顆 F5 sequential skew。
+- `0x8A` 支援 1M CAN bitrate。
+- 內部 position/speed loop 10kHz、torque loop 20kHz，但這些是黑盒，外部不能直接 command torque。
+
+因此可做的是 **outer-loop position/pose MPC**：MPC 輸出 target pose/motor target deltas，SERVO42D 內環負責追蹤。
+不應把它當成 torque-mode 工業伺服來做力矩 MPC。
+
+### 新增工具
+
+- `docs/mpc-readiness.md`：硬體能力、瓶頸、MPC 分階段架構與判斷。
+- `sysid/coupling_probe.js`：預設 dry-run 的耦合辨識動作腳本；`--live` 才會實際送 H/P/FOLLOW/PF 並錄 JSONL。
+- `sysid/kin.js` 新增 Node 版 FK `solveFK()`，與前端 FK 同源，用於離線分析錄檔。
+- `sysid/coupling_summary.js`：把 JSONL 轉成 FK pose 統計、target error、cross-axis coupling ratio。
+
+### CAN 預算更新
+
+ACK off 估算：
+
+- 500K, 200Hz F5 + 200Hz encoder：~63% bus load，理論可用但在 MCP2515 上偏緊。
+- 1M, 200Hz F5 + 200Hz encoder：~31%，舒服。
+- 1M, 300Hz F5 + 300Hz encoder：~47%，可用。
+
+結論：**MPC 不被 SERVO42D 擋住；擋住的是目前 MCP2515/500K 的穩定低延遲資料面。**
+
+### 下一步
+
+1. 先用 `coupling_probe` 取得中心姿態、小幅、可重複資料，避免拿舊的激烈擾動資料硬 fit。
+2. 用 `coupling_summary` 量化 Z→Y/roll/pitch/yaw 等交叉耦合。
+3. 先做 decoupling feedforward 或 pose-space MIMO PD/LQI，再進 LQR/MPC。
+4. TWAI + 1M 到位後再挑戰 200-300Hz MPC。
+
+### Safe landing convention
+
+使用者提供可重複安全卸力流程：先回 UI 可設定的 relative home（目前 `[0,0,+28,0,0,0]`），
+再到支架 landing relative pose `[0,0,+10,0,0,0]`（絕對 pose 約 `z=NEUTRAL_Z+10`），
+最後 `D` release；平台會落在已放好的支架上。
+
+最佳實踐修正：Home 不應在腳本硬寫第二份。UI 的「存Home」同步寫 server `/api/home`；
+`sysid/safe_land.js` / `coupling_probe --live` 從同一 API 讀取 home，避免雙真相源。

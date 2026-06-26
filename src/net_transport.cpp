@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 NetCfg netCfg;
 
@@ -13,7 +14,7 @@ NetCfg netCfg;
 static const uint16_t TCP_PORT = 3333;
 
 // 固定大小 by-value 項：避免 heap 碎片，drop 時無 double-free 風險。
-struct OutLine { char s[640]; };
+struct OutLine { char s[1024]; };
 struct NetCmd  { char s[128]; };       // 指令行最長 ~ "W f f f f f f ms" < 128
 
 static QueueHandle_t qOut = nullptr;   // loop(core1) → netTask(core0)，遙測，len=32 (~1s@33Hz)
@@ -28,6 +29,16 @@ static volatile uint32_t netOutDrop = 0;
 static volatile uint32_t netInLines = 0;
 static volatile uint32_t netInDrop = 0;
 static volatile uint32_t netInTooLong = 0;
+static SemaphoreHandle_t outMux = nullptr;
+
+static void lockOut() {
+    if (!outMux) outMux = xSemaphoreCreateRecursiveMutex();
+    if (outMux) xSemaphoreTakeRecursive(outMux, portMAX_DELAY);
+}
+
+static void unlockOut() {
+    if (outMux) xSemaphoreGiveRecursive(outMux);
+}
 
 #ifndef OTA_HOSTNAME
 #define OTA_HOSTNAME "stewart"
@@ -75,6 +86,10 @@ void netOtaHandle() {
     ArduinoOTA.handle();
 }
 
+bool netOtaBusy() {
+    return otaInProgress;
+}
+
 // ----- DualPrint：唯一 writer = core1（loop/setup），免 mutex -----
 DualPrint Out;
 
@@ -95,14 +110,28 @@ void DualPrint::flushLine() {
 }
 
 size_t DualPrint::write(uint8_t c) {
+    lockOut();
     Serial.write(c);                   // (a) 永遠寫 USB（此處保留 Serial，是真實 sink；byte-parity）
-    if (c == '\n') { flushLine(); return 1; }   // '\n' 不入緩衝，由 flushLine 統一補
+    if (c == '\n') {
+        flushLine();
+        unlockOut();
+        return 1;
+    }   // '\n' 不入緩衝，由 flushLine 統一補
     if (n < sizeof(line) - 1) line[n++] = c;    // (b) 只累積內容
+    unlockOut();
     return 1;
 }
 
 size_t DualPrint::write(const uint8_t* buf, size_t len) {
-    for (size_t i = 0; i < len; i++) write(buf[i]);   // 逐 byte；33Hz×400B 無效能顧慮
+    if (!buf || len == 0) return 0;
+    lockOut();
+    Serial.write(buf, len);             // bulk write: avoid one UART mutex/blocking call per byte
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = buf[i];
+        if (c == '\n') { flushLine(); continue; }
+        if (n < sizeof(line) - 1) line[n++] = c;
+    }
+    unlockOut();
     return len;
 }
 
@@ -114,6 +143,7 @@ static void netTask(void* arg) {
     bool started = false;
     char  inbuf[128];           // 入站行緩衝（單 client、netTask 獨用）
     size_t inn = 0;
+    bool inOverflow = false;
     for (;;) {
         if (WiFi.status() != WL_CONNECTED) {
             if (started) { client.stop(); server.end(); started = false; }  // 釋放半開資源
@@ -130,7 +160,7 @@ static void netTask(void* arg) {
             WiFiClient c = server.available();
             if (c) {
                 if (client) client.stop();          // 踢舊（newest-wins，不賭 connected() 準不準）
-                client = c; client.setNoDelay(true); inn = 0; lastNetRxMs = millis(); netClientSeq++;
+                client = c; client.setNoDelay(true); inn = 0; inOverflow = false; lastNetRxMs = millis(); netClientSeq++;
             }
         }
         netConnected = (client && client.connected());
@@ -154,7 +184,10 @@ static void netTask(void* arg) {
             if (ch < 0) break;
             lastNetRxMs = millis();      // 任何 byte 都更新心跳基準
             if (ch == '\n' || ch == '\r') {
-                if (inn > 0) {
+                if (inOverflow) {
+                    inn = 0;
+                    inOverflow = false;
+                } else if (inn > 0) {
                     NetCmd nc;
                     size_t m = (inn < sizeof(nc.s)) ? inn : sizeof(nc.s) - 1;
                     memcpy(nc.s, inbuf, m); nc.s[m] = '\0'; inn = 0;
@@ -164,6 +197,7 @@ static void netTask(void* arg) {
             } else if (inn < sizeof(inbuf) - 1) {
                 inbuf[inn++] = (char)ch;
             } else {
+                inOverflow = true;
                 netInTooLong++;
             }   // 行超長則丟棄多餘 byte（指令 <128，正常不會觸發）
         }

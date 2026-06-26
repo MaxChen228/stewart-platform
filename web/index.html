@@ -645,7 +645,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <div style="display:flex;gap:6px;margin-top:8px">
         <button class="chip zbtn" onclick="poseGo()" disabled style="flex:2;font-weight:600">GO</button>
         <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
-        <button class="chip zbtn" onclick="poseSetHome()" disabled style="flex:1" title="把當前目標姿態存為 Home，之後 HOME 回到此姿態（存 localStorage）">⌂ 存Home</button>
+        <button class="chip zbtn" onclick="poseSetHome()" disabled style="flex:1" title="把當前目標姿態存為 Home，之後 HOME 回到此姿態">⌂ 存Home</button>
       </div>
       <div class="pose-live-summary">
         <div class="pose-legend"><span class="target">藍底=可達</span><span class="target">藍色 thumb=目標</span><span class="actual">螢光線=實際</span><span>底線=誤差</span></div>
@@ -897,6 +897,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
 <!-- 共用幾何/擾動數學（與 Node sysid 工具同一份，SoT）：非 module 先載 → window.Kin / window.DisturbModes -->
 <script src="/sysid/kin.js"></script>
+<script src="/sysid/platform_sot.js"></script>
 <script src="/sysid/disturb_modes.js"></script>
 <!-- 監控引擎（單一真相源，與 research/monitor 共用）：非 module 先載 → window.ScopeCore -->
 <script src="/shared/scope-core.js"></script>
@@ -1402,10 +1403,132 @@ function poseUpdateGhost() {
   else { st.textContent = ''; st.style.color = 'var(--sub)'; }
   if (followActive && poseReachable) streamPF(ghostTarget);   // 跟隨：滑桿即時串流 PF
 }
-POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', poseUpdateGhost));
-// Home 姿態（絕對 pose）：HOME 鍵的目的地。預設中位，可用「存 Home」設成當前目標、存 localStorage 跨 F5 存活。
-let homePose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', () => { poseUpdateGhost(); savePlatformConfigSoon(); }));
+// Home 姿態（絕對 pose）：HOME 鍵與實驗腳本共用的目的地。
+// Server `/api/platform-config` 是 SoT；localStorage 只當離線/舊版備援。
+let platformConfig = window.PlatformSoT ? window.PlatformSoT.mergeConfig({}) : null;
+let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
 try { const h = JSON.parse(localStorage.getItem('pose.home')); if (Array.isArray(h) && h.length === 6 && h.every(Number.isFinite)) homePose = h; } catch (e) {}
+let platformSaveTimer = null;
+function clampInputValue(el, v) {
+  if (!el || !Number.isFinite(v)) return;
+  const min = Number(el.min), max = Number(el.max);
+  el.value = Math.max(Number.isFinite(min) ? min : v, Math.min(Number.isFinite(max) ? max : v, v));
+}
+function currentUiState() {
+  const motionParams = {};
+  if (typeof MOTIONS !== 'undefined') {
+    for (const m of MOTIONS) {
+      const existing = platformConfig?.uiState?.motion?.paramsById?.[m.id] || {};
+      motionParams[m.id] = { ...existing };
+    }
+    const def = selectedMotion && selectedMotion();
+    if (def) motionParams[def.id] = readMotionParams();
+  }
+  return {
+    poseTargetRelative: poseReadOffset(),
+    poseMoveMs: Number(document.getElementById('ps-ms')?.value) || 1500,
+    motion: {
+      selectedId: document.getElementById('motion-sel')?.value || platformConfig?.uiState?.motion?.selectedId || 'helix',
+      loops: motionReadLoops ? motionReadLoops() : 0,
+      paramsById: motionParams,
+    },
+    disturbance: {
+      uMotor: Number(document.getElementById('u-motor')?.value) || 0,
+      uDeg: Number(document.getElementById('u-deg')?.value) || 0,
+      uMs: Number(document.getElementById('u-ms')?.value) || 0,
+      wMode: document.getElementById('w-mode')?.value || 'tilt',
+      wSev: Number(document.getElementById('w-sev')?.value) || 0,
+      wMs: Number(document.getElementById('w-ms')?.value) || 0,
+      batteryBackstop: Number(document.getElementById('bat-backstop')?.value) || 15,
+    },
+    recorderName: document.getElementById('rec-name')?.value || 'run',
+  };
+}
+function savePlatformConfigSoon() {
+  if (!platformConfig || !window.PlatformSoT) return;
+  clearTimeout(platformSaveTimer);
+  platformSaveTimer = setTimeout(async () => {
+    try {
+      const body = window.PlatformSoT.mergeConfig({ ...platformConfig, uiState: currentUiState() });
+      const r = await fetch('/api/platform-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) platformConfig = window.PlatformSoT.mergeConfig(await r.json());
+    } catch (e) {}
+  }, 250);
+}
+function applyPersistedUiState() {
+  const ui = platformConfig?.uiState;
+  if (!ui) return;
+  if (Array.isArray(ui.poseTargetRelative)) {
+    for (const [id, idx] of POSE_AXES) clampInputValue(document.getElementById(id), Number(ui.poseTargetRelative[idx]));
+  }
+  clampInputValue(document.getElementById('ps-ms'), Number(ui.poseMoveMs));
+  const vf = platformConfig.followLimits || {};
+  clampInputValue(document.getElementById('vf-t'), Number(vf.vmaxT));
+  clampInputValue(document.getElementById('vf-r'), Number(vf.vmaxR));
+  const sel = document.getElementById('motion-sel');
+  if (sel && ui.motion?.selectedId && [...sel.options].some(o => o.value === ui.motion.selectedId)) sel.value = ui.motion.selectedId;
+  clampInputValue(document.getElementById('motion-loops'), Number(ui.motion?.loops));
+  if (typeof renderMotionParams === 'function') renderMotionParams();
+  const d = ui.disturbance || {};
+  const uMotor = document.getElementById('u-motor');
+  if (uMotor && Number.isFinite(Number(d.uMotor))) uMotor.value = String(d.uMotor);
+  clampInputValue(document.getElementById('u-deg'), Number(d.uDeg));
+  clampInputValue(document.getElementById('u-ms'), Number(d.uMs));
+  const wMode = document.getElementById('w-mode');
+  if (wMode && d.wMode && [...wMode.options].some(o => o.value === d.wMode || o.textContent === d.wMode)) wMode.value = d.wMode;
+  clampInputValue(document.getElementById('w-sev'), Number(d.wSev));
+  clampInputValue(document.getElementById('w-ms'), Number(d.wMs));
+  clampInputValue(document.getElementById('bat-backstop'), Number(d.batteryBackstop));
+  const recName = document.getElementById('rec-name');
+  if (recName && typeof ui.recorderName === 'string') recName.value = ui.recorderName;
+  if (typeof wPreview === 'function') wPreview();
+  motionRefreshTimeline?.();
+  poseUpdateGhost();
+}
+function poseHomeOffset() {
+  return [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
+}
+function poseApplyHomeToSliders() {
+  const off = poseHomeOffset();
+  POSE_AXES.forEach(([id, idx]) => {
+    const el = document.getElementById(id);
+    el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));
+  });
+}
+async function poseLoadHomeFromServer() {
+  try {
+    const r = await fetch('/api/platform-config');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (window.PlatformSoT) platformConfig = window.PlatformSoT.mergeConfig(d);
+    const pose = Array.isArray(d.homePose) ? d.homePose : d.pose;
+    if (!Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
+    homePose = pose;
+    try { localStorage.setItem('pose.home', JSON.stringify(homePose)); } catch (e) {}
+    applyPersistedUiState();
+  } catch (e) {}
+}
+async function poseSaveHomeToServer() {
+  try {
+    const body = platformConfig && window.PlatformSoT
+      ? { ...platformConfig, homePose }
+      : { homePose };
+    const r = await fetch('/api/platform-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      if (window.PlatformSoT) platformConfig = window.PlatformSoT.mergeConfig(d);
+    }
+  } catch (e) {}
+}
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
   const st = document.getElementById('pose-ctl-status');
@@ -1424,11 +1547,7 @@ window.poseGo = function() {
 };
 window.poseHome = function() {
   // 回到 homePose（預設中位，或經「存 Home」設定的姿態）。先把滑桿同步到 home offset。
-  const off = [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
-  POSE_AXES.forEach(([id, idx]) => {
-    const el = document.getElementById(id);
-    el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));
-  });
+  poseApplyHomeToSliders();
   poseUpdateGhost();   // followActive 時此呼叫會 streamPF(home) → 濾波器 ease 回 home
   if (followActive) return;
   const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
@@ -1437,14 +1556,16 @@ window.poseHome = function() {
   window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
 };
 window.poseSetHome = function() {
-  // 把當前目標姿態（滑桿值→絕對 pose）設為 Home，存 localStorage 跨 F5 存活。
+  // 把當前目標姿態（滑桿值→絕對 pose）設為 Home，寫 server SoT；localStorage 只作備援。
   const o = poseReadOffset();
   homePose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   try { localStorage.setItem('pose.home', JSON.stringify(homePose)); } catch (e) {}
+  poseSaveHomeToServer();
   const st = document.getElementById('pose-ctl-status');
   st.style.color = 'var(--sub)';
   st.textContent = `⌂ Home 已設為 [${homePose.map(x => x.toFixed(1)).join(', ')}]`;
 };
+document.getElementById('ps-ms')?.addEventListener('input', savePlatformConfigSoon);
 
 // ===== 跟隨模式：FOLLOW 1/0 + PF 串流（速度受限濾波器在韌體；拖快不硬撲）=====
 let followActive = false;
@@ -1576,20 +1697,23 @@ window.motionSetLoops = function(v){
   el.value = Math.max(0, Math.min(999, parseInt(v, 10) || 0));
   if (motion.def) motion.maxLoops = motionReadLoops();
   motionRefreshTimeline();
+  savePlatformConfigSoon();
 };
 window.motionAdjustLoops = function(delta){ motionSetLoops(motionReadLoops() + delta); };
 window.motionRefreshTimeline = motionRefreshTimeline;
 function renderMotionParams(){
   const def = selectedMotion(), box = motionParamBox(); box.innerHTML = '';
   if (!def) return;
+  const saved = platformConfig?.uiState?.motion?.paramsById?.[def.id] || {};
   def.params.forEach(pr => {
+    const value = Number.isFinite(Number(saved[pr.k])) ? saved[pr.k] : pr.def;
     const row = document.createElement('div');
     row.style.cssText = 'display:grid;grid-template-columns:54px 1fr 44px;gap:4px;align-items:center;font-size:11px';
     row.innerHTML = `<span title="${pr.l}">${pr.l}</span>` +
-      `<input type="range" data-k="${pr.k}" min="${pr.min}" max="${pr.max}" value="${pr.def}" step="${pr.step}">` +
-      `<span class="mp-v" style="text-align:right">${pr.def}${pr.u}</span>`;
+      `<input type="range" data-k="${pr.k}" min="${pr.min}" max="${pr.max}" value="${value}" step="${pr.step}">` +
+      `<span class="mp-v" style="text-align:right">${value}${pr.u}</span>`;
     const inp = row.querySelector('input'), vv = row.querySelector('.mp-v');
-    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; motionRefreshTimeline(); });
+    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; motionRefreshTimeline(); savePlatformConfigSoon(); });
     box.appendChild(row);
   });
   motionRefreshTimeline();
@@ -1666,15 +1790,28 @@ function motionStop(){
 window.motionStopBtn = function(){ const st = document.getElementById('motion-status'); st.textContent = '■ 已停'; st.style.color = 'var(--sub)'; motionStop(); };
 window.applyVF = function(){
   const vt = parseFloat(document.getElementById('vf-t').value) || 60, vr = parseFloat(document.getElementById('vf-r').value) || 45;
+  if (platformConfig) {
+    platformConfig.followLimits = { vmaxT: vt, vmaxR: vr };
+    savePlatformConfigSoon();
+  }
   window.sendCmd(`VF ${vt} ${vr}`);
 };
-window.onMotionSel = function(){ motionStop(); renderMotionParams(); motionRefreshTimeline(); };
+window.onMotionSel = function(){ motionStop(); renderMotionParams(); motionRefreshTimeline(); savePlatformConfigSoon(); };
 // 填充動作選單（單一真相源 = MOTIONS）+ 首次參數渲染
 (function initMotions(){
   const sel = document.getElementById('motion-sel');
   MOTIONS.forEach(m => { const o = document.createElement('option'); o.value = m.id; o.textContent = m.label; sel.appendChild(o); });
+  const savedId = platformConfig?.uiState?.motion?.selectedId;
+  if (savedId && MOTIONS.some(m => m.id === savedId)) sel.value = savedId;
   renderMotionParams();
 })();
+document.getElementById('motion-loops')?.addEventListener('input', savePlatformConfigSoon);
+['vf-t','vf-r'].forEach(id => document.getElementById(id)?.addEventListener('input', () => {
+  const vt = parseFloat(document.getElementById('vf-t').value) || 60;
+  const vr = parseFloat(document.getElementById('vf-r').value) || 45;
+  if (platformConfig) platformConfig.followLimits = { vmaxT: vt, vmaxR: vr };
+  savePlatformConfigSoon();
+}));
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
@@ -1709,10 +1846,10 @@ function updateViz(motorAngles) {
 
 // 初始顯示 home（刷新後反映 homePose——含 localStorage 存的自訂 home，而非寫死中位）
 (function initPoseToHome(){
-  const off = [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
-  POSE_AXES.forEach(([id, idx]) => { const el = document.getElementById(id); el.value = Math.max(+el.min, Math.min(+el.max, off[idx])); });
+  poseApplyHomeToSliders();
   poseUpdateGhost();              // 設 ghostTarget=home + 更新綠色 ghost（followActive 仍 false → 不串流）
   updateViz(ik(homePose));        // 紅色初始 placeholder 也顯示 home（連線後由遙測覆蓋）
+  poseLoadHomeFromServer();
 })();
 
 // Self-test
@@ -2346,7 +2483,10 @@ function wPreview() {
 window.disturbW = function() {
   const d = wDelta(); sendCmd(`W ${d.map(x=>x.toFixed(3)).join(' ')} ${+$o('w-ms').value}`);
 };
-['w-mode','w-sev'].forEach(id => { const el=$o(id); if(el) el.addEventListener('input', wPreview); });
+['u-motor','u-deg','u-ms','w-mode','w-sev','w-ms','bat-backstop','rec-name'].forEach(id => {
+  const el=$o(id);
+  if (el) el.addEventListener('input', () => { if (id.startsWith('w-')) wPreview(); savePlatformConfigSoon(); });
+});
 wPreview();
 
 // battery：瀏覽器 replay 共用 SEQ + client 看門狗（herr 超 backstop → D 中止；韌體 U/W 自限為真正保底）

@@ -54,4 +54,10 @@ function main() {
   console.table(rows.map((r) => ({ CAN_ID: r.id, speed: r.speed, data: r.data })));
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  console.error(`Error: ${err.message}`);
+  usage();
+  process.exit(1);
+}

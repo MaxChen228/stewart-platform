@@ -5,6 +5,8 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const { NEUTRAL_Z } = require('./sysid/kin');
+const PlatformSoT = require('./sysid/platform_sot');
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
 const BAUD = 460800;
@@ -33,6 +35,9 @@ let lastLine = null;
 // 把每筆進來的遙測（dir:"in"）與每筆送出的指令（dir:"cmd"）寫成 JSONL，
 // 時間戳用 performance.now()（單調、sub-ms），供離線分析對齊。
 const REC_DIR = path.join(__dirname, 'sysid', 'data');
+const CONFIG_DIR = path.join(__dirname, 'sysid', 'config');
+const HOME_POSE_PATH = path.join(CONFIG_DIR, 'pose-home.json');
+const PLATFORM_CONFIG_PATH = path.join(CONFIG_DIR, 'platform.json');
 let recStream = null;
 let recPath = null;
 let recCount = 0;
@@ -68,6 +73,65 @@ function recStop() {
   return { path: p, lines: n };
 }
 
+function finitePose(p) {
+  return PlatformSoT.finitePose(p);
+}
+
+function relativeToAbsolutePose(rel) {
+  return PlatformSoT.relToAbs(rel, NEUTRAL_Z);
+}
+
+function absoluteToRelativePose(pose) {
+  return PlatformSoT.absToRel(pose, NEUTRAL_Z);
+}
+
+function loadPlatformConfig() {
+  let disk = {};
+  try { disk = JSON.parse(fs.readFileSync(PLATFORM_CONFIG_PATH, 'utf8')); } catch {}
+  let legacy = {};
+  try {
+    const d = JSON.parse(fs.readFileSync(HOME_POSE_PATH, 'utf8'));
+    if (finitePose(d.relative)) legacy.homeRelative = d.relative;
+    else if (finitePose(d.pose)) legacy.homeRelative = absoluteToRelativePose(d.pose);
+  } catch {}
+  return PlatformSoT.mergeConfig({ ...legacy, ...disk });
+}
+
+function savePlatformConfig(config) {
+  const body = { ...PlatformSoT.mergeConfig(config), updatedAt: new Date().toISOString() };
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(PLATFORM_CONFIG_PATH, JSON.stringify(body, null, 2));
+  return body;
+}
+
+function loadHomePose() {
+  return relativeToAbsolutePose(loadPlatformConfig().homeRelative);
+}
+
+function saveHomePose(pose) {
+  const cfg = loadPlatformConfig();
+  cfg.homeRelative = absoluteToRelativePose(pose);
+  const saved = savePlatformConfig(cfg);
+  const body = { pose, relative: saved.homeRelative, updatedAt: saved.updatedAt };
+  fs.writeFileSync(HOME_POSE_PATH, JSON.stringify(body, null, 2));
+  return body;
+}
+
+function readRequestBody(req, limit = 65536) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > limit) {
+        reject(new Error('request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
 // ===== HTTP 靜態檔案伺服器 =====
 const MIME = { '.html':'text/html', '.js':'application/javascript', '.css':'text/css', '.json':'application/json' };
 
@@ -81,6 +145,61 @@ const server = http.createServer((req, res) => {
   if (req.url === '/api/transport') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ...currentTransport, lastLineAt: lastLine ? lastLine.t : null }));
+    return;
+  }
+  if (req.url === '/api/platform-config' && req.method === 'GET') {
+    const config = loadPlatformConfig();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ...config,
+      neutralZ: NEUTRAL_Z,
+      homePose: relativeToAbsolutePose(config.homeRelative),
+      landingPose: relativeToAbsolutePose(config.landingRelative),
+    }));
+    return;
+  }
+  if (req.url === '/api/platform-config' && req.method === 'POST') {
+    readRequestBody(req).then((body) => {
+      const current = loadPlatformConfig();
+      const incoming = JSON.parse(body || '{}');
+      if (finitePose(incoming.homePose)) incoming.homeRelative = absoluteToRelativePose(incoming.homePose);
+      if (finitePose(incoming.landingPose)) incoming.landingRelative = absoluteToRelativePose(incoming.landingPose);
+      const saved = savePlatformConfig({ ...current, ...incoming });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ...saved,
+        neutralZ: NEUTRAL_Z,
+        homePose: relativeToAbsolutePose(saved.homeRelative),
+        landingPose: relativeToAbsolutePose(saved.landingRelative),
+      }));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+  if (req.url === '/api/home' && req.method === 'GET') {
+    const pose = loadHomePose();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ pose, relative: absoluteToRelativePose(pose), neutralZ: NEUTRAL_Z }));
+    return;
+  }
+  if (req.url === '/api/home' && req.method === 'POST') {
+    readRequestBody(req).then((body) => {
+      const d = JSON.parse(body || '{}');
+      const pose = finitePose(d.pose) ? d.pose : (finitePose(d.relative) ? relativeToAbsolutePose(d.relative) : null);
+      if (!pose) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end('{"error":"expected pose[6] or relative[6]"}');
+        return;
+      }
+      const saved = saveHomePose(pose);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...saved, neutralZ: NEUTRAL_Z }));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
     return;
   }
 

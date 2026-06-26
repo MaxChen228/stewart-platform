@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 #include "servo42d.h"
 #include "kinematics.h"
 #include "encoder.h"
@@ -24,7 +27,7 @@ volatile bool canRxPaused = false;
 uint16_t arPeriodMs = 10;             // 馬達主動上報週期，可調（AR 指令）；預設 100Hz（10ms）對齊控制迴圈
 
 // ===== 可調速率（item 2 of 本輪）=====
-uint32_t loopPeriodUs = 10000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）；預設 100Hz（10ms）
+volatile uint32_t loopPeriodUs = 10000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）；預設 100Hz（10ms）
 const uint32_t TELE_PERIOD_MS = 30;  // 遙測輸出週期（與控制解耦，固定 ~33Hz，免塞爆 115200 序列埠）
 bool posEnabled = false;
 float enableAngle[NUM_MOTORS] = {0};
@@ -48,6 +51,59 @@ uint32_t ctlCoordLimitWin = 0;
 int32_t  ctlCoordMaxAbs = 0;
 
 TaskHandle_t canRxTaskHandle = nullptr;
+TaskHandle_t controlTaskHandle = nullptr;
+TaskHandle_t telemetryTaskHandle = nullptr;
+
+struct QueuedCommand {
+    char cmd[160];
+    bool fromNet;
+};
+
+enum TelemetryExtra : uint8_t { TELEM_EXTRA_NONE = 0, TELEM_EXTRA_HOLD = 1, TELEM_EXTRA_TASK = 2, TELEM_EXTRA_JOINT = 3 };
+
+struct TelemetrySnapshot {
+    float angles[NUM_MOTORS];
+    int64_t raw[NUM_MOTORS];
+    int ok;
+    int zeroed;
+    int pos;
+    int controlMode;
+    uint8_t eflg, tec, rec;
+    uint32_t t, dtMs, canReadUs;
+    float lhz;
+    uint16_t arMs;
+    uint16_t busF5, busQ, busRx, busMs, busPer[NUM_MOTORS], busOvr;
+    uint32_t f5us, f5max;
+    uint8_t maxDrain;
+    uint32_t teleCycles, dtMinMs, dtMaxMs;
+    float dtAvgMs;
+    uint32_t ctlIkFail, ctlFkFail, ctlCoordLimit;
+    int32_t ctlCoordMaxAbs;
+    int fkStreak;
+    uint16_t pid[4];
+    int pidSaved;
+    int followMode;
+    uint8_t profile;
+    TelemetryExtra extra;
+    float hold[NUM_MOTORS], herr[NUM_MOTORS], hmax;
+    float fkPose[6], poseErr[6], motorTgt[NUM_MOTORS];
+    int fkIterations;
+    float jointGain;
+    uint32_t ctrlUs, ctrlMaxUs, jitterUs, missed, teleDrop, cmdDrop, snapAgeMs;
+};
+
+static QueueHandle_t commandQueue = nullptr;
+static QueueHandle_t telemetryQueue = nullptr;
+static volatile uint32_t cmdDropCount = 0;
+static volatile uint32_t teleDropCount = 0;
+static volatile uint32_t controlMissedCount = 0;
+static volatile uint32_t controlMaxUs = 0;
+static volatile bool otaStopRequested = false;
+
+static bool enqueueCommand(const String& cmd, bool fromNet);
+static void emitTelemetry(const TelemetrySnapshot& s);
+static void controlTick();
+void handleSerial();
 
 // ===== HOLD 模式 =====
 // 純 passthrough：snapshot 當前 enc.angles，每 cycle 直送 F5，跳過 PD/IK/平滑
@@ -100,6 +156,48 @@ static void followStep(float dt) {
     if (ik.valid) {
         for (int i = 0; i < 6; i++) { followCur[i] = cand[i]; holdAngles[i] = ik.angles[i]; }
     }
+}
+
+static void controlTask(void*) {
+    TickType_t lastWake = xTaskGetTickCount();
+    for (;;) {
+        controlTick();
+        uint32_t periodMs = (uint32_t)loopPeriodUs / 1000;
+        if (periodMs < 1) periodMs = 1;
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(periodMs));
+    }
+}
+
+static void telemetryTask(void*) {
+    TelemetrySnapshot snap;
+    for (;;) {
+        if (telemetryQueue && xQueueReceive(telemetryQueue, &snap, portMAX_DELAY) == pdTRUE) {
+            uint32_t now = millis();
+            snap.snapAgeMs = now >= snap.t ? now - snap.t : 0;
+            emitTelemetry(snap);
+        }
+    }
+}
+
+static void startRealtimeTasks() {
+    if (!commandQueue) commandQueue = xQueueCreate(32, sizeof(QueuedCommand));
+    if (!telemetryQueue) telemetryQueue = xQueueCreate(1, sizeof(TelemetrySnapshot));
+    if (!telemetryTaskHandle)
+        xTaskCreatePinnedToCore(telemetryTask, "telemetry", 8192, nullptr, 1, &telemetryTaskHandle, 0);
+    if (!controlTaskHandle)
+        xTaskCreatePinnedToCore(controlTask, "control", 8192, nullptr, 4, &controlTaskHandle, 1);
+}
+
+void loop() {
+    netOtaHandle();
+    handleSerial();
+
+    String netCmd;
+    while (netNextCommand(netCmd)) {
+        enqueueCommand(netCmd, true);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 // 開機預設 vFOC PID：純P工作點 [1024,0,0,0]（2026-06-26 定案）。
@@ -241,6 +339,10 @@ static void otaSafetyStop() {
     servos.disableAll();
 }
 
+static void requestOtaSafetyStop() {
+    otaStopRequested = true;
+}
+
 // ===== 失效保護（P4）=====
 // 只有「以 WiFi 為控制來源」時才 arm：TCP 下控制指令 →true，USB 下指令 →false。
 bool netIsControlSource = false;
@@ -276,6 +378,95 @@ static void checkFailsafe() {
     }
 }
 
+static bool enqueueCommand(const String& cmd, bool fromNet) {
+    if (!commandQueue || cmd.length() == 0) return false;
+    QueuedCommand q{};
+    size_t n = cmd.length();
+    if (n >= sizeof(q.cmd)) n = sizeof(q.cmd) - 1;
+    memcpy(q.cmd, cmd.c_str(), n);
+    q.cmd[n] = '\0';
+    q.fromNet = fromNet;
+    if (xQueueSend(commandQueue, &q, 0) == pdTRUE) return true;
+    cmdDropCount++;
+    return false;
+}
+
+static const char* ctlModeName(const TelemetrySnapshot& s) {
+    if (!s.pos) return "off";
+    if (s.extra == TELEM_EXTRA_HOLD) return "hold";
+    return s.controlMode == 1 ? "task_pd" : "joint";
+}
+
+static const char* profileName(const TelemetrySnapshot& s) {
+    if (s.profile == 1) return "follow";
+    if (s.profile == 2) return "smoothstep";
+    return "none";
+}
+
+static void emitTelemetry(const TelemetrySnapshot& s) {
+    Out.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                  "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
+                  "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
+                  "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+                  "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
+                  "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u,"
+                  "\"per\":[%u,%u,%u,%u,%u,%u],\"ovr\":%u,\"f5us\":%u,\"mxd\":%u},"
+                  "\"tim\":{\"cycles\":%u,\"dtMin\":%u,\"dtMax\":%u,\"dtAvg\":%.2f,"
+                  "\"teleMs\":%u,\"f5us\":%u,\"f5max\":%u,\"canReadUs\":%u},"
+                  "\"can\":{\"backend\":\"mcp2515\",\"bitrate\":500000,\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+                  "\"rxDrop\":%u,\"txFail\":%u,\"qDepth\":0,\"qMax\":0},"
+                  "\"ctl\":{\"mode\":\"%s\",\"ikFail\":%u,\"fkFail\":%u,\"coordLimit\":%u,\"coordMax\":%d,"
+                  "\"fkStreak\":%d,\"profile\":\"%s\"},"
+                  "\"pid\":[%u,%u,%u,%u],\"pids\":%d,\"fl\":%d,"
+                  "\"sched\":{\"ctrl_us\":%u,\"ctrl_max_us\":%u,\"jitter_us\":%u,\"missed\":%u,"
+                  "\"tele_drop\":%u,\"cmd_drop\":%u,\"snap_age_ms\":%u}",
+        s.angles[0], s.angles[1], s.angles[2],
+        s.angles[3], s.angles[4], s.angles[5],
+        s.raw[0], s.raw[1], s.raw[2], s.raw[3], s.raw[4], s.raw[5],
+        s.ok, s.zeroed, s.pos, s.controlMode,
+        s.eflg, s.tec, s.rec,
+        s.t, s.dtMs, s.canReadUs, s.lhz, s.arMs,
+        s.busF5, s.busQ, s.busRx, s.busMs,
+        s.busPer[0], s.busPer[1], s.busPer[2],
+        s.busPer[3], s.busPer[4], s.busPer[5],
+        s.busOvr, s.f5us, s.maxDrain,
+        s.teleCycles, s.dtMinMs, s.dtMaxMs, s.dtAvgMs,
+        s.busMs, s.f5us, s.f5max, s.canReadUs,
+        s.eflg, s.tec, s.rec,
+        s.busOvr, 0,
+        ctlModeName(s), s.ctlIkFail, s.ctlFkFail, s.ctlCoordLimit, s.ctlCoordMaxAbs,
+        s.fkStreak, profileName(s),
+        s.pid[0], s.pid[1], s.pid[2], s.pid[3], s.pidSaved, s.followMode,
+        s.ctrlUs, s.ctrlMaxUs, s.jitterUs, s.missed, s.teleDrop, s.cmdDrop, s.snapAgeMs);
+
+    if (s.extra == TELEM_EXTRA_HOLD) {
+        Out.printf(",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                      "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+                      "\"hmax\":%.2f",
+            s.hold[0],s.hold[1],s.hold[2],
+            s.hold[3],s.hold[4],s.hold[5],
+            s.herr[0],s.herr[1],s.herr[2],s.herr[3],s.herr[4],s.herr[5],
+            s.hmax);
+    } else if (s.extra == TELEM_EXTRA_TASK) {
+        Out.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
+                      "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
+                      "\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+                      "\"fki\":%d",
+            s.fkPose[0], s.fkPose[1], s.fkPose[2], s.fkPose[3], s.fkPose[4], s.fkPose[5],
+            s.poseErr[0], s.poseErr[1], s.poseErr[2], s.poseErr[3], s.poseErr[4], s.poseErr[5],
+            s.motorTgt[0],s.motorTgt[1],s.motorTgt[2],
+            s.motorTgt[3],s.motorTgt[4],s.motorTgt[5],
+            s.fkIterations);
+    } else if (s.extra == TELEM_EXTRA_JOINT) {
+        Out.printf(",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+                      "\"g\":%.3f",
+            s.motorTgt[0],s.motorTgt[1],s.motorTgt[2],
+            s.motorTgt[3],s.motorTgt[4],s.motorTgt[5],
+            s.jointGain);
+    }
+    Out.println("}");
+}
+
 static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
     float alpha = fminf(1.0f, dt / SMOOTH_TIME);
     sm.x    += alpha * (tgt.x    - sm.x);
@@ -305,7 +496,7 @@ void setup() {
     Serial.begin(460800);           // 460800：406B 幀 ≈9ms（≪30ms 週期，不飽和）；921600 此 CP2102 訊號完整性不穩→改用此
     while (!Serial) delay(10);
     delay(200); // 給 FreeRTOS / SPI mutex 完全初始化的時間，避免 paramLock NULL
-    netSetOtaStartCallback(otaSafetyStop);
+    netSetOtaStartCallback(requestOtaSafetyStop);
 
     // 明確 init SPI bus（VSPI 預設腳位 SCK=18 MISO=19 MOSI=23 SS=5）
     // 必須在任何 MCP_CAN SPI 操作前呼叫，確保 SPI 的 paramLock mutex 已建立
@@ -365,6 +556,7 @@ void setup() {
 
     // 啟動 core0 netTask + 出站遙測 queue（P2）。此後 Out 的每行同時鏡像到 TCP。
     netInit();
+    startRealtimeTasks();
 
     Out.println("{\"status\":\"ready\"}");
 }
@@ -912,32 +1104,40 @@ void handleSerial() {
     if (!Serial.available()) return;
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    netIsControlSource = false;    // USB 任何指令（含純查詢如 WIFI?）→ 解除 WiFi failsafe arm
-    dispatch(cmd, false);
+    if (enqueueCommand(cmd, false)) netIsControlSource = false;    // USB 任何指令（含純查詢如 WIFI?）→ 解除 WiFi failsafe arm
 }
 
-void loop() {
-    netOtaHandle();
-    handleSerial();
+static void controlTick() {
+    uint32_t ctrlStartUs = micros();
 
-    // TCP 指令來源（P3）：非阻塞取 netTask 收到的指令 → 同一條 dispatch（標記 WiFi 為控制來源）
-    String netCmd;
-    if (netNextCommand(netCmd)) { netIsControlSource = true; dispatch(netCmd, true); }
+    if (otaStopRequested) {
+        otaSafetyStop();
+        otaStopRequested = false;
+    }
+
+    QueuedCommand qc;
+    for (int i = 0; i < 8 && commandQueue && xQueueReceive(commandQueue, &qc, 0) == pdTRUE; i++) {
+        if (qc.fromNet) netIsControlSource = true;
+        dispatch(String(qc.cmd), qc.fromNet);
+    }
 
     // 斷線失效保護（P4）：以 WiFi 控制且 posEnabled 時，連線中斷即進安全態
     checkFailsafe();
 
-    // 控制迴圈閘門（micros，週期可調）
+    if (netOtaBusy()) return;
+
     static uint32_t lastReadUs = 0;
     static uint32_t ctrlCycles = 0;
     static uint32_t dtMinMs = UINT32_MAX;
     static uint32_t dtMaxMs = 0;
     static uint32_t dtSumMs = 0;
     uint32_t nowUs = micros();
-    if (nowUs - lastReadUs < loopPeriodUs) return;
-    uint32_t elapsed = (nowUs - lastReadUs) / 1000;  // ms
+    uint32_t periodUs = loopPeriodUs;
+    uint32_t elapsedUs = lastReadUs ? (nowUs - lastReadUs) : periodUs;
+    uint32_t elapsed = elapsedUs / 1000;  // ms
     lastReadUs = nowUs;
     ctrlCycles++;
+    if (elapsedUs > periodUs + periodUs / 2) controlMissedCount++;
     if (elapsed < 1000) {  // ignore the first post-boot interval if lastReadUs was 0
         if (elapsed < dtMinMs) dtMinMs = elapsed;
         if (elapsed > dtMaxMs) dtMaxMs = elapsed;
@@ -946,8 +1146,8 @@ void loop() {
 
     // 真實取樣間隔（秒），餵控制器的時間導數/平滑項。clamp 到標稱的 [0.5×, 3×]：
     // 過短 → vel=noise/dt 把 D 項炸成高頻放大器；stall 後一個巨大 Δ 配正常 dt 會 spike。
-    float nominalDt = loopPeriodUs / 1e6f;
-    float dt = fmaxf(0.5f * nominalDt, fminf(3.0f * nominalDt, (float)elapsed / 1000.0f));
+    float nominalDt = periodUs / 1e6f;
+    float dt = fmaxf(0.5f * nominalDt, fminf(3.0f * nominalDt, (float)elapsedUs / 1000000.0f));
 
     int64_t raw[NUM_MOTORS];
     int ok = 0;
@@ -1107,79 +1307,81 @@ void loop() {
     servos.snapshotAndResetRxStats(rxPerId, &maxDrain);
     for (int i = 0; i < NUM_MOTORS; i++) busRxEnc += rxPerId[i];
 
-    // JSON 輸出（ef=EFLG, tx=TEC, rx=REC, lhz=實測控制Hz, ar=上報週期/0=輪詢）
+    // JSON 輸出資料只做 snapshot；實際格式化/USB/TCP 輸出交給 telemetryTask。
     uint8_t eflg = servos.can.getEFLG();
     uint8_t tec  = servos.can.getTEC();
     uint8_t rec  = servos.can.getREC();
     if (eflg & 0xC0) { busOvr++; servos.can.clearRXOverflow(); }  // [Phase0] 先計次再清
-    const char* ctlModeName = !posEnabled ? "off" : (holdMode ? "hold" : (controlMode == 1 ? "task_pd" : "joint"));
 
-    Out.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
-                  "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
-                  "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
-                  "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
-                  "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
-                  "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u,"
-                  "\"per\":[%u,%u,%u,%u,%u,%u],\"ovr\":%u,\"f5us\":%u,\"mxd\":%u},"
-                  "\"tim\":{\"cycles\":%u,\"dtMin\":%u,\"dtMax\":%u,\"dtAvg\":%.2f,"
-                  "\"teleMs\":%u,\"f5us\":%u,\"f5max\":%u,\"canReadUs\":%u},"
-                  "\"can\":{\"backend\":\"mcp2515\",\"bitrate\":500000,\"ef\":%u,\"tx\":%u,\"rx\":%u,"
-                  "\"rxDrop\":%u,\"txFail\":%u,\"qDepth\":0,\"qMax\":0},"
-                  "\"ctl\":{\"mode\":\"%s\",\"ikFail\":%u,\"fkFail\":%u,\"coordLimit\":%u,\"coordMax\":%d,"
-                  "\"fkStreak\":%d,\"profile\":\"%s\"},"
-                  "\"pid\":[%u,%u,%u,%u],\"pids\":%d,\"fl\":%d",
-        enc.angles[0], enc.angles[1], enc.angles[2],
-        enc.angles[3], enc.angles[4], enc.angles[5],
-        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-        ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode,
-        eflg, tec, rec,
-        nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0,
-        busTxF5, busTxQ, busRxEnc, teleWin,
-        rxPerId[0], rxPerId[1], rxPerId[2],
-        rxPerId[3], rxPerId[4], rxPerId[5],
-        busOvr, f5us, maxDrain,
-        teleCycles, teleDtMin, teleDtMax, teleDtAvg,
-        teleWin, f5us, f5usMax, canReadUs,
-        eflg, tec, rec,
-        busOvr, 0,
-        ctlModeName, ctlIkFailWin, ctlFkFailWin, ctlCoordLimitWin, ctlCoordMaxAbs,
-        tsController.fkFailCount, followMode ? "follow" : (holdMoveMs > 0 ? "smoothstep" : "none"),
-        curKp, curKi, curKd, curKv, pidSaved ? 1 : 0, followMode ? 1 : 0);
+    uint32_t ctrlUs = micros() - ctrlStartUs;
+    if (ctrlUs > controlMaxUs) controlMaxUs = ctrlUs;
+    uint32_t jitterUs = (elapsedUs > periodUs) ? (elapsedUs - periodUs) : (periodUs - elapsedUs);
+
+    TelemetrySnapshot snap{};
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        snap.angles[i] = enc.angles[i];
+        snap.raw[i] = raw[i];
+        snap.busPer[i] = rxPerId[i];
+        snap.motorTgt[i] = motorTargets[i];
+    }
+    snap.ok = ok;
+    snap.zeroed = enc.zeroed ? 1 : 0;
+    snap.pos = posEnabled ? 1 : 0;
+    snap.controlMode = controlMode;
+    snap.eflg = eflg; snap.tec = tec; snap.rec = rec;
+    snap.t = nowMs; snap.dtMs = elapsed; snap.canReadUs = canReadUs;
+    snap.lhz = lhz;
+    snap.arMs = autoReturnMode ? arPeriodMs : 0;
+    snap.busF5 = busTxF5; snap.busQ = busTxQ; snap.busRx = busRxEnc; snap.busMs = teleWin;
+    snap.busOvr = busOvr; snap.f5us = f5us; snap.f5max = f5usMax; snap.maxDrain = maxDrain;
+    snap.teleCycles = teleCycles; snap.dtMinMs = teleDtMin; snap.dtMaxMs = teleDtMax; snap.dtAvgMs = teleDtAvg;
+    snap.ctlIkFail = ctlIkFailWin; snap.ctlFkFail = ctlFkFailWin; snap.ctlCoordLimit = ctlCoordLimitWin;
+    snap.ctlCoordMaxAbs = ctlCoordMaxAbs;
+    snap.fkStreak = tsController.fkFailCount;
+    snap.pid[0] = curKp; snap.pid[1] = curKi; snap.pid[2] = curKd; snap.pid[3] = curKv;
+    snap.pidSaved = pidSaved ? 1 : 0;
+    snap.followMode = followMode ? 1 : 0;
+    snap.profile = followMode ? 1 : (holdMoveMs > 0 ? 2 : 0);
+    snap.ctrlUs = ctrlUs;
+    snap.ctrlMaxUs = controlMaxUs;
+    snap.jitterUs = jitterUs;
+    snap.missed = controlMissedCount;
+    snap.teleDrop = teleDropCount;
+    snap.cmdDrop = cmdDropCount;
+    snap.snapAgeMs = 0;
+
+    if (posEnabled && holdMode) {
+        snap.extra = TELEM_EXTRA_HOLD;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            snap.hold[i] = holdAngles[i];
+            snap.herr[i] = enc.angles[i] - holdAngles[i];
+        }
+        snap.hmax = maxHoldErr;
+    } else if (posEnabled && controlMode == 1) {
+        const Pose& fk = tsController.currentPose;
+        const Pose& er = tsController.poseError;
+        snap.extra = TELEM_EXTRA_TASK;
+        snap.fkPose[0] = fk.x; snap.fkPose[1] = fk.y; snap.fkPose[2] = fk.z;
+        snap.fkPose[3] = fk.roll; snap.fkPose[4] = fk.pitch; snap.fkPose[5] = fk.yaw;
+        snap.poseErr[0] = er.x; snap.poseErr[1] = er.y; snap.poseErr[2] = er.z;
+        snap.poseErr[3] = er.roll; snap.poseErr[4] = er.pitch; snap.poseErr[5] = er.yaw;
+        snap.fkIterations = tsController.fk.iterations;
+    } else if (posEnabled && controlMode == 0) {
+        snap.extra = TELEM_EXTRA_JOINT;
+        snap.jointGain = maxGain;
+    }
+
     busTxF5 = busTxQ = busRxEnc = 0;   // 匯流排計數每窗歸零
     busOvr = 0;                                                // [Phase0]
     f5usMax = 0;
     ctlIkFailWin = ctlFkFailWin = ctlCoordLimitWin = 0;
     ctlCoordMaxAbs = 0;
 
-    if (posEnabled && holdMode) {
-        float herr[NUM_MOTORS];
-        for (int i = 0; i < NUM_MOTORS; i++) herr[i] = enc.angles[i] - holdAngles[i];
-        Out.printf(",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
-                      "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
-                      "\"hmax\":%.2f",
-            holdAngles[0],holdAngles[1],holdAngles[2],
-            holdAngles[3],holdAngles[4],holdAngles[5],
-            herr[0],herr[1],herr[2],herr[3],herr[4],herr[5],
-            maxHoldErr);
-    } else if (posEnabled && controlMode == 1) {
-        const Pose& fk = tsController.currentPose;
-        const Pose& er = tsController.poseError;
-        Out.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
-                      "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
-                      "\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                      "\"fki\":%d",
-            fk.x, fk.y, fk.z, fk.roll, fk.pitch, fk.yaw,
-            er.x, er.y, er.z, er.roll, er.pitch, er.yaw,
-            motorTargets[0],motorTargets[1],motorTargets[2],
-            motorTargets[3],motorTargets[4],motorTargets[5],
-            tsController.fk.iterations);
-    } else if (posEnabled && controlMode == 0) {
-        Out.printf(",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
-                      "\"g\":%.3f",
-            motorTargets[0],motorTargets[1],motorTargets[2],
-            motorTargets[3],motorTargets[4],motorTargets[5],
-            maxGain);
+    if (telemetryQueue) {
+        if (uxQueueMessagesWaiting(telemetryQueue) > 0) {
+            teleDropCount++;
+            snap.teleDrop = teleDropCount;
+        }
+        xQueueOverwrite(telemetryQueue, &snap);
     }
-
-    Out.println("}");
 }

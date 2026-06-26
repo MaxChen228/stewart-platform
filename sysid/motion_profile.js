@@ -109,4 +109,10 @@ function main() {
   print(generate(opts), opts.format);
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  console.error(`Error: ${err.message}`);
+  usage();
+  process.exit(1);
+}

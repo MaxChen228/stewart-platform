@@ -67,7 +67,133 @@ function deltaAngle(pose0, dpose) {
   return { d: a1.angles.map((v, i) => v - a0.angles[i]), valid: a0.valid && a1.valid };
 }
 
-const _K = { ik, deltaAngle, NEUTRAL_Z, LOWER_LEG, UPPER_LEG, MOTOR_PLANE_ANGLE,
+function gaussSolve(A, b) {
+  const n = A.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let i = 0; i < n; i++) {
+    let mx = i;
+    for (let k = i + 1; k < n; k++) if (Math.abs(M[k][i]) > Math.abs(M[mx][i])) mx = k;
+    [M[i], M[mx]] = [M[mx], M[i]];
+    if (Math.abs(M[i][i]) < 1e-10) return null;
+    for (let k = i + 1; k < n; k++) {
+      const c = M[k][i] / M[i][i];
+      for (let j = i; j <= n; j++) M[k][j] -= c * M[i][j];
+    }
+  }
+  const x = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    x[i] = M[i][n];
+    for (let j = i + 1; j < n; j++) x[i] -= M[i][j] * x[j];
+    x[i] /= M[i][i];
+  }
+  return x;
+}
+
+function computeA(angles) {
+  return angles.map((ang, i) => {
+    const a = ang * DEG;
+    const th = MOTOR_PLANE_ANGLE[i] * DEG;
+    return {
+      x: LOWER_LEG * Math.cos(a) * Math.cos(th) + B[i].x,
+      y: LOWER_LEG * Math.cos(a) * Math.sin(th) + B[i].y,
+      z: LOWER_LEG * Math.sin(a) + B[i].z,
+    };
+  });
+}
+
+let lastFKPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+
+function resetFK(pose = [0, 0, NEUTRAL_Z, 0, 0, 0]) {
+  lastFKPose = [...pose];
+}
+
+function solveFK(measured, opts = {}) {
+  const A = computeA(measured);
+  const warmStart = opts.warmStart || lastFKPose;
+  let pose = warmStart.some((v) => !Number.isFinite(v)) ? [0, 0, NEUTRAL_Z, 0, 0, 0] : [...warmStart];
+  let finalIter = 0;
+  let finalErr = 999;
+  let converged = false;
+
+  for (let iter = 0; iter < 50; iter++) {
+    const [x, y, z, roll, pitch, yaw] = pose;
+    const cr = Math.cos(roll * DEG), sr = Math.sin(roll * DEG);
+    const cp = Math.cos(pitch * DEG), sp = Math.sin(pitch * DEG);
+    const cy = Math.cos(yaw * DEG), sy = Math.sin(yaw * DEG);
+    const R = [
+      [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+      [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+      [-sp, cp * sr, cp * cr],
+    ];
+    const dRr = [
+      [0, cy * sp * cr + sy * sr, -cy * sp * sr + sy * cr],
+      [0, sy * sp * cr - cy * sr, -sy * sp * sr - cy * cr],
+      [0, cp * cr, -cp * sr],
+    ];
+    const dRp = [
+      [-cy * sp, cy * cp * sr, cy * cp * cr],
+      [-sy * sp, sy * cp * sr, sy * cp * cr],
+      [-cp, -sp * sr, -sp * cr],
+    ];
+    const dRy = [
+      [-sy * cp, -sy * sp * sr - cy * cr, -sy * sp * cr + cy * sr],
+      [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+      [0, 0, 0],
+    ];
+
+    const f = [];
+    const J = [];
+    for (let i = 0; i < 6; i++) {
+      const px = P[i].x, py = P[i].y;
+      const qx = R[0][0] * px + R[0][1] * py + x;
+      const qy = R[1][0] * px + R[1][1] * py + y;
+      const qz = R[2][0] * px + R[2][1] * py + z;
+      const vx = qx - A[i].x, vy = qy - A[i].y, vz = qz - A[i].z;
+      f.push(vx * vx + vy * vy + vz * vz - UPPER_LEG * UPPER_LEG);
+
+      const drx = dRr[0][0] * px + dRr[0][1] * py;
+      const dry = dRr[1][0] * px + dRr[1][1] * py;
+      const drz = dRr[2][0] * px + dRr[2][1] * py;
+      const dpx = dRp[0][0] * px + dRp[0][1] * py;
+      const dpy = dRp[1][0] * px + dRp[1][1] * py;
+      const dpz = dRp[2][0] * px + dRp[2][1] * py;
+      const dyx = dRy[0][0] * px + dRy[0][1] * py;
+      const dyy = dRy[1][0] * px + dRy[1][1] * py;
+      J.push([
+        2 * vx,
+        2 * vy,
+        2 * vz,
+        2 * (vx * drx + vy * dry + vz * drz) * DEG,
+        2 * (vx * dpx + vy * dpy + vz * dpz) * DEG,
+        2 * (vx * dyx + vy * dyy) * DEG,
+      ]);
+    }
+
+    const maxF = Math.max(...f.map(Math.abs));
+    finalIter = iter;
+    finalErr = maxF;
+    if (maxF < 1.0) {
+      converged = true;
+      lastFKPose = [...pose];
+      return { pose, converged, iterations: iter, residual: maxF };
+    }
+
+    const dp = gaussSolve(J, f.map((v) => -v));
+    if (!dp || dp.some((v) => !Number.isFinite(v))) break;
+
+    const stepLimit = [30, 30, 30, 15, 15, 15];
+    for (let j = 0; j < 6; j++) {
+      dp[j] = Math.max(-stepLimit[j], Math.min(stepLimit[j], dp[j]));
+      pose[j] += dp[j];
+    }
+    if (pose.some((v) => !Number.isFinite(v))) break;
+  }
+
+  if (pose.every((v) => Number.isFinite(v))) lastFKPose = [...pose];
+  return { pose: [...lastFKPose], converged, iterations: finalIter, residual: finalErr };
+}
+
+const _K = { ik, deltaAngle, solveFK, resetFK, NEUTRAL_Z, LOWER_LEG, UPPER_LEG, MOTOR_PLANE_ANGLE,
              BASE_RADIUS, PLATFORM_RADIUS, BASE_ANGLES, PLATFORM_ANGLES };   // 幾何原語：前端 render 取同源、免重列
 if (typeof module !== 'undefined' && module.exports) module.exports = _K;   // Node
 if (typeof window !== 'undefined') window.Kin = _K;                          // 瀏覽器 <script src>（SoT 共用）

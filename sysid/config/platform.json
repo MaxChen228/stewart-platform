@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "homeRelative": [
+    0,
+    0,
+    28,
+    0,
+    0,
+    0
+  ],
+  "landingRelative": [
+    0,
+    0,
+    10,
+    0,
+    0,
+    0
+  ],
+  "followLimits": {
+    "vmaxT": 60,
+    "vmaxR": 45
+  },
+  "trialDefaults": {
+    "profile": "heave-step",
+    "heave": 60,
+    "ms": 5000,
+    "settleMs": 800,
+    "homeMs": 1500,
+    "landMs": 1500,
+    "safeLand": true
+  },
+  "uiState": {
+    "poseTargetRelative": [
+      0,
+      0,
+      28,
+      0,
+      0,
+      0
+    ],
+    "poseMoveMs": 1500,
+    "motion": {
+      "selectedId": "helix",
+      "loops": 0,
+      "paramsById": {}
+    },
+    "disturbance": {
+      "uMotor": 3,
+      "uDeg": 8,
+      "uMs": 150,
+      "wMode": "tilt",
+      "wSev": 3,
+      "wMs": 120,
+      "batteryBackstop": 15
+    },
+    "recorderName": "run"
+  },
+  "safety": {
+    "requireHumanForLive": true,
+    "requireOk6": true,
+    "purePReference": [
+      1024,
+      0,
+      0,
+      0
+    ],
+    "herrBackstopDeg": 15
+  },
+  "updatedAt": "2026-06-26T18:20:21.417Z"
+}
