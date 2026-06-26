@@ -41,12 +41,11 @@ float maxHoldErr = 0;
 float    bumpDeg[NUM_MOTORS] = {0};   // 六軸脈衝偏移（enc 慣例度）；U=單軸填一格、W=六軸全填
 uint32_t bumpUntilMs = 0;             // 脈衝結束時刻（millis）；過期由 hold 迴圈歸零
 
-// 姿態調控（G 指令）：HOLD 下把 holdAngles 從 holdBase 平滑移到 holdBase+Δ（升降/旋轉/平移）。
+// 姿態軌跡（P 指令）：HOLD 下把 holdAngles 從 holdStart 平滑移到 holdTarget=IK(絕對 pose)。
 // 保留 HOLD 直送機制 → 馬達純 P 死咬移動中的目標 = 穩定性不變，只是目標會動。
-// host 用 kin.js IK 算 Δenc（同 W 的 deltaAngle×MOTOR_SIGN）；Δ 相對 H 基準、不累積。
-float    holdBase[NUM_MOTORS]   = {0};   // H 鎖位時的基準姿態（不變，G 的 Δ 相對它）
-float    holdTarget[NUM_MOTORS] = {0};   // 移動目標 = holdBase + Δ
-float    holdStart[NUM_MOTORS]  = {0};   // 本次移動起點（發 G 當下的 holdAngles）
+// holdTarget 由韌體 IK 解絕對 pose 而來，保證對應有效剛體姿態（非相對增量，杜絕 over-constrain 較勁）。
+float    holdTarget[NUM_MOTORS] = {0};   // 移動目標 = IK(目標絕對 pose)
+float    holdStart[NUM_MOTORS]  = {0};   // 本次移動起點（發 P 當下的 holdAngles）
 uint32_t holdMoveStart = 0, holdMoveMs = 0;   // 移動起始時刻、總時長（0=不在移動）
 
 // 開機預設 vFOC PID：純P工作點 [1024,0,0,0]（2026-06-26 定案）。
@@ -99,7 +98,7 @@ bool netIsControlSource = false;
 // HOLD-current：snapshot 當前實際角度保持。馬達已 enable（failsafe 僅在 posEnabled 觸發），
 // 故無需重新 enable/設零點；holdAngles=當前角度 → angleToCoord 命令「留在原地」，無跳變。
 static void enterHoldCurrent() {
-    for (int i = 0; i < NUM_MOTORS; i++) holdBase[i] = holdAngles[i] = enc.angles[i];
+    for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = enc.angles[i];
     holdMoveMs = 0;        // 取消進行中的姿態移動
     maxHoldErr = 0;
     holdMode = true;       // 切 HOLD 直送，脫離會發散的 PD/joint 外環
@@ -324,7 +323,6 @@ void dispatch(const String& cmd, bool fromNet = false) {
         servos.readAllRawEncoders(raw0);
         enc.updateAngles(raw0);
         for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = enc.angles[i];
-        for (int i = 0; i < NUM_MOTORS; i++) holdBase[i] = holdAngles[i];   // G 的 Δ 基準
         holdMoveMs = 0;                                                     // 取消任何進行中的姿態移動
 
         // Enable 馬達 + 設零點
@@ -374,7 +372,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         // 絕對姿態目標 `P x y z r p y [ms]`。前 6 值=絕對 pose（mm/度）。
         //  - n>=6：一律更新 targetPose（mode0/1 控制器讀它）。
         //  - HOLD 下：把絕對 pose 用 IK 解成有效馬達角度，重用 holdMoveMs smoothstep 平滑死咬過去。
-        //    用 IK 解（非 holdBase+Δ 增量）保證 6 角度對應真實剛體姿態 → 不 over-constrain 較勁。
+        //    用 IK 解（非相對增量）保證 6 角度對應真實剛體姿態 → 不 over-constrain 較勁。
         //    第 7 值 ms = 軌跡時長（缺省 1500）。holdAngles==enc==IK 同為下腿絕對幾何角度，可直接插值。
         float v[6]; float ms_f = -1;
         int n = sscanf(cmd.c_str(), "P %f %f %f %f %f %f %f",
@@ -492,21 +490,6 @@ void dispatch(const String& cmd, bool fromNet = false) {
             bumpUntilMs = millis() + constrain(ms, 1, 5000);
             Out.printf("{\"status\":\"bumpW\",\"deg\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],\"ms\":%d,\"hold\":%d}\n",
                 bumpDeg[0], bumpDeg[1], bumpDeg[2], bumpDeg[3], bumpDeg[4], bumpDeg[5], ms, holdMode ? 1 : 0);
-        }
-    } else if (cmd.startsWith("G ")) {
-        // 姿態調控（六軸協同持久移動）：G <d0..d5> <ms> — HOLD 下把 holdAngles 從 holdBase 平滑移到 holdBase+Δ
-        // host 用 kin.js IK 算 Δenc（同 W 的 deltaAngle×MOTOR_SIGN）；Δ 相對 H 基準、不累積。ms 內 smoothstep 加減速。
-        float d[NUM_MOTORS]; int ms;
-        if (sscanf(cmd.c_str(), "G %f %f %f %f %f %f %d",
-                   &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &ms) == 7) {
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                holdStart[i]  = holdAngles[i];                       // 從當下位置起步（多段 G 可接續）
-                holdTarget[i] = holdBase[i] + constrain(d[i], -40.0f, 40.0f);
-            }
-            holdMoveStart = millis();
-            holdMoveMs = constrain(ms, 1, 10000);
-            Out.printf("{\"status\":\"goto\",\"d\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],\"ms\":%d,\"hold\":%d}\n",
-                d[0], d[1], d[2], d[3], d[4], d[5], ms, holdMode ? 1 : 0);
         }
     } else if (cmd.startsWith("R ")) {
         float v[6];

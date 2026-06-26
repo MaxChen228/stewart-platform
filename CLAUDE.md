@@ -28,7 +28,7 @@
 ESP32 端不跑 PID，只算 IK 目標角度 → 轉成馬達坐標 → 發 0xF5。
 0xF5 走脈衝量，避開 0xF6 速度模式 1 RPM 的整數量化邊界（量化問題本身仍存在於底層速度環，僅是不再由 ESP32 直接設定）。
 
-**控制模式**：main.cpp 同時保留兩種模式，預設 `controlMode = 1`：
+**控制模式**：main.cpp 同時保留兩種模式，BOOT 預設 `controlMode = 0`（主運行走 HOLD，0/1 為架構備援）：
 - `0` — Joint-space：IK → 直接餵馬達角度 + 自適應追蹤增益
 - `1` — Task-space PD：FK 回算當前 pose → 與 target pose 算誤差 → PD → IK
 
@@ -142,7 +142,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `D` | Disable 所有馬達（斷電，可自由轉動） |
 | `E` | 啟動位置控制（0x92 + enable + 開始發 F5） |
 | `S` | 停止追蹤（馬達保持使能，有保持力矩） |
-| `P x y z roll pitch yaw` | 設定目標姿態 |
+| `P x y z roll pitch yaw [ms]` | 設定絕對目標姿態（z 絕對 mm）；HOLD 下帶 ms（軌跡時長，預設 1500）→ 韌體 IK→smoothstep 平滑死咬到該絕對 pose；非 HOLD 僅更新 targetPose 供 mode0/1 |
 | `K kp ki kd kv` | 設定馬達內部 vFOC PID（0x96，範圍 0-1024） |
 | `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
 | `M mu` | 設定自適應追蹤震動懲罰係數 |
@@ -157,7 +157,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 
 - TCP 與 USB 共用同一條 dispatch，指令語意一致、ack 經 DualPrint 鏡像回兩路。
 - **TCP 禁 `Z`/`Z0~Z5`（校正）**：寫 NVS 不可逆、且校正須實體 home 姿態（手邊操作）→ 僅 USB。
-- **失效保護恢復**：HOLD-current 觸發後（凍結當前姿態），TCP 重連送 `P`/`G` 會被 holdMode 吞掉；**需先送 `E`（或 `S`→`E`）重入正常控制**才恢復可驅動。此「需顯式重 arm」是刻意的安全設計，非自動續控。
+- **失效保護恢復**：HOLD-current 觸發後（凍結當前姿態、holdMode=true），TCP 重連送 `P`（絕對 pose）即啟動 IK 軌跡恢復驅動。若要完全重置到 mode 0/1 正常控制，送 `E`（或 `S`→`E`）。
 - **heartbeat caveat**：`HB ms`>0 時，client 須週期性「上行」（server tcp 模式每秒送 `\n`）；只收不送的 client 會在逾時後誤觸 failsafe，故預設 `HB 0`（僅靠 socket-close/WiFi-down 偵測）。
 
 ## 位置控制 — 現狀
@@ -166,7 +166,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 
 **已找到穩定工作點：vFOC 純P `[Kp,Ki,Kd,Kv]=[1024,0,0,0]` + HOLD 死咬。** `Ki=0` 滅掉 M4 2Hz 自持極限環的根因（積分撞死區）、`maxKp` 補剛性、F5 posSpeed 提供阻尼；battery 壓測下手推擾動穩定回正。完整決策記錄見記憶 `project_pid_working_point` / `project_m4_limit_cycle`。
 
-**主要運行模式 = HOLD（純P 死咬）**：`H` 鎖住當前姿態 snapshot（holdAngles），馬達對該凍結目標做純P 保持；姿態操作（`G` 指令）平滑移動鎖定目標。下方 mode 0/1 仍存在於碼中、作架構備援，非當前主運行路徑。
+**主要運行模式 = HOLD（純P 死咬）**：`H` 鎖住當前姿態 snapshot（holdAngles），馬達對該凍結目標做純P 保持；姿態操作（`P` 絕對 pose）由韌體 IK 解→smoothstep 平滑移動到目標絕對姿態。下方 mode 0/1 仍存在於碼中、作架構備援，非當前主運行路徑。
 
 注意：BOOT 預設已改 `[1024,0,0,0]`（`main.cpp`），但若跑舊 binary（未 `npm run upload`）開機仍是出廠 `220/30/270/320`，需 K 指令或重燒。噪音（Kd 致嘯叫 / 馬達保持電流固有聲）未結案、使用者選擇忽略。
 
