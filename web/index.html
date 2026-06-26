@@ -427,8 +427,9 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <input type="number" id="motion-loops" value="0" min="0" max="999" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
       <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="chip" id="motion-preview" onclick="motionPreview()" style="flex:1" title="只動畫綠色 ghost 看形狀，不驅動平台、不需 HOLD/連線">👁 預覽</button>
         <button class="chip zbtn" id="motion-play" onclick="motionToggle()" disabled style="flex:2;font-weight:600">▶ 播放</button>
-        <button class="chip zbtn" onclick="motionStopBtn()" disabled style="flex:1">■ 停</button>
+        <button class="chip" onclick="motionStopBtn()" style="flex:1">■ 停</button>
       </div>
       <div style="display:grid;grid-template-columns:38px 1fr 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px" title="跟隨速度上限 = 所有動作的硬體安全閥">
         <span>vmax</span>
@@ -1064,12 +1065,13 @@ function onFollowOn(pose) {
   poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
   followActive = true;
   updateFollowUI();
-  if (pendingPlay) _motionStart();   // 動作播放觸發的 arm → 跟隨就緒即啟動
+  if (pendingPlay) _motionStart(false);   // 動作播放觸發的 arm → 跟隨就緒即啟動（實跑）
 }
-function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } motionStop(); updateFollowUI(); }
+function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } if (motion.def && !motion.preview) motionStop(); updateFollowUI(); }
 
 // ===== 標準動作庫：host 串流 pose(t) → PF → 韌體速限濾波器跟隨 =====
-// 每個動作 = pose(t,p) 回「絕對 pose」[x,y,z,roll,pitch,yaw]；參數可即時調（每 tick 重讀）。
+// 每個動作 fn 回「相對 home 的 delta」[dx,dy,dz,droll,dpitch,dyaw]；引擎合成 pose = homePose + delta。
+// → 所有動作以 home 為原點（home 預設中位，可用「存 Home」改）。參數可即時調（每 tick 重讀）。
 const TAU = Math.PI * 2;
 const ss = (x) => { x = Math.max(0, Math.min(1, x)); return x*x*(3-2*x); };   // smoothstep 0..1
 const MOTIONS = [
@@ -1078,46 +1080,46 @@ const MOTIONS = [
             {k:'zhi',l:'高點',min:0,max:30,def:8,step:1,u:'mm'},{k:'T',l:'週期',min:1,max:20,def:6,step:0.5,u:'s'},
             {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
     fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t, z=p.zlo+(p.zhi-p.zlo)*(0.5-0.5*Math.cos(w*t));
-      return [p.r*Math.cos(th), p.r*Math.sin(th), NEUTRAL_Z+z, 0,0,0]; } },
+      return [p.r*Math.cos(th), p.r*Math.sin(th), z, 0,0,0]; } },
   { id:'poke', label:'法向推擠回彈', per:(p)=>p.push+p.ret+p.rest,
     params:[{k:'d',l:'距離',min:0,max:30,def:18,step:1,u:'mm'},{k:'push',l:'推時長',min:0.1,max:1,def:0.25,step:0.05,u:'s'},
             {k:'ret',l:'回時長',min:0.1,max:2,def:0.6,step:0.05,u:'s'},{k:'rest',l:'間隔',min:0,max:3,def:0.6,step:0.1,u:'s'}],
-    fn:(t,p)=>{ const T=p.push+p.ret+p.rest, ph=t%T; let a=0;          // 法向=+z（平台水平），非對稱推/回
+    fn:(t,p)=>{ const T=p.push+p.ret+p.rest, ph=t%T; let a=0;          // 法向=+z（home 水平時），非對稱推/回
       if(ph<p.push) a=ss(ph/p.push); else if(ph<p.push+p.ret) a=1-ss((ph-p.push)/p.ret);
-      return [0,0,NEUTRAL_Z+p.d*a,0,0,0]; } },
+      return [0,0,p.d*a,0,0,0]; } },
   { id:'yaw', label:'偏航擺盪', per:(p)=>p.T,
     params:[{k:'A',l:'幅度',min:0,max:60,def:30,step:1,u:'°'},{k:'T',l:'週期',min:0.5,max:10,def:3,step:0.5,u:'s'},
             {k:'sym',l:'雙向',min:0,max:1,def:0,step:1,u:''}],
     fn:(t,p)=>{ const w=TAU/p.T, yaw=p.sym? p.A*Math.sin(w*t) : p.A*(0.5-0.5*Math.cos(w*t));   // sym0=純CCW單向
-      return [0,0,NEUTRAL_Z,0,0,yaw]; } },
+      return [0,0,0,0,0,yaw]; } },
   { id:'coning', label:'進動 coning', per:(p)=>p.T,
     params:[{k:'A',l:'傾角',min:0,max:12,def:6,step:0.5,u:'°'},{k:'T',l:'週期',min:1,max:12,def:4,step:0.5,u:'s'},
             {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
-    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t; return [0,0,NEUTRAL_Z, p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
+    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t; return [0,0,0, p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
   { id:'idle', label:'漂浮 idle', per:()=>0,    // 無自然週期 → 僅無限循環
     params:[{k:'tr',l:'平移範圍',min:0,max:20,def:8,step:1,u:'mm'},{k:'rr',l:'旋轉範圍',min:0,max:12,def:4,step:0.5,u:'°'},
             {k:'spd',l:'速度',min:0.2,max:3,def:1,step:0.1,u:'×'}],
     fn:(t,p)=>{ const s=p.spd, d=(f1,f2,ph)=>0.5*Math.sin(s*f1*t)+0.5*Math.sin(s*f2*t+ph);   // 互質頻率和=平滑準隨機
-      return [p.tr*d(0.17,0.31,1.3), p.tr*d(0.13,0.27,2.1), NEUTRAL_Z+p.tr*0.6*d(0.11,0.23,0.7),
+      return [p.tr*d(0.17,0.31,1.3), p.tr*d(0.13,0.27,2.1), p.tr*0.6*d(0.11,0.23,0.7),
               p.rr*d(0.19,0.29,0.4), p.rr*d(0.23,0.37,1.9), p.rr*d(0.15,0.33,2.7)]; } },
   { id:'fig8', label:'8字 Lissajous', per:(p)=>p.T,
     params:[{k:'ax',l:'X幅',min:0,max:40,def:20,step:1,u:'mm'},{k:'ay',l:'Y幅',min:0,max:40,def:15,step:1,u:'mm'},
             {k:'ratio',l:'頻比',min:1,max:4,def:2,step:1,u:'×'},{k:'T',l:'週期',min:1,max:15,def:6,step:0.5,u:'s'}],
-    fn:(t,p)=>{ const w=TAU/p.T; return [p.ax*Math.sin(w*t), p.ay*Math.sin(p.ratio*w*t), NEUTRAL_Z, 0,0,0]; } },
+    fn:(t,p)=>{ const w=TAU/p.T; return [p.ax*Math.sin(w*t), p.ay*Math.sin(p.ratio*w*t), 0, 0,0,0]; } },
   { id:'buoy', label:'海浪 buoy', per:(p)=>p.T,
     params:[{k:'A',l:'傾角',min:0,max:12,def:5,step:0.5,u:'°'},{k:'H',l:'起伏',min:0,max:25,def:4,step:1,u:'mm'},
             {k:'T',l:'週期',min:1,max:12,def:5,step:0.5,u:'s'},{k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
     fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t;
-      return [0,0,NEUTRAL_Z+p.H*Math.sin(w*t), p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
+      return [0,0,p.H*Math.sin(w*t), p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
   { id:'heartbeat', label:'心跳 heartbeat', per:(p)=>p.T,
     params:[{k:'d',l:'強度',min:0,max:25,def:12,step:1,u:'mm'},{k:'T',l:'節律',min:0.6,max:3,def:1.2,step:0.1,u:'s'}],
     fn:(t,p)=>{ const ph=t%p.T, w=0.05*p.T, g=(tc,amp)=>amp*Math.exp(-(((ph-tc)/w)**2));
-      return [0,0,NEUTRAL_Z+p.d*(g(0.08*p.T,1.0)+g(0.22*p.T,0.6)), 0,0,0]; } },   // lub-dub
+      return [0,0,p.d*(g(0.08*p.T,1.0)+g(0.22*p.T,0.6)), 0,0,0]; } },   // lub-dub
 ];
 
 const MOTION_HZ = 30;
 let platHolding = false, pendingPlay = false;
-let motion = { def:null, t0:0, raf:null, mLast:0 };
+let motion = { def:null, t0:0, raf:null, mLast:0, preview:false, maxLoops:0 };
 function motionParamBox(){ return document.getElementById('motion-params'); }
 function selectedMotion(){ return MOTIONS.find(m => m.id === document.getElementById('motion-sel').value); }
 function renderMotionParams(){
@@ -1135,48 +1137,61 @@ function renderMotionParams(){
   });
 }
 function readMotionParams(){ const o = {}; motionParamBox().querySelectorAll('input').forEach(i => o[i.dataset.k] = parseFloat(i.value)); return o; }
-function updateMotionUI(running){
-  const b = document.getElementById('motion-play'); if (!b) return;
-  b.textContent = running ? '⏸ 運行中' : '▶ 播放';
-  b.style.background = running ? 'var(--contra)' : ''; b.style.color = running ? '#fff' : '';
+function updateMotionUI(){
+  const running = !!motion.def;
+  const b = document.getElementById('motion-play'), pv = document.getElementById('motion-preview');
+  if (b)  { const real = running && !motion.preview; b.textContent = real ? '⏸ 運行中' : '▶ 播放'; b.style.background = real ? 'var(--contra)' : ''; b.style.color = real ? '#fff' : ''; }
+  if (pv) { const prev = running &&  motion.preview; pv.textContent = prev ? '⏸ 預覽中' : '👁 預覽'; pv.style.background = prev ? '#7c5cff' : ''; pv.style.color = prev ? '#fff' : ''; }
 }
 function motionTick(now){
-  if (!motion.def || !followActive) { motion.raf = null; return; }   // follow 掉了就停
+  // 實跑需 followActive（PF 串流）；預覽純前端 ghost，不需 follow、不送 PF。
+  if (!motion.def || (!motion.preview && !followActive)) { motion.raf = null; return; }
   motion.raf = requestAnimationFrame(motionTick);
   if (now - motion.mLast < 1000 / MOTION_HZ) return;
   motion.mLast = now;
   const t = (now - motion.t0) / 1000, p = readMotionParams();        // 即時重讀參數 → 邊跑邊調
   const per = motion.def.per(p);
-  if (motion.maxLoops > 0 && per > 0 && t >= motion.maxLoops * per) { motionStop(); return; }   // N 圈後回中
-  const pose = motion.def.fn(t, p), ok = window.Kin.ik(pose).valid;
+  if (motion.maxLoops > 0 && per > 0 && t >= motion.maxLoops * per) { motionStop(); return; }   // N 圈後回 home
+  const d = motion.def.fn(t, p);
+  const pose = homePose.map((h, i) => h + d[i]);                      // 以 home 為原點合成絕對 pose
+  const ok = window.Kin.ik(pose).valid;
   ghostMat.color.setHex(ok ? 0x27AE60 : 0xC0392B);
   ghostPlatMesh.material.color.setHex(ok ? 0x27AE60 : 0xC0392B);
   ghostTarget = pose; updateGhost();
-  if (ok) streamPF(pose);                                            // 超工作空間的瞬時 sample 跳過（韌體也會 hold）
+  if (!motion.preview && ok) streamPF(pose);                          // 預覽不送 PF；超工作空間瞬時 sample 跳過（韌體 hold-last）
 }
-function _motionStart(){
+function _motionStart(preview){
   pendingPlay = false;
+  motion.preview = !!preview;
   motion.def = selectedMotion();
   motion.t0 = performance.now(); motion.mLast = 0;
   motion.maxLoops = parseInt(document.getElementById('motion-loops').value) || 0;
   if (!motion.raf) motion.raf = requestAnimationFrame(motionTick);
-  updateMotionUI(true);
-  document.getElementById('motion-status').textContent = `▶ ${motion.def.label}${motion.maxLoops>0?` ×${motion.maxLoops}`:' 循環'}`;
+  updateMotionUI();
+  const lbl = motion.preview ? '👁 預覽' : '▶';
+  document.getElementById('motion-status').textContent = `${lbl} ${motion.def.label}${motion.maxLoops>0?` ×${motion.maxLoops}`:' 循環'} · 以 home 為原點`;
 }
-window.motionToggle = function(){
-  if (motion.def) { motionStop(); return; }
-  const st = document.getElementById('motion-status');
+window.motionToggle = function(){                 // 實跑：需 HOLD + follow，串流 PF 驅動平台
+  if (motion.def && !motion.preview) { motionStop(); return; }   // 實跑中 → 停
+  const st = document.getElementById('motion-status');           // 閒置或預覽中 → 轉實跑
   if (!platHolding) { st.textContent = '需先按 HOLD'; st.style.color = 'var(--dev)'; return; }
+  if (motion.preview) motionStop();                              // 預覽中 → 先停預覽再實跑
   st.style.color = 'var(--sub)';
-  if (followActive) _motionStart();
+  if (followActive) _motionStart(false);
   else { pendingPlay = true; window.sendCmd('FOLLOW 1'); }   // 先 arm 跟隨，onFollowOn 回來再啟動
 };
+window.motionPreview = function(){                // 預覽：純前端 ghost 動畫，不需 HOLD/連線、不驅動平台
+  if (motion.def) { motionStop(); return; }
+  const st = document.getElementById('motion-status'); st.style.color = 'var(--sub)';
+  _motionStart(true);
+};
 function motionStop(){
+  const wasReal = motion.def && !motion.preview;
   if (motion.raf) cancelAnimationFrame(motion.raf);
-  motion.raf = null; motion.def = null; pendingPlay = false;
-  if (followActive) streamPF([0, 0, NEUTRAL_Z, 0, 0, 0]);    // 回中位（濾波器 ease）
-  ghostTarget = [0, 0, NEUTRAL_Z, 0, 0, 0]; ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
-  updateMotionUI(false);
+  motion.raf = null; motion.def = null; motion.preview = false; pendingPlay = false;
+  if (wasReal && followActive) streamPF(homePose.slice());    // 實跑停 → ease 回 home
+  ghostTarget = homePose.slice(); ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
+  updateMotionUI();
 }
 window.motionStopBtn = function(){ const st = document.getElementById('motion-status'); st.textContent = '■ 已停'; st.style.color = 'var(--sub)'; motionStop(); };
 window.applyVF = function(){
