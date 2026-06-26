@@ -31,6 +31,7 @@ async function main() {
 
   // 確認校正 + 模式（輪詢、乾淨 bus；Task-space PD = controlMode 1）
   send('A0'); await sleep(300);      // 用乾淨輪詢，不用 redline 的 auto-return
+  send('CM 1'); await sleep(300);    // 明確進 task-space PD：韌體預設 controlMode=0，不送就跑 joint-space（本實驗要測的是 PD）
   console.log('\n⚠️ 確認平台已置中位且已 Z 歸零、周圍淨空。3 秒後開始...');
   await sleep(3000);
 
@@ -39,6 +40,10 @@ async function main() {
     console.log(`\n===== ${hz}Hz (loop ${loop}ms) =====`);
     send(`L ${loop}`); await sleep(300);
     send('E'); await sleep(1500);                 // enable，target=當前姿態（不暴衝）
+    // 真實數據說話：確認本段確實在 task-space PD（cm===1）。FK 連續失敗 5 次韌體會自動
+    // fallback 回 joint-space（cm→0），那段數據就不是 PD，標籤會錯——當場標記存疑。
+    const cm0 = (await rest('latest')).cm;
+    if (cm0 !== 1) console.warn(`  ⚠ 本段 cm=${cm0}≠1：task-space PD 未生效或已 fallback joint-space，此段數據模式存疑`);
     const name = `gateA_${hz}Hz`;
     await rest(`rec/start?name=${name}`);
     send(P([0, 0, 105 + STEP_Z, 0, 0, 0]));       // 注入 +4mm z 階躍
