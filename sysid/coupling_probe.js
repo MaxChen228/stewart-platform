@@ -2,10 +2,20 @@
 // Coupling probe for early MIMO/MPC identification.
 // Default is dry-run. Use --live only when a human is next to the platform.
 
-const http = require('http');
-const WebSocket = require('ws');
-const { NEUTRAL_Z } = require('./kin');
-const PlatformSoT = require('./platform_sot');
+const {
+  WebSocket,
+  PlatformSoT,
+  loadHomePose,
+  loadLandingPose,
+  openWs,
+  parsePose,
+  poseLine,
+  rest,
+  send,
+  sleep,
+  startRecording,
+  stopRecording,
+} = require('./rig_client');
 
 const AXES = ['x', 'y', 'z', 'roll', 'pitch', 'yaw'];
 
@@ -34,12 +44,6 @@ Example:
   node sysid/coupling_probe.js --axis z
   node sysid/coupling_probe.js --live --axis z --amp 10 --duration 1.5
 `);
-}
-
-function parsePose(s) {
-  const p = String(s).split(',').map((x) => Number(x.trim()));
-  if (p.length !== 6 || p.some((x) => !Number.isFinite(x))) throw new Error(`Bad pose: ${s}`);
-  return p;
 }
 
 function parseArgs(argv) {
@@ -89,49 +93,6 @@ function smootherstep(u) {
   return x * x * x * (x * (x * 6 - 15) + 10);
 }
 
-function poseLine(p) {
-  return p.map((x) => x.toFixed(3)).join(' ');
-}
-
-function sleep(ms) {
-  return new Promise((res) => setTimeout(res, ms));
-}
-
-function rest(base, path) {
-  const url = new URL(path, base);
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let data = '';
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data || '{}')); }
-        catch (e) { reject(e); }
-      });
-    }).on('error', reject);
-  });
-}
-
-function wsUrl(base) {
-  const u = new URL(base);
-  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-  u.pathname = '/';
-  return u.toString();
-}
-
-function openWs(base) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl(base));
-    const timer = setTimeout(() => reject(new Error('WebSocket timeout')), 3000);
-    ws.on('open', () => { clearTimeout(timer); resolve(ws); });
-    ws.on('error', reject);
-  });
-}
-
-function send(ws, cmd) {
-  console.log(`> ${cmd}`);
-  ws.send(cmd);
-}
-
 function buildAxisCommands(opts, axis) {
   const idx = AXES.indexOf(axis);
   const cmds = [];
@@ -177,32 +138,9 @@ async function dryRun(opts) {
   else console.log('End commands: FOLLOW 0, P base 1200');
 }
 
-function relativeToAbsolutePose(rel) {
-  return [rel[0], rel[1], NEUTRAL_Z + rel[2], rel[3], rel[4], rel[5]];
-}
-
-async function loadHomePose(base) {
-  try {
-    const d = await rest(base, '/api/platform-config');
-    if (PlatformSoT.finitePose(d.homePose)) return d.homePose;
-    if (PlatformSoT.finitePose(d.homeRelative)) return relativeToAbsolutePose(d.homeRelative);
-  } catch {}
-  return relativeToAbsolutePose(PlatformSoT.DEFAULT_PLATFORM_CONFIG.homeRelative);
-}
-
-async function loadLandingPose(opts) {
-  if (opts.landingWasSet) return relativeToAbsolutePose(opts.landing);
-  try {
-    const d = await rest(opts.host, '/api/platform-config');
-    if (PlatformSoT.finitePose(d.landingPose)) return d.landingPose;
-    if (PlatformSoT.finitePose(d.landingRelative)) return relativeToAbsolutePose(d.landingRelative);
-  } catch {}
-  return relativeToAbsolutePose(opts.landing);
-}
-
 async function safeLand(ws, opts) {
   const home = await loadHomePose(opts.host);
-  const landing = await loadLandingPose(opts);
+  const landing = await loadLandingPose(opts.host, opts.landing, opts.landingWasSet ? opts.landing : null);
   send(ws, 'FOLLOW 0');
   await sleep(300);
   send(ws, `P ${poseLine(home)} 1500`);
@@ -223,8 +161,9 @@ async function liveRun(opts) {
   const axes = opts.axis === 'all' ? AXES : [opts.axis];
   const ws = await openWs(opts.host);
   const recName = `${opts.name}_${axes.join('')}_amp${opts.amp}`;
-  const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`);
+  const rec = await startRecording(opts.host, recName);
   console.log(`Recording: ${rec.path}`);
+  let landed = false;
 
   try {
     send(ws, 'H');
@@ -247,6 +186,7 @@ async function liveRun(opts) {
 
     if (opts.safeLand) {
       await safeLand(ws, opts);
+      landed = true;
     } else {
       send(ws, 'FOLLOW 0');
       await sleep(300);
@@ -254,11 +194,11 @@ async function liveRun(opts) {
       await sleep(1600);
     }
   } finally {
-    if (opts.safeLand && ws.readyState === WebSocket.OPEN) {
+    if (opts.safeLand && !landed && ws.readyState === WebSocket.OPEN) {
       try { await safeLand(ws, opts); } catch (err) { console.error(`[warn] safe landing failed: ${err.message}`); }
     }
     ws.close();
-    const stopped = await rest(opts.host, '/api/rec/stop');
+    const stopped = await stopRecording(opts.host);
     console.log(`Stopped recording: ${stopped.path} (${stopped.lines} lines)`);
   }
 }

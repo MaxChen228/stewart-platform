@@ -8,11 +8,21 @@
 
 const fs = require('fs');
 const path = require('path');
-const http = require('http');
 const { execFileSync } = require('child_process');
-const WebSocket = require('ws');
-const { NEUTRAL_Z } = require('./kin');
-const PlatformSoT = require('./platform_sot');
+const {
+  WebSocket,
+  PlatformSoT,
+  loadHomePose,
+  openWs,
+  parsePose,
+  poseLine,
+  relToAbs,
+  rest,
+  safeName,
+  sleep,
+  startRecording,
+  stopRecording,
+} = require('./rig_client');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DEFAULTS = PlatformSoT.DEFAULT_PLATFORM_CONFIG;
@@ -43,12 +53,6 @@ Example:
   node sysid/research_trial.js
   node sysid/research_trial.js --live --i-am-at-rig --name heave60 --heave 60 --ms 5000
 `);
-}
-
-function parsePose(s) {
-  const p = String(s).split(',').map((x) => Number(x.trim()));
-  if (p.length !== 6 || p.some((x) => !Number.isFinite(x))) throw new Error(`Bad pose: ${s}`);
-  return p;
 }
 
 function parseArgs(argv) {
@@ -95,67 +99,8 @@ function parseArgs(argv) {
   return opts;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function safeName(s) {
-  return String(s || 'trial').replace(/[^a-zA-Z0-9_-]/g, '_');
-}
-
-function httpBase(host) {
-  return host.startsWith('http://') || host.startsWith('https://') ? host : `http://${host}`;
-}
-
-function wsUrl(host) {
-  const u = new URL(httpBase(host));
-  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-  u.pathname = '/';
-  return u.toString();
-}
-
-function getJson(host, apiPath) {
-  return new Promise((resolve, reject) => {
-    http.get(new URL(apiPath, httpBase(host)), (res) => {
-      let data = '';
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data || '{}')); }
-        catch (e) { reject(e); }
-      });
-    }).on('error', reject);
-  });
-}
-
-async function rest(host, apiPath) {
-  return getJson(host, apiPath.startsWith('/api/') ? apiPath : `/api/${apiPath}`);
-}
-
-async function openWs(host) {
-  const ws = new WebSocket(wsUrl(host));
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('WebSocket timeout')), 3000);
-    ws.on('open', () => { clearTimeout(timer); resolve(); });
-    ws.on('error', reject);
-  });
-  return ws;
-}
-
-function poseLine(pose) {
-  return pose.map((x) => Number(x).toFixed(3)).join(' ');
-}
-
 function relPose(rel) {
-  return [rel[0], rel[1], NEUTRAL_Z + rel[2], rel[3], rel[4], rel[5]];
-}
-
-async function loadHome(host) {
-  try {
-    const home = await rest(host, '/api/platform-config');
-    if (PlatformSoT.finitePose(home.homePose)) return home.homePose;
-    if (PlatformSoT.finitePose(home.homeRelative)) return relPose(home.homeRelative);
-  } catch {}
-  return relPose(DEFAULTS.homeRelative);
+  return relToAbs(rel);
 }
 
 async function preflight(opts) {
@@ -174,7 +119,9 @@ async function preflight(opts) {
   if (!opts._set.has('landMs')) opts.landMs = config.trialDefaults.landMs;
   if (!opts._set.has('safeLand')) opts.safeLand = config.trialDefaults.safeLand;
   if (!opts._set.has('landing')) opts.landing = config.landingRelative;
-  const home = PlatformSoT.finitePose(configRaw.homePose) ? configRaw.homePose : relPose(config.homeRelative);
+  const home = PlatformSoT.finitePose(configRaw.homePose)
+    ? configRaw.homePose
+    : await loadHomePose(opts.host, config.homeRelative);
   const failures = [];
   const warnings = [];
   if (!latest || latest.error || !Array.isArray(latest.a)) failures.push('no live telemetry from /api/latest');
@@ -269,7 +216,7 @@ async function liveRun(opts, ctx, plan) {
   let recPath = null;
   let started = false;
   try {
-    const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`);
+    const rec = await startRecording(opts.host, recName);
     recPath = rec.path;
     started = true;
     console.log(`Recording: ${recPath}`);
@@ -281,7 +228,7 @@ async function liveRun(opts, ctx, plan) {
   } finally {
     if (ws.readyState === WebSocket.OPEN) ws.close();
     if (started) {
-      const stopped = await rest(opts.host, '/api/rec/stop');
+      const stopped = await stopRecording(opts.host);
       recPath = stopped.path || recPath;
       console.log(`Stopped recording: ${recPath} (${stopped.lines ?? '?'} lines)`);
     }
