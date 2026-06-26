@@ -37,8 +37,12 @@ public:
 
 extern DualPrint Out;
 
-// 建立 outbound queue 並啟動 core0 的 netTask（TCP server）。setup() 末呼叫。
+// 建立 in/out queue 並啟動 core0 的 netTask（TCP server）。setup() 末呼叫。
 void netInit();
+
+// 非阻塞取一條 TCP 來源指令（P3）：有則填入 out 回 true，否則 false。
+// loop 端呼叫，語意同 Serial.available 輪詢；指令由 netTask 從 socket 收進 qIn。
+bool netNextCommand(String& out);
 
 // WiFi STA bring-up：mode(STA) + setSleep(false)（關 modem sleep 避免 +100ms 延遲）
 // + WiFi.begin。非阻塞啟動後做有界等待，回傳是否在 waitMs 內連上。

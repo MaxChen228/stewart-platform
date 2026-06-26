@@ -12,8 +12,10 @@ static const uint16_t TCP_PORT = 3333;
 
 // 固定大小 by-value 項：避免 heap 碎片，drop 時無 double-free 風險。
 struct OutLine { char s[640]; };
+struct NetCmd  { char s[128]; };       // 指令行最長 ~ "W f f f f f f ms" < 128
 
 static QueueHandle_t qOut = nullptr;   // loop(core1) → netTask(core0)，遙測，len=32 (~1s@33Hz)
+static QueueHandle_t qIn  = nullptr;   // netTask(core0) → loop(core1)，指令，len=16
 
 // ----- DualPrint：唯一 writer = core1（loop/setup），免 mutex -----
 DualPrint Out;
@@ -50,6 +52,8 @@ static void netTask(void* arg) {
     WiFiServer server(TCP_PORT);
     WiFiClient client;
     bool started = false;
+    char  inbuf[128];           // 入站行緩衝（單 client、netTask 獨用）
+    size_t inn = 0;
     for (;;) {
         if (WiFi.status() != WL_CONNECTED) {
             started = false;
@@ -60,9 +64,26 @@ static void netTask(void* arg) {
 
         if (!client || !client.connected()) {
             WiFiClient c = server.available();
-            if (c) { client = c; client.setNoDelay(true); }
+            if (c) { client = c; client.setNoDelay(true); inn = 0; }   // 新連線重置行緩衝
         }
 
+        // 入站：socket → 行切割 → qIn（指令永不丟，netTask 可阻塞 send）
+        while (client && client.connected() && client.available()) {
+            int ch = client.read();
+            if (ch < 0) break;
+            if (ch == '\n' || ch == '\r') {
+                if (inn > 0) {
+                    NetCmd nc;
+                    size_t m = (inn < sizeof(nc.s)) ? inn : sizeof(nc.s) - 1;
+                    memcpy(nc.s, inbuf, m); nc.s[m] = '\0'; inn = 0;
+                    if (qIn) xQueueSend(qIn, &nc, portMAX_DELAY);
+                }
+            } else if (inn < sizeof(inbuf) - 1) {
+                inbuf[inn++] = (char)ch;
+            }   // 行超長則丟棄多餘 byte（指令 <128，正常不會觸發）
+        }
+
+        // 出站：排空遙測 queue 寫 socket
         OutLine ol;
         while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {     // 無 client 也排空（丟棄）→ queue 不堆積
             if (client && client.connected()) client.print(ol.s);   // ol.s 已含 '\n'
@@ -71,8 +92,18 @@ static void netTask(void* arg) {
     }
 }
 
+// loop(core1) 非阻塞取一條 TCP 指令
+bool netNextCommand(String& out) {
+    if (!qIn) return false;
+    NetCmd nc;
+    if (xQueueReceive(qIn, &nc, 0) != pdTRUE) return false;
+    out = nc.s;
+    return true;
+}
+
 void netInit() {
     qOut = xQueueCreate(32, sizeof(OutLine));
+    qIn  = xQueueCreate(16, sizeof(NetCmd));
     xTaskCreatePinnedToCore(netTask, "netTask", 8192, nullptr, 1, nullptr, 0);  // core0、低優先不搶控制環
 }
 

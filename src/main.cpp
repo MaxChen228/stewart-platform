@@ -163,12 +163,11 @@ void setup() {
     Out.println("{\"status\":\"ready\"}");
 }
 
-void handleSerial() {
-    if (!Serial.available()) return;
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-
-    // WIFI 系列指令（P1）先攔截，命中即短路
+// 指令分派：source-agnostic。USB（handleSerial）與 TCP（loop 取 qIn）共用同一條，
+// 指令語意一致、ack 自動經 Out 鏡像回兩路。原本分支內的 return 改為從 dispatch 返回，
+// 行為等價（跳過其餘分支）。
+void dispatch(const String& cmd) {
+    // WIFI 系列指令先攔截，命中即短路
     if (netHandleCommand(cmd)) return;
 
     if (cmd == "Z") {
@@ -791,8 +790,20 @@ void handleSerial() {
     }
 }
 
+// USB 指令來源：讀一行 → dispatch。語意同舊版 handleSerial。
+void handleSerial() {
+    if (!Serial.available()) return;
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    dispatch(cmd);
+}
+
 void loop() {
     handleSerial();
+
+    // TCP 指令來源（P3）：非阻塞取 netTask 收到的指令 → 同一條 dispatch
+    String netCmd;
+    if (netNextCommand(netCmd)) dispatch(netCmd);
 
     // auto-return：每次 loop 迭代都排空（高頻），避免 streaming 幀塞爆 2-buffer
     if (autoReturnMode) servos.drainInto(latestRaw);
