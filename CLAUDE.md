@@ -150,16 +150,13 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 
 ## 位置控制 — 現狀
 
-### 現狀（不穩定）
+### 現狀（純P 工作點穩定）
 
-平台尚未達到穩定平衡。**只要有稍大的外部擾動，誤差就會發散、不可恢復**。任何在這之上做的精度/延遲承諾都是假的，調參前先正視這件事。
+**已找到穩定工作點：vFOC 純P `[Kp,Ki,Kd,Kv]=[1024,0,0,0]` + HOLD 死咬。** `Ki=0` 滅掉 M4 2Hz 自持極限環的根因（積分撞死區）、`maxKp` 補剛性、F5 posSpeed 提供阻尼；battery 壓測下手推擾動穩定回正。完整決策記錄見記憶 `project_pid_working_point` / `project_m4_limit_cycle`。
 
-可能的根因（未逐一證實，按懷疑度排）：
-1. Task-space PD 的 Kp/Kd 過高或 FK 雜訊放大形成正回饋
-2. F5 的 posSpeed/posAcc 設定造成階梯式過沖，疊加成震盪
-3. 馬達內部 vFOC PID 增益與 ESP32 外環頻寬未隔離（內外環頻率太接近）
-4. `angleToCoord` 方向 / `MOTOR_SIGN` 個別馬達錯置（單軸測過但未六軸交叉驗）
-5. IK 在工作空間邊緣 asin 靈敏度爆炸（report-notes §3.1）
+**主要運行模式 = HOLD（純P 死咬）**：`H` 鎖住當前姿態 snapshot（holdAngles），馬達對該凍結目標做純P 保持；姿態操作（`G` 指令）平滑移動鎖定目標。下方 mode 0/1 仍存在於碼中、作架構備援，非當前主運行路徑。
+
+注意：BOOT 預設已改 `[1024,0,0,0]`（`main.cpp`），但若跑舊 binary（未 `npm run upload`）開機仍是出廠 `220/30/270/320`，需 K 指令或重燒。噪音（Kd 致嘯叫 / 馬達保持電流固有聲）未結案、使用者選擇忽略。
 
 ### Joint-space 模式（mode 0，備援）
 
@@ -187,11 +184,12 @@ adjustedAngle = current + gain × (ideal - current) - Kd × vel × dampRatio
 
 FK 連續失敗 5 次自動 fallback 到 mode 0。
 
-### 待驗證項
+### 待驗證 / 未結案項
 
-- F5 方向：`angleToCoord` 的 coord 正負是否對應每顆馬達的物理方向（單軸 T 指令過，六軸耦合下未驗）
-- `posSpeed/posAcc`：預設 30 / 5，未做掃描
-- 馬達內部 vFOC PID 與 ESP32 外環頻寬隔離度
+- 噪音源：純P 下仍有殘響，疑馬達 vFOC 保持電流 PWM 固有聲（已排除 F5 指令流與各 PID 項；使用者選擇忽略）
+- F5 方向：`angleToCoord` 的 coord 正負對應每顆馬達物理方向（單軸 T 過、六軸耦合下未交叉驗）
+- heave→yaw 運動學疑點：heave+ 實體微順時針旋轉（使用者判 `MOTOR_SIGN` 標定無誤、暫不糾結）
+- 終極目標：無支架推擾回正（pose 調節），見記憶 `project_control_plan`
 
 ## 建置與燒錄
 
