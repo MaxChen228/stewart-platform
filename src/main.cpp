@@ -19,16 +19,21 @@ Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 // 預設關閉：行為與輪詢版完全相同，燒錄安全。需馬達上電後 A1 啟用才生效。
 int64_t latestRaw[NUM_MOTORS];
 bool autoReturnMode = false;
-uint16_t arPeriodMs = 3;              // 馬達主動上報週期，可調（AR 指令）
+uint16_t arPeriodMs = 10;             // 馬達主動上報週期，可調（AR 指令）；預設 100Hz（10ms）對齊控制迴圈
 
 // ===== 可調速率（item 2 of 本輪）=====
-uint32_t loopPeriodUs = 20000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）
+uint32_t loopPeriodUs = 10000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）；預設 100Hz（10ms）
 const uint32_t TELE_PERIOD_MS = 30;  // 遙測輸出週期（與控制解耦，固定 ~33Hz，免塞爆 115200 序列埠）
 bool posEnabled = false;
 float enableAngle[NUM_MOTORS] = {0};
 
 uint16_t posSpeed = 120;
 uint8_t  posAcc   = 100;
+
+// ===== 匯流排佔用統計（每遙測窗計數，print 後歸零）：實測幀數，client 換算 500kbps 佔用% =====
+uint16_t busTxF5  = 0;   // F5 指令幀（DLC 8）
+uint16_t busTxQ   = 0;   // 0x35 輪詢查詢幀（DLC 2，每幀必有一筆 DLC 8 回覆在線上）
+uint16_t busRxEnc = 0;   // auto-return 實收 0x35 廣播幀（DLC 8）
 
 // ===== HOLD 模式 =====
 // 純 passthrough：snapshot 當前 enc.angles，每 cycle 直送 F5，跳過 PD/IK/平滑
@@ -47,6 +52,39 @@ uint32_t bumpUntilMs = 0;             // 脈衝結束時刻（millis）；過期
 float    holdTarget[NUM_MOTORS] = {0};   // 移動目標 = IK(目標絕對 pose)
 float    holdStart[NUM_MOTORS]  = {0};   // 本次移動起點（發 P 當下的 holdAngles）
 uint32_t holdMoveStart = 0, holdMoveMs = 0;   // 移動起始時刻、總時長（0=不在移動）
+
+// 跟隨模式（FOLLOW/PF）：HOLD 下接 host 串流的 pose 目標，以速度受限濾波器平滑追過去。
+// 與 P smoothstep 互斥（follow on 時 followStep 接管 holdAngles，忽略 holdMoveMs）。
+// 設計：每 cycle 對「pose 誤差」做低通求步進（近目標 ease-out），再把步進的速度 clamp 到
+// vmax → 遠時等速平滑落後（拖快不硬撲）、近時低通收斂。速度上限同時是所有 host 動作的硬體安全閥。
+bool  followMode = false;
+float followCur[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 當前濾波後 pose（IK 對象）
+float followTgt[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 串流進來的目標 pose（PF 設）
+float followVmaxT  = 60.0f;    // 平移速度上限 mm/s（VF 可調）
+float followVmaxR  = 45.0f;    // 旋轉速度上限 deg/s（VF 可調）
+const float FOLLOW_TAU = 0.15f;   // 低通時間常數 s（近目標減速的柔順度）
+
+static inline Pose poseFromArr(const float a[6]) {
+    return Pose{a[0], a[1], a[2], a[3], a[4], a[5]};
+}
+
+// 跟隨濾波器一步：低通步進 + 全域速度 clamp（統一縮放保 pose 直線同步）→ IK → holdAngles。
+// IK 無效（拖出工作空間）→ 維持上一有效點，不前進、不 snap。
+static void followStep(float dt) {
+    float alpha = constrain(dt / FOLLOW_TAU, 0.0f, 1.0f);
+    float step[6];
+    for (int i = 0; i < 6; i++) step[i] = alpha * (followTgt[i] - followCur[i]);
+    // 速度上限：平移(0,1,2)→vmaxT·dt、旋轉(3,4,5)→vmaxR·dt；取最嚴比例統一縮放
+    float scale = 1.0f, capT = followVmaxT * dt, capR = followVmaxR * dt;
+    for (int i = 0; i < 3; i++) { float a = fabsf(step[i]); if (a > capT) scale = fminf(scale, capT / a); }
+    for (int i = 3; i < 6; i++) { float a = fabsf(step[i]); if (a > capR) scale = fminf(scale, capR / a); }
+    float cand[6];
+    for (int i = 0; i < 6; i++) cand[i] = followCur[i] + step[i] * scale;
+    IKResult ik = inverse_kinematics(poseFromArr(cand));
+    if (ik.valid) {
+        for (int i = 0; i < 6; i++) { followCur[i] = cand[i]; holdAngles[i] = ik.angles[i]; }
+    }
+}
 
 // 開機預設 vFOC PID：純P工作點 [1024,0,0,0]（2026-06-26 定案）。
 // Ki=0 滅自持極限環根因（積分撞死區）；maxKp 補剛性；F5 posSpeed 提供阻尼；
@@ -80,12 +118,14 @@ bool adaptiveFirstCycle = true;
 void posStop() {
     posEnabled = false;
     holdMode = false;
+    followMode = false;
     servos.stopAllPosition(5);
 }
 
 void posDisable() {
     posEnabled = false;
     holdMode = false;
+    followMode = false;
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -100,6 +140,7 @@ bool netIsControlSource = false;
 static void enterHoldCurrent() {
     for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = enc.angles[i];
     holdMoveMs = 0;        // 取消進行中的姿態移動
+    followMode = false;    // 失效保護凍結當前姿態，不殘留跟隨
     maxHoldErr = 0;
     holdMode = true;       // 切 HOLD 直送，脫離會發散的 PD/joint 外環
     // posEnabled 維持 true
@@ -344,6 +385,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         }
 
         holdMode = true;
+        followMode = false;   // 進 HOLD 一律純死咬，跟隨須另送 FOLLOW 1
         posEnabled = true;
         maxHoldErr = 0;
         Out.printf("{\"status\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
@@ -398,6 +440,47 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
                     v[0],v[1],v[2],v[3],v[4],v[5]);
             }
+        }
+    } else if (cmd.startsWith("FOLLOW")) {
+        // FOLLOW 1 / FOLLOW 0：進/出跟隨模式（僅 HOLD 有意義）。
+        // 進入時用 FK(當前角度) 當濾波器起點 → IK(起點)≈當前 holdAngles，不跳；回 pose 供前端同步滑桿。
+        int on = 0;
+        sscanf(cmd.c_str(), "FOLLOW %d", &on);
+        if (on) {
+            if (!holdMode) {
+                Out.println("{\"error\":\"FOLLOW needs HOLD (send H first)\"}");
+            } else {
+                FKSolver fk;
+                Pose p = fk.solve(enc.angles);
+                float init[6] = { p.x, p.y, p.z, p.roll, p.pitch, p.yaw };
+                if (!fk.converged) {   // FK 沒收斂 → 退回最後指令 pose，仍給有效起點
+                    init[0]=targetPose.x; init[1]=targetPose.y; init[2]=targetPose.z;
+                    init[3]=targetPose.roll; init[4]=targetPose.pitch; init[5]=targetPose.yaw;
+                }
+                for (int i = 0; i < 6; i++) { followCur[i] = init[i]; followTgt[i] = init[i]; }
+                holdMoveMs = 0;          // 與 P smoothstep 互斥
+                followMode = true;
+                Out.printf("{\"status\":\"follow on\",\"pose\":[%.2f,%.2f,%.2f,%.3f,%.3f,%.3f],\"fk\":%d}\n",
+                    init[0],init[1],init[2],init[3],init[4],init[5], fk.converged?1:0);
+            }
+        } else {
+            followMode = false;        // holdAngles 凍結在當前 → 純死咬續持
+            Out.println("{\"status\":\"follow off\"}");
+        }
+    } else if (cmd.startsWith("PF ")) {
+        // 跟隨目標串流 `PF x y z r p y`：高頻、僅更新 followTgt，不回 ack（避免塞爆接收）。
+        // IK 有效性由 followStep 每 cycle 把關（超工作空間維持上一有效點）；非 followMode 忽略。
+        float v[6];
+        int n = sscanf(cmd.c_str(), "PF %f %f %f %f %f %f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]);
+        if (n >= 6 && followMode) { for (int i = 0; i < 6; i++) followTgt[i] = v[i]; }
+    } else if (cmd.startsWith("VF ")) {
+        // 跟隨速度上限 `VF vmaxT vmaxR`（mm/s, deg/s）：所有 host 動作的硬體安全閥。
+        float vt, vr;
+        int n = sscanf(cmd.c_str(), "VF %f %f", &vt, &vr);
+        if (n >= 2) {
+            followVmaxT = constrain(vt, 1.0f, 500.0f);
+            followVmaxR = constrain(vr, 1.0f, 360.0f);
+            Out.printf("{\"status\":\"follow vmax\",\"t\":%.1f,\"r\":%.1f}\n", followVmaxT, followVmaxR);
         }
     } else if (cmd.startsWith("CM ")) {
         // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
@@ -679,7 +762,7 @@ void loop() {
     checkFailsafe();
 
     // auto-return：每次 loop 迭代都排空（高頻），避免 streaming 幀塞爆 2-buffer
-    if (autoReturnMode) servos.drainInto(latestRaw);
+    if (autoReturnMode) busRxEnc += servos.drainInto(latestRaw);   // 匯流排佔用：實收 0x35 廣播幀
 
     // 控制迴圈閘門（micros，週期可調）
     static uint32_t lastReadUs = 0;
@@ -700,7 +783,7 @@ void loop() {
     uint32_t canReadUs = 0;
     if (autoReturnMode) {
         // 連續排空已在 loop 頂端進行，這裡只取最新快照（感測延遲 ≈ 0）
-        servos.drainInto(latestRaw);
+        busRxEnc += servos.drainInto(latestRaw);
         for (int i = 0; i < NUM_MOTORS; i++) {
             raw[i] = latestRaw[i];
             if (raw[i] != INT64_MIN) ok++;
@@ -710,6 +793,7 @@ void loop() {
         uint32_t _canT0 = micros();
         ok = servos.readAllRawEncoders(raw);
         canReadUs = micros() - _canT0;   // 讀 6 顆編碼器的純 CAN 來回時間（頻寬指紋核心）
+        busTxQ += NUM_MOTORS;            // 匯流排佔用：每次輪詢送 6 筆 0x35 查詢（各保證一筆回覆）
     }
     enc.updateAngles(raw);
 
@@ -721,8 +805,11 @@ void loop() {
 
         if (holdMode) {
             // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
-            // 姿態移動（G）：平滑過渡 holdAngles → holdTarget（smoothstep 加減速，避免階躍衝擊）
-            if (holdMoveMs > 0) {
+            // 跟隨模式（FOLLOW/PF/動作庫）：速度受限濾波器接管 holdAngles，與 smoothstep 互斥。
+            if (followMode) {
+                followStep(dt);
+            } else if (holdMoveMs > 0) {
+            // 姿態移動（P）：平滑過渡 holdAngles → holdTarget（smoothstep 加減速，避免階躍衝擊）
                 float t = (float)(millis() - holdMoveStart) / holdMoveMs;
                 if (t >= 1.0f) {
                     for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = holdTarget[i];
@@ -815,6 +902,7 @@ void loop() {
                     break;
                 }
                 servos.setAbsoluteCoord(MOTOR_ADDR[i], posSpeed, posAcc, coords[i]);
+                busTxF5++;                 // 匯流排佔用：F5 指令幀（DLC 8）
             }
         }
     }
@@ -823,7 +911,8 @@ void loop() {
     static uint32_t lastTeleMs = 0;
     uint32_t nowMs = millis();
     if (nowMs - lastTeleMs < TELE_PERIOD_MS) return;
-    float lhz = ctrlCycles * 1000.0f / (nowMs - lastTeleMs);  // 實測控制迴圈頻率
+    uint32_t teleWin = nowMs - lastTeleMs;                    // 遙測窗長（匯流排佔用分母）
+    float lhz = ctrlCycles * 1000.0f / teleWin;               // 實測控制迴圈頻率
     ctrlCycles = 0;
     lastTeleMs = nowMs;
 
@@ -838,6 +927,7 @@ void loop() {
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
                   "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
+                  "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u},"
                   "\"pid\":[%u,%u,%u,%u]",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
@@ -845,7 +935,9 @@ void loop() {
         ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode,
         eflg, tec, rec,
         nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0,
+        busTxF5, busTxQ, busRxEnc, teleWin,
         curKp, curKi, curKd, curKv);
+    busTxF5 = busTxQ = busRxEnc = 0;   // 匯流排計數每窗歸零
 
     if (posEnabled && holdMode) {
         float herr[NUM_MOTORS];
