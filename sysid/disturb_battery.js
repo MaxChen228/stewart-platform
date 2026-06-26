@@ -15,39 +15,9 @@
 //   node sysid/disturb_battery.js preview          # 只印序列與每發六軸分配，不發指令
 //   node sysid/disturb_battery.js [tag] [backstop]  # 跑完整 battery，tag 進檔名（預設讀當前 pid）
 'use strict';
-const { encDelta } = require('./disturb_modes.js');
+const { encDelta, BATTERY: SEQ } = require('./disturb_modes.js');   // SEQ 共用真相源（前端 battery UI 同一份）
 const WebSocket = require('ws');
 const HOST = 'localhost:3000';
-
-// ===== 標準 battery 序列（v1）。{p:phase, mode, sev:六軸RMS度(single為單軸度), ms:脈衝寬, gap:之後等待秒} =====
-const SEQ = [
-  // P1 六軸單馬達均勻覆蓋（single：sev=單軸度數）
-  { p: 'P1-single', mode: 'm1', sev: 5, ms: 120, gap: 3.0 },
-  { p: 'P1-single', mode: 'm2', sev: 5, ms: 120, gap: 3.0 },
-  { p: 'P1-single', mode: 'm3', sev: 5, ms: 120, gap: 3.0 },
-  { p: 'P1-single', mode: 'm4', sev: 5, ms: 120, gap: 3.0 },
-  { p: 'P1-single', mode: 'm5', sev: 5, ms: 120, gap: 3.0 },
-  { p: 'P1-single', mode: 'm6', sev: 5, ms: 120, gap: 3.0 },
-  // P2 task-space 六自由度方向（sev=六軸 RMS 度）
-  { p: 'P2-dof', mode: 'roll',  sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'pitch', sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'tilt',  sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'surge', sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'sway',  sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'heave', sev: 3, ms: 120, gap: 3.0 },
-  { p: 'P2-dof', mode: 'yaw',   sev: 3, ms: 120, gap: 3.0 },
-  // P3 強度階梯（同模態 tilt，小→中→大）
-  { p: 'P3-ramp', mode: 'tilt', sev: 2, ms: 120, gap: 3.0 },
-  { p: 'P3-ramp', mode: 'tilt', sev: 4, ms: 120, gap: 3.0 },
-  { p: 'P3-ramp', mode: 'tilt', sev: 6, ms: 120, gap: 3.5 },
-  // P4 連續無間隔背靠背（mixed 連打，gap 短到不等回正 → 累積擾動）
-  { p: 'P4-burst', mode: 'mixed', sev: 3, ms: 120, gap: 0.4 },
-  { p: 'P4-burst', mode: 'mixed', sev: 3, ms: 120, gap: 0.4 },
-  { p: 'P4-burst', mode: 'mixed', sev: 3, ms: 120, gap: 0.4 },
-  { p: 'P4-burst', mode: 'mixed', sev: 3, ms: 120, gap: 3.5 },
-  // P5 最嚴苛複合
-  { p: 'P5-max', mode: 'mixed', sev: 5, ms: 150, gap: 4.0 },
-];
 
 const fmt = a => a.map(x => x.toFixed(2).padStart(6)).join(' ');
 

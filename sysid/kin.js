@@ -1,6 +1,9 @@
 // Stewart IK — 從 web/index.html 抽出的 host 端純函數版（無 THREE 依賴）。
 // 幾何常數與前端/韌體同步；CW 排列。改幾何時三處（kinematics.h / index.html / 此檔）須一致。
 'use strict';
+// IIFE 隔離：瀏覽器當 classic script 載入時不污染全域（否則 ik/deltaAngle/NEUTRAL_Z 等
+// 與 disturb_modes.js 的 const 撞名 → "already declared"）。只 leak window.Kin / module.exports。
+(function () {
 const DEG = Math.PI / 180;
 const BASE_RADIUS = 152, BASE_ANGLE = 18.92;
 const PLATFORM_RADIUS = 103, PLATFORM_ANGLE = 28.07;
@@ -67,3 +70,4 @@ function deltaAngle(pose0, dpose) {
 const _K = { ik, deltaAngle, NEUTRAL_Z, LOWER_LEG, UPPER_LEG, MOTOR_PLANE_ANGLE };
 if (typeof module !== 'undefined' && module.exports) module.exports = _K;   // Node
 if (typeof window !== 'undefined') window.Kin = _K;                          // 瀏覽器 <script src>（SoT 共用）
+})();
