@@ -2,12 +2,20 @@ const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
 const HTTP_PORT = 3000;
 const BAUD = 115200;
-const RELEASE_HOLD_MS = 30000;   // /api/release 後抑制重連時長（燒錄用）
+
+// ===== 傳輸選擇（env，預設 serial = 既有行為不變）=====
+const TRANSPORT  = process.env.TRANSPORT || 'serial';        // serial | tcp
+const ESP32_HOST = process.env.ESP32_HOST || '';             // tcp 模式必填
+const ESP32_PORT = Number(process.env.ESP32_PORT) || 3333;
+const TCP_IDLE_MS = Number(process.env.TCP_IDLE_MS) || 2000; // read-idle 半開偵測
+// 燒錄抑制重連時長：tcp 較長（吸收 WiFi association 延遲）
+const RELEASE_HOLD_MS = Number(process.env.RELEASE_HOLD_MS) || (TRANSPORT === 'tcp' ? 45000 : 30000);
 
 // 最新一筆資料（供 REST API 用）
 let lastData = null;
@@ -177,7 +185,7 @@ function createSerialTransport({ onLine, baud }) {
       if (!suppressReconnect) setTimeout(connect, 3000);
     };
     serial.on('close', () => onGone('disconnected'));
-    serial.on('error', (err) => onGone(`error: ${err.message}`));
+    serial.on('error', (err) => { console.error(`[Serial] error: ${err.message}`); onGone('error'); });  // error 留 stderr
   }
 
   return {
@@ -195,11 +203,81 @@ function createSerialTransport({ onLine, baud }) {
   };
 }
 
-const transport = createSerialTransport({ onLine, baud: BAUD });
+// TCP transport（P6）：連 ESP32 WiFi 的 :3333，協議與 serial 逐字相同。
+// 半開偵測用「手動 read-idle」（遙測連續流即 liveness）——不可用 socket.setTimeout，
+// 因心跳 write 會重置它而漏判死 peer。心跳 write 獨立，讓韌體可選的 HB 失效保護生效。
+function createTcpTransport({ onLine, host, port }) {
+  let socket = null;
+  let suppressReconnect = false;
+  let hbTimer = null;     // 對 ESP32 週期送 '\n' 心跳（韌體 lastNetRxMs 基準；空行被忽略）
+  let idleTimer = null;   // read-idle 檢查
+  let lastRead = 0;
+
+  function clearTimers() {
+    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+    if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+  }
+
+  function connect() {
+    if (suppressReconnect) return;
+    console.log(`[TCP] connecting ${host}:${port}`);
+    socket = net.connect({ host, port });
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 5000);
+    socket.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', (line) => {
+      lastRead = Date.now();
+      onLine(line);
+    });
+    socket.on('connect', () => {
+      console.log('[TCP] connected');
+      lastRead = Date.now();
+      hbTimer = setInterval(() => { if (socket && !socket.destroyed && socket.writable) socket.write('\n'); }, 1000);
+      idleTimer = setInterval(() => {
+        if (socket && !socket.destroyed && Date.now() - lastRead > TCP_IDLE_MS) {
+          console.log('[TCP] read-idle, destroying');
+          socket.destroy();   // → close → 重連；ESP32 收 RST → 韌體 socket-close failsafe
+        }
+      }, 500);
+    });
+    const onGone = (why) => {
+      console.log(`[TCP] ${why}. Reconnecting in 3s...`);
+      clearTimers();
+      socket = null;
+      lastData = null;
+      if (!suppressReconnect) setTimeout(connect, 3000);
+    };
+    socket.on('close', () => onGone('closed'));
+    socket.on('error', (err) => console.error('[TCP] error:', err.message));  // close 隨後觸發 onGone
+  }
+
+  return {
+    isReady() { return !!(socket && !socket.destroyed && socket.writable); },
+    write(line) { if (socket && !socket.destroyed && socket.writable) socket.write(line + '\n'); },
+    connect,
+    release(holdMs) {
+      suppressReconnect = true;
+      clearTimers();
+      if (socket && !socket.destroyed) {
+        socket.destroy();
+        console.log(`[TCP] released for upload (${holdMs}ms hold)`);
+      }
+      setTimeout(() => { suppressReconnect = false; connect(); }, holdMs);
+    },
+  };
+}
+
+if (TRANSPORT === 'tcp' && !ESP32_HOST) {
+  console.error('[Config] TRANSPORT=tcp 需設 ESP32_HOST（如 ESP32_HOST=192.168.1.50）');
+  process.exit(1);
+}
+const transport = (TRANSPORT === 'tcp')
+  ? createTcpTransport({ onLine, host: ESP32_HOST, port: ESP32_PORT })
+  : createSerialTransport({ onLine, baud: BAUD });
 
 // ===== 啟動 =====
 server.listen(HTTP_PORT, () => {
   console.log(`[Server] http://localhost:${HTTP_PORT}`);
   console.log(`[Server] REST: http://localhost:${HTTP_PORT}/api/latest`);
+  console.log(`[Server] transport: ${TRANSPORT}${TRANSPORT === 'tcp' ? ` → ${ESP32_HOST}:${ESP32_PORT}` : ''}`);
   transport.connect();
 });
