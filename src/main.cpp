@@ -115,6 +115,13 @@ float maxGain = 0.3f;
 float smoothKinetic = 0;
 bool adaptiveFirstCycle = true;
 
+// 擾動歸零（plant-input 疊加層）：清六軸偏移與計時哨兵。
+// phase 2 會在 posStop/posDisable/enterHoldCurrent/失效保護一併呼叫，確保斷線/停止必歸零。
+static void clearBump() {
+    for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
+    bumpUntilMs = 0;
+}
+
 void posStop() {
     posEnabled = false;
     holdMode = false;
@@ -559,7 +566,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         int idx, ms; float deg;
         if (sscanf(cmd.c_str(), "U %d %f %d", &idx, &deg, &ms) == 3 && idx >= 0 && idx < NUM_MOTORS) {
             for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
-            bumpDeg[idx] = deg;
+            bumpDeg[idx] = constrain(deg, -30.0f, 30.0f);   // 對齊 W 的幅度上限（安全：避免手滑大角度甩出）
             bumpUntilMs = millis() + constrain(ms, 1, 5000);
             Out.printf("{\"status\":\"bump\",\"motor\":%d,\"deg\":%.2f,\"ms\":%d,\"hold\":%d}\n",
                 idx + 1, deg, ms, holdMode ? 1 : 0);
@@ -821,15 +828,8 @@ void loop() {
                         holdAngles[i] = holdStart[i] + (holdTarget[i] - holdStart[i]) * s;
                 }
             }
-            bool bumpActive = (bumpUntilMs != 0 && millis() < bumpUntilMs);
-            if (bumpUntilMs != 0 && !bumpActive) {               // 脈衝結束，六軸偏移歸零
-                for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
-                bumpUntilMs = 0;
-            }
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                motorTargets[i] = holdAngles[i];
-                if (bumpActive) motorTargets[i] += bumpDeg[i];
-            }
+            // 擾動疊加已移至 F5 共同匯流口（plant-input，全模式通用）→ 此處只設 HOLD 目標。
+            for (int i = 0; i < NUM_MOTORS; i++) motorTargets[i] = holdAngles[i];
             float maxAbs = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
                 float e = fabsf(enc.angles[i] - holdAngles[i]);
@@ -894,8 +894,13 @@ void loop() {
 
         // 發送 F5 指令
         if (controlOk) {
+            // 擾動注入（plant-input 疊加層）：HOLD / task-space / joint 算完 motorTargets 後在此統一疊加，
+            // 故運動中也能注入；脈衝過期自動歸零。bumpUntilMs==0 表無擾動。
+            bool bumpActive = (bumpUntilMs != 0 && millis() < bumpUntilMs);
+            if (bumpUntilMs != 0 && !bumpActive) clearBump();   // 脈衝結束
             for (int i = 0; i < NUM_MOTORS; i++) {
-                coords[i] = enc.angleToCoord(i, motorTargets[i], enableAngle[i]);
+                float cmd = motorTargets[i] + (bumpActive ? bumpDeg[i] : 0.0f);
+                coords[i] = enc.angleToCoord(i, cmd, enableAngle[i]);
                 if (abs(coords[i]) > 8192) {
                     posStop();
                     Out.println("{\"error\":\"coord out of range, pos stopped\"}");
