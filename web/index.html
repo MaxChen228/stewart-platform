@@ -1244,10 +1244,13 @@ function updateViz(motorAngles) {
     fkStatus.startsWith('FK OK') ? 'var(--contra)' : 'var(--dev)';
 }
 
-// 初始顯示中立
-ghostTarget = [0, 0, NEUTRAL_Z, 0, 0, 0];
-updateGhost();
-updateViz(ik([0,0,NEUTRAL_Z,0,0,0]));
+// 初始顯示 home（刷新後反映 homePose——含 localStorage 存的自訂 home，而非寫死中位）
+(function initPoseToHome(){
+  const off = [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
+  POSE_AXES.forEach(([id, idx]) => { const el = document.getElementById(id); el.value = Math.max(+el.min, Math.min(+el.max, off[idx])); });
+  poseUpdateGhost();              // 設 ghostTarget=home + 更新綠色 ghost（followActive 仍 false → 不串流）
+  updateViz(ik(homePose));        // 紅色初始 placeholder 也顯示 home（連線後由遙測覆蓋）
+})();
 
 // Self-test
 {
