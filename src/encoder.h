@@ -23,6 +23,12 @@ struct EncoderState {
     void computeNeutralAngles() {
         Pose neutral = {0, 0, NEUTRAL_Z, 0, 0, 0};
         IKResult r = inverse_kinematics(neutral);
+        // 中位姿態理論上必有解；若 IK invalid（幾何常數被改壞）退回 90° home 假設，
+        // 不讓 r.angles 的未定義值（可能=0=leg 水平）污染 neutralAngles
+        if (!r.valid) {
+            for (int i = 0; i < NUM_MOTORS; i++) neutralAngles[i] = 90.0f;
+            return;
+        }
         for (int i = 0; i < NUM_MOTORS; i++)
             neutralAngles[i] = r.angles[i];
     }

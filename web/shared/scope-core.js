@@ -93,8 +93,11 @@ class ScopeCore {
   markEvent(label, kind = 'cmd') { this.events.push({ sample: this.buf.a[0].length, label, kind }); if (this.events.length > 300) this.events.shift(); }
 
   // ===== 視窗 =====
+  // _vStart 不 clamp 到 0：視窗恆 = timeWindow 寬（ve-vs 永遠 = timeWindow）→ 每樣本佔固定像素，
+  // buffer 未滿時資料只填右側、從右流入（固定比例流動），不再「先鋪滿全寬再壓縮」。
+  // 負 index 由各繪圖迴圈的 null/範圍守衛跳過。
   _vEnd() { return Math.max(0, this.buf.a[0].length - this.viewOffset); }
-  _vStart() { return Math.max(0, this._vEnd() - this.timeWindow); }
+  _vStart() { return this._vEnd() - this.timeWindow; }
 
   // ===== Canvas 原語 =====
   _setup(canvas) {
@@ -225,15 +228,18 @@ class ScopeCore {
     const vs = this._vStart(), ve = this._vEnd();
     const gR = { min: 0, max: 1.1 }, kR = this._stableRange('kinetic', [this.buf.kinetic], vs, ve); kR.min = 0;
     this._grid(ctx, w, h, gR.min, gR.max, ve - vs);
-    const count = ve - vs;
+    const count = ve - vs, i0 = Math.max(0, vs);   // i0：跳過未滿時的負 index（固定比例、從右流入）
     if (count > 1) {
       const kRng = kR.max - kR.min || 1;
-      ctx.fillStyle = 'rgba(231,76,60,0.15)'; ctx.beginPath(); ctx.moveTo(0, h);
-      for (let i = vs; i < ve && i < this.buf.kinetic.length; i++) ctx.lineTo(((i - vs) / (count - 1)) * w, h - ((this.buf.kinetic[i] - kR.min) / kRng) * h);
-      ctx.lineTo(w, h); ctx.fill();
+      ctx.fillStyle = 'rgba(231,76,60,0.15)'; ctx.beginPath(); let started = false;
+      for (let i = i0; i < ve && i < this.buf.kinetic.length; i++) {
+        const x = ((i - vs) / (count - 1)) * w, y = h - ((this.buf.kinetic[i] - kR.min) / kRng) * h;
+        if (!started) { ctx.moveTo(x, h); ctx.lineTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      if (started) { ctx.lineTo(w, h); ctx.fill(); }
       ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 1; ctx.beginPath();
       let first = true;
-      for (let i = vs; i < ve && i < this.buf.kinetic.length; i++) { const x = ((i - vs) / (count - 1)) * w, y = h - ((this.buf.kinetic[i] - kR.min) / kRng) * h; if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y); }
+      for (let i = i0; i < ve && i < this.buf.kinetic.length; i++) { const x = ((i - vs) / (count - 1)) * w, y = h - ((this.buf.kinetic[i] - kR.min) / kRng) * h; if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y); }
       ctx.stroke();
     }
     this._trace(ctx, this.buf.g, w, h, gR.min, gR.max, '#2ecc71', vs, ve, 2);
@@ -246,8 +252,8 @@ class ScopeCore {
     const { ctx, w, h } = this._setup(cv); ctx.clearRect(0, 0, w, h);
     const mi = this.selectedMotor, aArr = this.buf.a[mi], vArr = this.buf.vel[mi], tArr = this.buf.tgt[mi];
     const vs = this._vStart(), ve = this._vEnd(); if (ve - vs < 2) return;
-    const xs = [], ys = [];
-    for (let i = vs; i < ve && i < aArr.length; i++) { xs.push(tArr[i] != null ? tArr[i] - aArr[i] : aArr[i] - (aArr[vs] || 90)); ys.push(vArr[i] || 0); }
+    const xs = [], ys = [], i0 = Math.max(0, vs);   // i0：跳過未滿時的負 index
+    for (let i = i0; i < ve && i < aArr.length; i++) { xs.push(tArr[i] != null ? tArr[i] - aArr[i] : aArr[i] - (aArr[i0] || 90)); ys.push(vArr[i] || 0); }
     let xMax = 0.5, yMax = 10;
     for (let i = 0; i < xs.length; i++) { xMax = Math.max(xMax, Math.abs(xs[i])); yMax = Math.max(yMax, Math.abs(ys[i])); }
     xMax *= 1.2; yMax *= 1.2;

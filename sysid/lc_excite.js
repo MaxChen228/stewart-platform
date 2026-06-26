@@ -84,7 +84,7 @@ async function main() {
   }
 
   if (!aborted) { send(SAFE); await sleep(500); await rest('rec/stop'); recording = false; }
-  console.log('\n完成。分析: uv run sysid/lc_analyze.py');
+  console.log('\n完成。分析: uv run sysid/recover_analyze.py');
   ws.close();
 }
 main().catch(async (e) => { console.error(e); await safeStop('例外'); process.exit(1); });

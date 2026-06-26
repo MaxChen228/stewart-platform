@@ -176,7 +176,8 @@ void setup() {
         delay(10);
     }
 
-    // 開機持久化 vFOC PID：下發抗自持的 Ki=30（重開機馬達回出廠 100→一推暴走，故每次開機重設）
+    // 開機持久化 vFOC PID：純P 工作點 [1024,0,0,0]（見上 BOOT_* 定義）。
+    // 重開機馬達回出廠值 → 每次開機重設成韌體版控的值，不靠馬達 EEPROM。
     for (int i = 0; i < NUM_MOTORS; i++) {
         servos.setVFOC_KpKi(MOTOR_ADDR[i], BOOT_KP, BOOT_KI);
         delay(10);
@@ -283,9 +284,12 @@ void dispatch(const String& cmd, bool fromNet = false) {
 
         int64_t raw[NUM_MOTORS];
         servos.readAllRawEncoders(raw);
+        enc.updateAngles(raw);   // 0x35 不受 0x92 影響，先刷新 enc.angles 當 fallback 基準
         for (int i = 0; i < NUM_MOTORS; i++) {
+            // 讀失敗 fallback 用新鮮 enc.angles（真實當前角），不用寫死 90°，
+            // 否則 0x92 已把零點設在真實位置 → 首個 F5 coord 算錯 → 該軸跳動（與 H handler 對齊）
             enableAngle[i] = (raw[i] != INT64_MIN)
-                ? enc.rawToAngle(i, raw[i]) : 90.0f;
+                ? enc.rawToAngle(i, raw[i]) : enc.angles[i];
         }
 
         // 初始化控制器：target 自動對齊當前 FK 姿態（避免 Enable 瞬間暴衝）
@@ -645,188 +649,6 @@ void dispatch(const String& cmd, bool fromNet = false) {
                       idCnt2[1],idCnt2[2],idCnt2[3],idCnt2[4],idCnt2[5],idCnt2[6]);
         Out.println("{\"xdiag\":\"done\"}");
         posEnabled = savedPos; holdMode = savedHold;
-    } else if (cmd == "_LEGACY_X_") {
-        // ===== 深度 CAN 診斷：失敗原因分類 + latency 分佈 + listen-only =====
-        bool savedPos = posEnabled;
-        bool savedHold = holdMode;
-        posEnabled = false;
-        holdMode = false;
-        delay(100);
-        servos.flushReceiveBuffer();
-        servos.can.clearRXOverflow();
-
-        Out.println("{\"xdiag\":\"start\"}");
-
-        // Phase A1: listen 1.5s + dump 前 5 個 full frame
-        {
-            uint32_t lstart = millis();
-            int total = 0;
-            int idCnt[7] = {0};
-            int codeCnt[256] = {0};
-            char dumpBuf[600] = {0};
-            int dn = 0;
-            while (millis() - lstart < 1500) {
-                if (servos.can.checkReceive() == CAN_MSGAVAIL) {
-                    unsigned long id; uint8_t len; uint8_t buf[8];
-                    servos.can.readMsgBuf(&id, &len, buf);
-                    total++;
-                    int mi = (id >= 1 && id <= 6) ? id : 0;
-                    idCnt[mi]++;
-                    if (len > 0) codeCnt[buf[0]]++;
-                    if (total <= 5 && dn < 500) {
-                        dn += snprintf(dumpBuf+dn, 600-dn, "%sid=%lu len=%u [", dn?" | ":"", id, len);
-                        for (int j = 0; j < len; j++)
-                            dn += snprintf(dumpBuf+dn, 600-dn, "%s%02X", j?" ":"", buf[j]);
-                        dn += snprintf(dumpBuf+dn, 600-dn, "]");
-                    }
-                }
-            }
-            Out.printf("{\"xdiag\":\"listen_before\",\"total\":%d,\"per_id\":[%d,%d,%d,%d,%d,%d,%d],\"first5\":\"%s\"}\n",
-                          total, idCnt[0],idCnt[1],idCnt[2],idCnt[3],idCnt[4],idCnt[5],idCnt[6], dumpBuf);
-        }
-
-        // Phase A2: 先嗅一次找出真正在 auto-report 的 (motor, code) 配對；
-        // 然後只 disable 那個特定組合，避免級聯
-        Out.println("{\"xdiag\":\"sniff_active\"}");
-        struct Hit { uint8_t motor; uint8_t code; int count; };
-        Hit hits[8] = {{0,0,0}};
-        int hitN = 0;
-        uint32_t sstart = millis();
-        while (millis() - sstart < 1000) {
-            if (servos.can.checkReceive() == CAN_MSGAVAIL) {
-                unsigned long id; uint8_t len; uint8_t buf[8];
-                servos.can.readMsgBuf(&id, &len, buf);
-                if (len < 1 || id < 1 || id > 6) continue;
-                uint8_t mo = id & 0xFF;
-                uint8_t co = buf[0];
-                bool found = false;
-                for (int j = 0; j < hitN; j++) {
-                    if (hits[j].motor == mo && hits[j].code == co) {
-                        hits[j].count++; found = true; break;
-                    }
-                }
-                if (!found && hitN < 8) hits[hitN++] = {mo, co, 1};
-            }
-        }
-        Out.print("{\"xdiag\":\"sniff_done\",\"hits\":[");
-        for (int j = 0; j < hitN; j++)
-            Out.printf("%s{\"m\":%u,\"c\":\"0x%02X\",\"n\":%d}",
-                          j?",":"", hits[j].motor, hits[j].code, hits[j].count);
-        Out.println("]}");
-
-        // 對 spamming motor 發 0x41 Reset (preserves config, just reboots)
-        Out.println("{\"xdiag\":\"motor_reset_41\"}");
-        for (int j = 0; j < hitN; j++) {
-            if (hits[j].count < 10) continue;
-            uint8_t mo = hits[j].motor;
-            // 連發 5 次提高成功率
-            for (int rep = 0; rep < 5; rep++) {
-                uint8_t buf[2] = {0x41, (uint8_t)((mo + 0x41) & 0xFF)};
-                servos.can.sendMsgBuf(mo, 0, 2, buf);
-                delay(20);
-            }
-        }
-        // 等馬達重啟（~1.5s）
-        delay(1500);
-        servos.flushReceiveBuffer();
-
-        // Phase A3: listen 2s — 確認 silent + dump 前 5 個 full frame
-        {
-            uint32_t lstart = millis();
-            int total = 0;
-            char dumpBuf[600] = {0};
-            int dn = 0;
-            while (millis() - lstart < 2000) {
-                if (servos.can.checkReceive() == CAN_MSGAVAIL) {
-                    unsigned long id; uint8_t len; uint8_t buf[8];
-                    servos.can.readMsgBuf(&id, &len, buf);
-                    total++;
-                    if (total <= 5 && dn < 500) {
-                        dn += snprintf(dumpBuf+dn, 600-dn, "%sid=%lu len=%u [", dn?" | ":"", id, len);
-                        for (int j = 0; j < len; j++)
-                            dn += snprintf(dumpBuf+dn, 600-dn, "%s%02X", j?" ":"", buf[j]);
-                        dn += snprintf(dumpBuf+dn, 600-dn, "]");
-                    }
-                }
-            }
-            Out.printf("{\"xdiag\":\"listen_after\",\"total\":%d,\"first5\":\"%s\"}\n", total, dumpBuf);
-        }
-
-        // Phase B: per-motor 200 次，分類失敗 + 量 reply latency
-        // 開啟硬體 ID filter：每顆查詢前設成只接受該 ID 的 frame
-        const int N = 200;
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            bool filterOk = servos.can.setHardwareFilterToId(MOTOR_ADDR[i]);
-            Out.printf("{\"xdiag\":\"hw_filter\",\"m\":%d,\"ok\":%d}\n", i+1, filterOk?1:0);
-            servos.flushReceiveBuffer();
-            int ok = 0, noFrame = 0, wrongMotor = 0, wrongCmd = 0, crcFail = 0;
-            uint32_t latSum = 0, latMin = 0xFFFFFFFF, latMax = 0;
-            // latency histogram buckets (us): <500, 500-1k, 1k-2k, 2k-5k, 5k-10k, >10k
-            int bucket[6] = {0};
-
-            for (int k = 0; k < N; k++) {
-                uint8_t txCmd[2] = {0x35, (uint8_t)((MOTOR_ADDR[i] + 0x35) & 0xFF)};
-                if (servos.can.sendMsgBuf(MOTOR_ADDR[i], 0, 2, txCmd) != CAN_OK) {
-                    noFrame++;
-                    continue;
-                }
-                uint32_t t0 = micros();
-                bool got = false;
-                bool sawAnyFrame = false;
-                int localWrongMotor = 0, localWrongCmd = 0, localCrc = 0;
-
-                while ((micros() - t0) < 20000) {  // 20ms timeout
-                    if (servos.can.checkReceive() == CAN_MSGAVAIL) {
-                        sawAnyFrame = true;
-                        unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
-                        servos.can.readMsgBuf(&rxId, &rxLen, rxBuf);
-                        if ((rxId & 0x7FF) != MOTOR_ADDR[i]) { localWrongMotor++; continue; }
-                        if (rxBuf[0] != 0x35)               { localWrongCmd++;   continue; }
-                        if (rxLen < 8)                       { localCrc++;        continue; }
-                        uint8_t crc = MOTOR_ADDR[i];
-                        for (int j = 0; j < 7; j++) crc += rxBuf[j];
-                        if ((crc & 0xFF) != rxBuf[7])       { localCrc++;        continue; }
-                        // success
-                        uint32_t lat = micros() - t0;
-                        ok++;
-                        latSum += lat;
-                        if (lat < latMin) latMin = lat;
-                        if (lat > latMax) latMax = lat;
-                        if      (lat < 500)   bucket[0]++;
-                        else if (lat < 1000)  bucket[1]++;
-                        else if (lat < 2000)  bucket[2]++;
-                        else if (lat < 5000)  bucket[3]++;
-                        else if (lat < 10000) bucket[4]++;
-                        else                  bucket[5]++;
-                        got = true;
-                        break;
-                    }
-                }
-                if (!got) {
-                    if (!sawAnyFrame) noFrame++;
-                    else {
-                        // 把這次 query 的所有 misfit 各自加總一次（簡化：只取最後一個分類就好）
-                        if (localWrongMotor) wrongMotor++;
-                        else if (localWrongCmd) wrongCmd++;
-                        else if (localCrc) crcFail++;
-                        else noFrame++;
-                    }
-                }
-            }
-            uint32_t avg = ok ? (latSum / ok) : 0;
-            Out.printf("{\"xdiag\":\"m%d\",\"ok\":%d,\"nf\":%d,\"wm\":%d,\"wc\":%d,\"cf\":%d,"
-                          "\"latUs\":[%lu,%lu,%lu],\"hist\":[%d,%d,%d,%d,%d,%d]}\n",
-                          i+1, ok, noFrame, wrongMotor, wrongCmd, crcFail,
-                          (unsigned long)(latMin==0xFFFFFFFF?0:latMin), (unsigned long)avg, (unsigned long)latMax,
-                          bucket[0],bucket[1],bucket[2],bucket[3],bucket[4],bucket[5]);
-        }
-        // 還原「accept all」filter，避免後續正常運作受影響
-        servos.can.setHardwareFilterAcceptAll();
-        Out.println("{\"xdiag\":\"done\"}");
-        posEnabled = savedPos;
-        holdMode = savedHold;
-        posEnabled = savedPos;
-        holdMode = savedHold;
     }
 }
 
@@ -860,6 +682,11 @@ void loop() {
     uint32_t elapsed = (nowUs - lastReadUs) / 1000;  // ms
     lastReadUs = nowUs;
     ctrlCycles++;
+
+    // 真實取樣間隔（秒），餵控制器的時間導數/平滑項。clamp 到標稱的 [0.5×, 3×]：
+    // 過短 → vel=noise/dt 把 D 項炸成高頻放大器；stall 後一個巨大 Δ 配正常 dt 會 spike。
+    float nominalDt = loopPeriodUs / 1e6f;
+    float dt = fmaxf(0.5f * nominalDt, fminf(3.0f * nominalDt, (float)elapsed / 1000.0f));
 
     int64_t raw[NUM_MOTORS];
     int ok = 0;
@@ -917,7 +744,7 @@ void loop() {
             controlOk = true;
         } else if (controlMode == 1) {
             // ===== Task-space PD =====
-            controlOk = tsController.update(enc.angles, targetPose, motorTargets);
+            controlOk = tsController.update(enc.angles, targetPose, motorTargets, dt);
 
             // FK 連續失敗 5 次 → 自動降回 joint-space
             if (tsController.fkFailCount >= 5) {
@@ -932,8 +759,10 @@ void loop() {
 
         if (!holdMode && controlMode == 0) {
             // ===== Joint-space 備用 =====
-            constexpr float FIXED_DT = 0.02f;
-            smoothPose(smoothedTarget, targetPose, FIXED_DT);
+            // 平滑時間常數用真實 dt（改 L 時 smoothing 速率才正確）；
+            // 注意：下方自適應追蹤的 vel 是 per-cycle Δ（不除 dt）為刻意設計，
+            // 該公式本質與迴圈率耦合，未在此正規化（見 audit Gate A confound 說明）。
+            smoothPose(smoothedTarget, targetPose, dt);
 
             IKResult target = inverse_kinematics(smoothedTarget);
             if (!target.valid) {
