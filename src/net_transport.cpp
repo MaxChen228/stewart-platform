@@ -1,8 +1,80 @@
 #include "net_transport.h"
 #include <WiFi.h>
 #include <Preferences.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 NetCfg netCfg;
+
+// ===== TCP 傳輸基礎設施（P2）=====
+static const uint16_t TCP_PORT = 3333;
+
+// 固定大小 by-value 項：避免 heap 碎片，drop 時無 double-free 風險。
+struct OutLine { char s[640]; };
+
+static QueueHandle_t qOut = nullptr;   // loop(core1) → netTask(core0)，遙測，len=32 (~1s@33Hz)
+
+// ----- DualPrint：唯一 writer = core1（loop/setup），免 mutex -----
+DualPrint Out;
+
+void DualPrint::flushLine() {
+    if (!qOut) { n = 0; return; }      // netInit 前（setup 早期）只走 Serial，不入隊
+    OutLine ol;
+    size_t m = (n < sizeof(ol.s)) ? n : sizeof(ol.s) - 1;
+    memcpy(ol.s, line, m);
+    ol.s[m] = '\0';
+    n = 0;
+    if (xQueueSend(qOut, &ol, 0) == errQUEUE_FULL) {   // drop-oldest（僅 producer/core1 做此 dance）
+        OutLine drop;
+        xQueueReceive(qOut, &drop, 0);
+        xQueueSend(qOut, &ol, 0);
+    }
+}
+
+size_t DualPrint::write(uint8_t c) {
+    Serial.write(c);                   // (a) 永遠寫 USB（此處保留 Serial，是真實 sink）
+    if (n < sizeof(line) - 1) line[n++] = c;   // (b) 累積行緩衝
+    if (c == '\n') flushLine();
+    return 1;
+}
+
+size_t DualPrint::write(const uint8_t* buf, size_t len) {
+    for (size_t i = 0; i < len; i++) write(buf[i]);   // 逐 byte；33Hz×400B 無效能顧慮
+    return len;
+}
+
+// ----- netTask（core0）：WiFi 連上後開 TCP server，排空遙測 queue 寫 socket -----
+// P2 僅出站（遙測）；入站指令於 P3 加入。馬達/SPI 全留 core1，netTask 絕不碰。
+static void netTask(void* arg) {
+    WiFiServer server(TCP_PORT);
+    WiFiClient client;
+    bool started = false;
+    for (;;) {
+        if (WiFi.status() != WL_CONNECTED) {
+            started = false;
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (!started) { server.begin(); server.setNoDelay(true); started = true; }
+
+        if (!client || !client.connected()) {
+            WiFiClient c = server.available();
+            if (c) { client = c; client.setNoDelay(true); }
+        }
+
+        OutLine ol;
+        while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {     // 無 client 也排空（丟棄）→ queue 不堆積
+            if (client && client.connected()) client.print(ol.s);   // ol.s 已含 '\n'
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));   // 讓出 CPU
+    }
+}
+
+void netInit() {
+    qOut = xQueueCreate(32, sizeof(OutLine));
+    xTaskCreatePinnedToCore(netTask, "netTask", 8192, nullptr, 1, nullptr, 0);  // core0、低優先不搶控制環
+}
 
 void NetCfg::load() {
     Preferences prefs;
@@ -41,18 +113,20 @@ void netBoot() {
     netCfg.load();
     if (!netCfg.enabled) return;
     bool ok = netWifiBegin();
-    Serial.printf("{\"status\":\"wifi boot\",\"connected\":%d,\"ip\":\"%s\"}\n",
+    Out.printf("{\"status\":\"wifi boot\",\"connected\":%d,\"ip\":\"%s\"}\n",
                   ok ? 1 : 0, WiFi.localIP().toString().c_str());
 }
 
-// WIFI? 狀態回報（不回 pass 明文）
+// WIFI? 狀態回報（不回 pass 明文）。heap 欄供 P2 記憶體預算驗證——
+// 放這裡而非遙測主幀，以保遙測 byte-parity（前端解析依賴主幀格式不變）。
 static void netReportStatus() {
-    Serial.printf("{\"wifi\":{\"enabled\":%d,\"connected\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d}}\n",
+    Out.printf("{\"wifi\":{\"enabled\":%d,\"connected\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"heap\":%u}}\n",
                   netCfg.enabled ? 1 : 0,
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   netCfg.ssid.c_str(),
                   WiFi.localIP().toString().c_str(),
-                  (int)WiFi.RSSI());
+                  (int)WiFi.RSSI(),
+                  (unsigned)ESP.getFreeHeap());
 }
 
 bool netHandleCommand(const String& cmd) {
@@ -64,7 +138,7 @@ bool netHandleCommand(const String& cmd) {
         netCfg.enabled = true;
         netCfg.save();
         bool ok = netWifiBegin();
-        Serial.printf("{\"status\":\"wifi on\",\"connected\":%d,\"ip\":\"%s\"}\n",
+        Out.printf("{\"status\":\"wifi on\",\"connected\":%d,\"ip\":\"%s\"}\n",
                       ok ? 1 : 0, WiFi.localIP().toString().c_str());
         return true;
     }
@@ -72,7 +146,7 @@ bool netHandleCommand(const String& cmd) {
         netCfg.enabled = false;
         netCfg.save();
         netWifiStop();
-        Serial.println("{\"status\":\"wifi off\"}");
+        Out.println("{\"status\":\"wifi off\"}");
         return true;
     }
     if (cmd.startsWith("WIFI ")) {
@@ -81,13 +155,13 @@ bool netHandleCommand(const String& cmd) {
         rest.trim();
         int sp = rest.indexOf(' ');
         if (sp < 0) {
-            Serial.println("{\"error\":\"usage: WIFI <ssid> <pass>\"}");
+            Out.println("{\"error\":\"usage: WIFI <ssid> <pass>\"}");
             return true;
         }
         netCfg.ssid = rest.substring(0, sp);
         netCfg.pass = rest.substring(sp + 1);
         netCfg.save();
-        Serial.printf("{\"status\":\"wifi creds saved\",\"ssid\":\"%s\"}\n", netCfg.ssid.c_str());
+        Out.printf("{\"status\":\"wifi creds saved\",\"ssid\":\"%s\"}\n", netCfg.ssid.c_str());
         return true;
     }
     return false;

@@ -152,7 +152,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `T0`~`T5` | 單馬達方向測試（以 3 RPM 轉 0.5 秒，回報角度變化） |
 | `WIFI ssid pass` | 設定 WiFi 憑證存 NVS（namespace netcfg；naive space-split，不支援含空格） |
 | `WIFION` / `WIFIOFF` | 啟用／停用 WiFi 並存 NVS；WIFION 即時連線回報 IP |
-| `WIFI?` | 查 WiFi 狀態（enabled/connected/ssid/ip/rssi，不回 pass 明文） |
+| `WIFI?` | 查 WiFi 狀態（enabled/connected/ssid/ip/rssi/heap，不回 pass 明文） |
 
 ## 位置控制 — 現狀
 

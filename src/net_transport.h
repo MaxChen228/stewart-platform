@@ -19,6 +19,27 @@ struct NetCfg {
 
 extern NetCfg netCfg;
 
+// ===== DualPrint：輸出 fan-out（P2）=====
+// 繼承 Arduino Print，所有 print/printf/println/write 都 funnel 經 write()：
+//   (a) 永遠寫 USB Serial（debug/upload/failover 主路徑不丟）
+//   (b) 累積行緩衝，遇 '\n' 把整行推進 outbound 遙測 queue（滿則丟最舊）
+// 並發不變量：Out 只被 core1（loop/setup）寫 → 行緩衝單執行緒、免 mutex。
+// netTask（core0）只「讀」queue，絕不呼叫 Out.*。唯一跨核是 SMP-safe 的 xQueue。
+// 限制：單行 >640B（僅 X-diag）尾端會被截斷；UI 關鍵行（遙測幀/ack）遠小於此。
+class DualPrint : public Print {
+    char   line[640];
+    size_t n = 0;
+    void flushLine();
+public:
+    size_t write(uint8_t c) override;
+    size_t write(const uint8_t* buf, size_t len) override;
+};
+
+extern DualPrint Out;
+
+// 建立 outbound queue 並啟動 core0 的 netTask（TCP server）。setup() 末呼叫。
+void netInit();
+
 // WiFi STA bring-up：mode(STA) + setSleep(false)（關 modem sleep 避免 +100ms 延遲）
 // + WiFi.begin。非阻塞啟動後做有界等待，回傳是否在 waitMs 內連上。
 // ssid 為空則直接回 false（不啟動）。
