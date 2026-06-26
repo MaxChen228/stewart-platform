@@ -48,7 +48,15 @@ class ScopeCore {
   _emit(evt, ...a) { (this.handlers[evt] || []).forEach(f => { try { f(...a); } catch (e) { console.error(e); } }); }
   _el(id) { return id ? document.getElementById(id) : null; }
 
-  start() { this._initUI(); this._connectWS(); requestAnimationFrame(() => this._render()); }
+  // opts.connect===false → 不開自有 WS（由宿主餵 ingest()，單一傳輸源；融合主控頁用）
+  start(opts = {}) { this._initUI(); if (opts.connect !== false) this._connectWS(); requestAnimationFrame(() => this._render()); }
+
+  // 單一分派：自有 WS 與外部宿主都走這裡（DRY）。telemetry / cmd echo / status 三類。
+  ingest(d) {
+    if (Array.isArray(d.a)) { if (!this.paused) this._onData(d); this.last = d; this._emit('telemetry', d); }
+    else if (d.evt === 'cmd') { this.markEvent('→ ' + d.c, 'cmd'); this._emit('cmd', d); }   // 對等 echo
+    else this._emit('status', d);
+  }
 
   // ===== WebSocket =====
   _connectWS() {
@@ -56,12 +64,7 @@ class ScopeCore {
     this.ws.onopen = () => { const s = this._el(this.ui.status); if (s) s.classList.add('connected'); this._emit('open'); };
     this.ws.onclose = () => { const s = this._el(this.ui.status); if (s) s.classList.remove('connected'); this._emit('close'); setTimeout(() => this._connectWS(), 2000); };
     this.ws.onerror = () => this.ws.close();
-    this.ws.onmessage = (ev) => {
-      let d; try { d = JSON.parse(ev.data); } catch { return; }
-      if (Array.isArray(d.a)) { if (!this.paused) this._onData(d); this.last = d; this._emit('telemetry', d); }
-      else if (d.evt === 'cmd') { this.markEvent('→ ' + d.c, 'cmd'); this._emit('cmd', d); }   // 對等 echo
-      else this._emit('status', d);
-    };
+    this.ws.onmessage = (ev) => { let d; try { d = JSON.parse(ev.data); } catch { return; } this.ingest(d); };
   }
 
   _onData(d) {
@@ -348,6 +351,7 @@ class ScopeCore {
     // 鍵盤
     document.addEventListener('keydown', (e) => {
       if (ci && e.target === ci) return;
+      if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;   // 別在宿主表單欄位裡攔截空白/方向/數字鍵
       if (e.key === ' ' && bp) { e.preventDefault(); bp.click(); }
       if (e.key >= '1' && e.key <= '6') this.selectedMotor = parseInt(e.key) - 1;
       if (!this.paused) return;

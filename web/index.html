@@ -24,7 +24,8 @@
   --font-sans: 'Noto Sans TC', sans-serif;
 
   --nav-height: 52px;
-  --sidebar-width: 440px;
+  --sidebar-width: 400px;
+  --rail-width: 320px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -101,11 +102,11 @@ body {
 .btn-ok      { background: var(--contra) !important; color: #fff !important; border-color: var(--contra) !important; transition: background 0.2s; }
 .btn-fail    { background: var(--dev) !important; color: #fff !important; border-color: var(--dev) !important; transition: background 0.2s; }
 
-/* ===== Content ===== */
+/* ===== Content（三區：左操作 / 中3D+波形 / 右觀測）===== */
 .content {
   flex: 1;
-  display: flex;
-  flex-direction: row;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr var(--rail-width);
   min-height: 0;
 }
 
@@ -285,6 +286,50 @@ canvas {
   text-shadow: none;
   box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
+
+/* ===== 中區：3D（上）+ 波形示波器帶（下）===== */
+.center-zone { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.center-zone .canvas-zone { flex: 1.3 1 0; min-height: 0; }
+
+/* 波形帶＝嵌入式深色儀器螢幕（scope-core 用硬編碼深色調，故此區獨立暗色） */
+.scope-zone { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; background: #0b0b0c; border-top: 1px solid var(--borderBase); }
+.scope-bar { display: flex; align-items: center; gap: 10px; padding: 5px 10px; background: #151517; border-bottom: 1px solid #232325; flex: none; flex-wrap: wrap; font-family: var(--font-mono); }
+.scope-bar .ttl { font-size: 10px; letter-spacing: 0.1em; color: #888; font-weight: 700; }
+.scope-bar button { background: #222; color: #bbb; border: 1px solid #3a3a3c; border-radius: 3px; padding: 2px 8px; cursor: pointer; font: inherit; font-size: 11px; }
+.scope-bar button.active { background: #2a4a2a; border-color: #4a7a4a; color: #9f9; }
+.scope-bar .spacer { flex: 1; }
+.scope-bar .dim { color: #666; font-size: 10px; }
+#scope-legend { display: flex; gap: 8px; }
+.leg-item { display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; color: #aaa; }
+.leg-item.hidden { opacity: 0.32; }
+.leg-dot { width: 9px; height: 9px; border-radius: 2px; }
+#charts { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.chart-row { display: flex; flex: 1; min-height: 0; }
+.chart-wrap { flex: 1; position: relative; min-width: 0; min-height: 0; border-bottom: 1px solid #1c1c1c; }
+.chart-wrap.phase { flex: 0 0 200px; border-left: 1px solid #1c1c1c; }
+.chart-label { position: absolute; top: 3px; left: 6px; z-index: 1; font-size: 9px; color: #666; pointer-events: none; font-family: var(--font-mono); }
+.chart-label .val { color: #9a9a9a; }
+canvas.trace { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; }
+body.paused .chart-wrap:not(.phase) canvas { cursor: grab; }
+
+/* ===== 右區：觀測欄（淺色面板，FFT canvas 深色 inset）===== */
+.obs-rail { overflow-y: auto; padding: 20px 16px; display: flex; flex-direction: column; gap: 16px; background: var(--surface); border-left: 1px solid var(--borderBase); }
+.h-row { display: flex; gap: 5px; flex-wrap: wrap; }
+.h-cell { flex: 1; min-width: 46px; background: var(--bg); border: 1px solid var(--borderBase); border-radius: 3px; padding: 4px 2px; text-align: center; font-family: var(--font-mono); }
+.h-cell .lbl { font-size: 9px; color: var(--sub); letter-spacing: 0.04em; }
+.h-cell .val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.h-cell.good .val { color: var(--contra); }
+.h-cell.warn { border-color: var(--dual); } .h-cell.warn .val { color: var(--dual); }
+.h-cell.bad { border-color: var(--dev); } .h-cell.bad .val { color: var(--dev); }
+.quant { display: flex; gap: 5px; margin-bottom: 8px; }
+.quant .q { flex: 1; background: var(--bg); border: 1px solid var(--borderBase); border-radius: 3px; padding: 4px 2px; text-align: center; font-family: var(--font-mono); }
+.quant .q .lbl { font-size: 8px; color: var(--sub); }
+.quant .q .val { font-size: 14px; font-weight: 700; color: var(--dual); font-variant-numeric: tabular-nums; }
+#fft { width: 100%; height: 110px; display: block; background: #070708; border-radius: 3px; }
+.evlog { max-height: 160px; overflow-y: auto; font-size: 11px; font-family: var(--font-mono); }
+.evlog .e { padding: 2px 3px; border-bottom: 1px solid var(--borderL); color: var(--inkLight); display: flex; gap: 6px; }
+.evlog .e .t { color: var(--sub); opacity: 0.7; flex: none; }
+.evlog .e.cmd { color: var(--contra); } .evlog .e.bad { color: var(--dev); }
 </style>
 </head>
 <body>
@@ -333,29 +378,6 @@ canvas {
       </div>
     </div>
 
-    <!-- 2. LIVE TELEMETRY -->
-    <div class="ui-card">
-      <div class="ui-card-title">Live</div>
-      <div class="dev-label" style="margin-bottom:6px">Joint Error (actual − target, °)</div>
-      <div id="hold-error" class="matrix-grid cols-6" style="margin-bottom:12px">
-        <div class="matrix-cell" id="he-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
-      </div>
-      <div class="dev-label" style="margin-bottom:6px">Platform Pose (FK)</div>
-      <div id="pose-display" class="matrix-grid cols-6">
-        <div class="matrix-cell" id="pose-x"><div class="matrix-cell-label">X</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-y"><div class="matrix-cell-label">Y</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-z"><div class="matrix-cell-label">Z</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Rol</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pit</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-w"><div class="matrix-cell-label">Yaw</div><div class="matrix-cell-value">—</div></div>
-      </div>
-    </div>
-
     <!-- 3. TUNING -->
     <div class="ui-card">
       <div class="ui-card-title">Tuning</div>
@@ -397,29 +419,124 @@ canvas {
         <button class="chip danger zbtn" onclick="zeroAllConfirm()" disabled title="⚠ 重設零點校正，需先擺正六顆腿"
           style="margin-left:auto">Re-Zero…</button>
       </div>
-      <div id="can-health" class="inset-panel" style="font-size:11px;font-family:var(--font-mono)">
-        <div style="color:var(--sub);margin-bottom:4px">CAN</div>
-        <div id="can-now" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;line-height:1.4">
-          <span>M1<br>—</span><span>M2<br>—</span><span>M3<br>—</span>
-          <span>M4<br>—</span><span>M5<br>—</span><span>M6<br>—</span>
-        </div>
-        <div id="can-stats" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;color:var(--sub);font-size:10px;margin-top:2px">
-          <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
-        </div>
-      </div>
       <div id="fk-debug" class="inset-panel" style="margin-top:6px;font-size:11px;font-family:var(--font-mono)">FK —</div>
       <div id="cal-display" class="inset-panel" style="margin-top:6px;font-size:11px;font-family:var(--font-mono);color:var(--sub)">Cal (pending)</div>
     </div>
 
   </aside>
 
-  <!-- Canvas -->
-  <div class="canvas-zone" id="canvas-zone"></div>
+  <!-- 中區：3D 視覺 + 波形示波器帶 -->
+  <div class="center-zone">
+    <div class="canvas-zone" id="canvas-zone"></div>
+    <div class="scope-zone">
+      <div class="scope-bar">
+        <span class="ttl">SCOPE</span>
+        <div style="display:flex;gap:3px">
+          <button data-tw="100">2s</button><button data-tw="250" class="active">5s</button><button data-tw="500">10s</button><button data-tw="1500">30s</button>
+        </div>
+        <div id="scope-legend"></div>
+        <span class="spacer"></span>
+        <span id="scope-viewpos" class="dim"></span>
+        <button id="scope-pause">⏸ Pause</button>
+        <button id="scope-csv">CSV</button>
+        <span id="scope-stats" class="dim"></span>
+      </div>
+      <div id="charts">
+        <div class="chart-row" style="flex:2">
+          <div class="chart-wrap">
+            <div class="chart-label">Angles / hold (°) <span class="val" id="lbl-angles"></span></div>
+            <canvas class="trace" id="c-angles"></canvas>
+          </div>
+          <div class="chart-wrap phase">
+            <div class="chart-label">Phase 極限環 <span class="val" id="lbl-phase"></span></div>
+            <canvas class="trace" id="c-phase"></canvas>
+          </div>
+        </div>
+        <div class="chart-row" style="flex:1.4">
+          <div class="chart-wrap">
+            <div class="chart-label">Hold error · hold−act (°) <span class="val" id="lbl-errors"></span></div>
+            <canvas class="trace" id="c-errors"></canvas>
+          </div>
+        </div>
+        <div class="chart-row" style="flex:1">
+          <div class="chart-wrap">
+            <div class="chart-label">Kinetic 運動能量 <span class="val" id="lbl-gain"></span></div>
+            <canvas class="trace" id="c-gain"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右區：觀測（CAN/迴圈健康 + Live + FFT/σ + 錄製 + 日誌）-->
+  <aside class="obs-rail">
+    <div class="ui-card">
+      <div class="ui-card-title">CAN / 迴圈健康</div>
+      <div class="h-row" id="bus-health" style="margin-bottom:8px"></div>
+      <div class="dev-label" style="margin-bottom:4px">Per-motor 回覆 / 失敗</div>
+      <div id="can-now" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;line-height:1.4;font-family:var(--font-mono);font-size:11px">
+        <span>M1<br>—</span><span>M2<br>—</span><span>M3<br>—</span>
+        <span>M4<br>—</span><span>M5<br>—</span><span>M6<br>—</span>
+      </div>
+      <div id="can-stats" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;color:var(--sub);font-size:10px;margin-top:2px;font-family:var(--font-mono)">
+        <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
+      </div>
+    </div>
+
+    <div class="ui-card">
+      <div class="ui-card-title">Live</div>
+      <div class="dev-label" style="margin-bottom:6px">Hold error (act − hold, °)</div>
+      <div id="hold-error" class="matrix-grid cols-6" style="margin-bottom:12px">
+        <div class="matrix-cell" id="he-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
+      </div>
+      <div class="dev-label" style="margin-bottom:6px">Platform Pose (FK)</div>
+      <div id="pose-display" class="matrix-grid cols-6">
+        <div class="matrix-cell" id="pose-x"><div class="matrix-cell-label">X</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-y"><div class="matrix-cell-label">Y</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-z"><div class="matrix-cell-label">Z</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Rol</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pit</div><div class="matrix-cell-value">—</div></div>
+        <div class="matrix-cell" id="pose-w"><div class="matrix-cell-label">Yaw</div><div class="matrix-cell-value">—</div></div>
+      </div>
+    </div>
+
+    <div class="ui-card">
+      <div class="ui-card-title">分析軸 <span id="sel-name" style="color:var(--dual)">M1</span> · FFT / σ</div>
+      <div class="quant">
+        <div class="q"><div class="lbl">峰峰°</div><div class="val" id="q-pp">—</div></div>
+        <div class="q"><div class="lbl">主頻Hz</div><div class="val" id="q-f">—</div></div>
+        <div class="q"><div class="lbl">RMS°</div><div class="val" id="q-rms">—</div></div>
+        <div class="q"><div class="lbl">σ/s</div><div class="val" id="q-sig">—</div></div>
+      </div>
+      <canvas id="fft" style="height:110px"></canvas>
+      <div class="dev-label" style="margin-top:5px">雙擊波形圖例選分析軸；σ&gt;0 衰減、≈0 自持。</div>
+    </div>
+
+    <div class="ui-card">
+      <div class="ui-card-title">錄製 <span id="rec-stat" class="dev-label" style="display:inline"></span></div>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center">
+        <input type="text" id="rec-name" value="run" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 5px;border:1px solid var(--borderBase);border-radius:2px">
+        <button class="chip" id="rec-go" onclick="recToggle()" style="padding:4px 12px;font-weight:600">● REC</button>
+      </div>
+    </div>
+
+    <div class="ui-card">
+      <div class="ui-card-title">事件日誌</div>
+      <div class="evlog" id="evlog"></div>
+    </div>
+  </aside>
 </div>
 
 <!-- 共用幾何/擾動數學（與 Node sysid 工具同一份，SoT）：非 module 先載 → window.Kin / window.DisturbModes -->
 <script src="/sysid/kin.js"></script>
 <script src="/sysid/disturb_modes.js"></script>
+<!-- 監控引擎（單一真相源，與 research/monitor 共用）：非 module 先載 → window.ScopeCore -->
+<script src="/shared/scope-core.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -884,12 +1001,16 @@ function animate() {
 }
 animate();
 
-window.addEventListener('resize', () => {
-  camera.aspect = canvasZone.clientWidth/canvasZone.clientHeight;
+// ResizeObserver 監看 canvas-zone 本身（非 window）：三區佈局/波形帶高度變動也能重配 3D 視口
+function fitCanvas() {
+  const w = canvasZone.clientWidth, h = canvasZone.clientHeight;
+  if (w === 0 || h === 0) return;
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
-  labelRenderer.setSize(canvasZone.clientWidth, canvasZone.clientHeight);
-});
+  renderer.setSize(w, h);
+  labelRenderer.setSize(w, h);
+}
+new ResizeObserver(fitCanvas).observe(canvasZone);
 
 // ===== WebSocket =====
 let ws = null;
@@ -907,6 +1028,11 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
+
+      // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
+      // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
+      if (data.hold && !data.tgt) data.tgt = data.hold;
+      if (window.scope) scope.ingest(data);
 
       // Per-motor 角度 cache：失敗時用上次好值（跨 ESP32 reboot 存活）
       if (data.a && data.r) {
@@ -1179,6 +1305,100 @@ window.connectSerial = connectWS;
     }
   } catch(e) {}
 })();
+
+// ===== 監控引擎（scope-core，單一傳輸源：宿主 WS → scope.ingest）=====
+const $o = id => document.getElementById(id);
+const HOST = `${location.hostname}:${location.port || 3000}`;
+const scope = new ScopeCore({
+  autostart: false,
+  charts: { angles:'c-angles', anglesLabel:'lbl-angles', phase:'c-phase', phaseLabel:'lbl-phase',
+            errors:'c-errors', errorsLabel:'lbl-errors', gain:'c-gain', gainLabel:'lbl-gain' },
+  ui: { legend:'scope-legend', stats:'scope-stats', viewPos:'scope-viewpos',
+        pauseBtn:'scope-pause', csvBtn:'scope-csv', charts:'charts' },
+});
+scope.start({ connect: false });   // 不開自有 WS，靠宿主 ingest 餵資料
+window.scope = scope;
+
+// 事件日誌（指令標記線由 core 畫，這裡列文字）
+function logEv(msg, kind='') {
+  const el = $o('evlog'); if (!el) return;
+  const line = document.createElement('div');
+  line.className = 'e ' + kind;
+  line.innerHTML = `<span class="t">${new Date().toLocaleTimeString('en',{hour12:false})}</span><span>${msg}</span>`;
+  el.prepend(line); while (el.children.length > 60) el.removeChild(el.lastChild);
+}
+scope.on('cmd', d => logEv('→ ' + d.c, 'cmd'));
+scope.on('status', d => { if (d.status||d.tune||d.error) logEv(JSON.stringify(d).slice(0,72), d.error?'bad':''); });
+
+// CAN / 迴圈匯流排健康（聚合）
+const BUS = [
+  ['ok', d=>`${d.ok??0}/6`, d=>d.ok===6?'good':(d.ok>=4?'warn':'bad')],
+  ['TEC', d=>d.tx??'—', d=>(d.tx??0)>200?'bad':((d.tx??0)>96?'warn':'good')],
+  ['REC', d=>d.rx??'—', d=>(d.rx??0)>96?'warn':'good'],
+  ['EFLG', d=>d.ef??'—', d=>(d.ef??0)?'warn':'good'],
+  ['迴圈Hz', d=>d.lhz??'—', d=>(d.lhz??0)<40?'warn':'good'],
+  ['讀µs', d=>d.cus??'—', ()=>''],
+];
+let lastBad=0;
+scope.on('telemetry', d => {
+  const el = $o('bus-health'); if (el) el.innerHTML = BUS.map(([l,v,c]) =>
+    `<div class="h-cell ${c?c(d):''}"><div class="lbl">${l}</div><div class="val">${v(d)}</div></div>`).join('');
+  if ((d.ok??6)<6 || (d.tx??0)>96) { const n=performance.now(); if (n-lastBad>800) {
+    scope.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
+});
+
+// FFT + σ（選定軸，herr 優先 fallback a）
+let fsEst=60, lastT=0;
+scope.on('telemetry', ()=>{ const n=performance.now(); if(lastT) fsEst=0.9*fsEst+0.1*(1000/Math.max(1,n-lastT)); lastT=n; });
+function selSeries(){ const i=scope.selectedMotor, h=scope.buf.herr[i]; return h.some(v=>v!=null) ? h : scope.buf.a[i]; }
+function computeFFT(){
+  const src=selSeries(), M=Math.min(512, src.length);
+  if(M<32) return {pp:0,rms:0,f:0,spec:[]};
+  const x=[]; let mean=0; for(let k=src.length-M;k<src.length;k++){ const v=src[k]??0; x.push(v); mean+=v; } mean/=M;
+  let hi=-1e9,lo=1e9,ss=0; for(const v of x){ if(v>hi)hi=v; if(v<lo)lo=v; ss+=(v-mean)**2; }
+  const rms=Math.sqrt(ss/M), fs=fsEst, fmax=Math.min(8,fs/2), nb=80, spec=[]; let peak=0,pf=0;
+  const w=k=>0.5-0.5*Math.cos(2*Math.PI*k/(M-1));
+  for(let b=1;b<=nb;b++){ const f=fmax*b/nb, om=2*Math.PI*f/fs; let re=0,im=0;
+    for(let k=0;k<M;k++){ const s=(x[k]-mean)*w(k); re+=s*Math.cos(om*k); im-=s*Math.sin(om*k); }
+    const mag=Math.sqrt(re*re+im*im)/M*2; spec.push({f,mag}); if(mag>peak){peak=mag;pf=f;} }
+  return {pp:hi-lo,rms,f:pf,spec};
+}
+function estSigma(){
+  const src=selSeries(), ts=scope.buf.ts, now=performance.now(), span=6000, pts=[];
+  for(let k=0;k<src.length;k++){ if(ts[k]!=null && now-ts[k]<=span && src[k]!=null) pts.push([ts[k],src[k]]); }
+  if(pts.length<30) return NaN;
+  const m=pts.reduce((a,b)=>a+b[1],0)/pts.length, amp=[];
+  for(let j=1;j<pts.length-1;j++){ const a0=Math.abs(pts[j-1][1]-m),a1=Math.abs(pts[j][1]-m),a2=Math.abs(pts[j+1][1]-m); if(a1>=a0&&a1>=a2&&a1>0.4) amp.push([(pts[j][0]-pts[0][0])/1000,a1]); }
+  if(amp.length<4) return NaN;
+  const xs=amp.map(p=>p[0]),ys=amp.map(p=>Math.log(p[1])),n=xs.length,sx=xs.reduce((a,b)=>a+b),sy=ys.reduce((a,b)=>a+b);
+  const sxx=xs.reduce((a,b)=>a+b*b,0),sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
+  return -((n*sxy-sx*sy)/(n*sxx-sx*sx+1e-9));
+}
+const fft=$o('fft'), fctx=fft.getContext('2d');
+scope.on('render', ()=>{
+  $o('sel-name').textContent = scope.NAMES[scope.selectedMotor];
+  const r=computeFFT(), sig=estSigma();
+  $o('q-pp').textContent=r.pp?r.pp.toFixed(1):'—'; $o('q-f').textContent=r.f?r.f.toFixed(2):'—';
+  $o('q-rms').textContent=r.rms?r.rms.toFixed(2):'—'; $o('q-sig').textContent=isFinite(sig)?sig.toFixed(2):'—';
+  const dpr=devicePixelRatio||1, W=fft.width=fft.clientWidth*dpr, H=fft.height=110*dpr;
+  fctx.clearRect(0,0,W,H); if(!r.spec.length) return;
+  const maxM=Math.max(0.05,...r.spec.map(s=>s.mag)), bw=W/r.spec.length;
+  fctx.fillStyle=scope.COLORS[scope.selectedMotor];
+  r.spec.forEach((s,i)=>{ const h=s.mag/maxM*(H-16*dpr); fctx.fillRect(i*bw,H-h,bw*0.85,h); });
+  fctx.fillStyle='#666'; fctx.font=`${10*dpr}px monospace`;
+  const fend=r.spec[r.spec.length-1].f;
+  for(let hz=0;hz<=fend;hz+=2){ const px=hz/fend*W; fctx.fillText(hz+'Hz',px+2*dpr,H-3*dpr); }
+  if(r.f){ fctx.fillStyle=scope.COLORS[scope.selectedMotor]; fctx.fillText('peak '+r.f.toFixed(2),W-72*dpr,12*dpr); }
+});
+
+// 錄製（server-side JSONL）
+let recording=false;
+window.recToggle = async function(){
+  const rest=p=>fetch(`http://${HOST}/api/${p}`).then(r=>r.json()).catch(()=>({}));
+  if(!recording){ const r=await rest(`rec/start?name=${encodeURIComponent($o('rec-name').value||'run')}`); recording=true;
+    $o('rec-go').textContent='■ STOP'; $o('rec-stat').textContent=(r.path||'').split('/').pop()||''; logEv('● 錄製開始','cmd'); }
+  else { const r=await rest('rec/stop'); recording=false; $o('rec-go').textContent='● REC'; $o('rec-stat').textContent=''; logEv(`■ 停止 ${r.lines??''}行`,'cmd'); }
+};
 
 connectWS();
 </script>
