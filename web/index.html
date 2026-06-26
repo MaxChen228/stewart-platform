@@ -269,6 +269,16 @@ body {
   color: var(--sub);
 }
 
+/* 緊湊時間窗選擇器（per-motor 健康平均窗）*/
+.winsel { display: flex; gap: 2px; }
+.winsel button {
+  background: transparent; border: 1px solid var(--borderBase); border-radius: 3px;
+  padding: 0 5px; font: inherit; font-family: var(--font-mono); font-size: 9px;
+  color: var(--sub); cursor: pointer; line-height: 16px; letter-spacing: 0;
+}
+.winsel button:hover { border-color: var(--sub); }
+.winsel button.active { background: var(--contra); border-color: transparent; color: #fff; }
+
 /* ===== Canvas Zone ===== */
 .canvas-zone {
   flex: 1;
@@ -522,7 +532,11 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <div class="h-row" id="bus-health" style="margin-bottom:8px"></div>
       <div class="dev-label" style="margin-bottom:3px">趨勢 · ok / 迴圈Hz / 讀µs（紅標=EFLG 或 ok&lt;6）</div>
       <canvas id="can-spark" style="width:100%;height:78px;display:block;background:#070708;border-radius:3px;margin-bottom:8px"></canvas>
-      <div class="dev-label" style="margin-bottom:4px">Per-motor 回覆 / 失敗</div>
+      <div class="dev-label" style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
+        <span>Per-motor 回覆 / 失敗</span>
+        <span class="winsel" id="canwin"></span>
+        <span id="canwin-n" style="margin-left:auto;color:var(--sub);font-size:9px;letter-spacing:0;text-transform:none;font-variant-numeric:tabular-nums"></span>
+      </div>
       <div id="can-now" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;line-height:1.4;font-family:var(--font-mono);font-size:11px">
         <span>M1<br>—</span><span>M2<br>—</span><span>M3<br>—</span>
         <span>M4<br>—</span><span>M5<br>—</span><span>M6<br>—</span>
@@ -902,8 +916,8 @@ function updateGhost() {
   ghostPlatMesh.visible = true;
 }
 
-// ===== 姿態操作（滑桿 → ghost 目標預覽 → G 指令）=====
-// 共用 window.Kin.deltaAngle + window.DisturbModes.MOTOR_SIGN（與 host pose_ctl.js 同一份數學，SoT）
+// ===== 姿態操作（滑桿 → ghost 目標預覽 → 絕對 pose P 指令）=====
+// 送絕對 pose（中位+滑桿偏移），由韌體 IK 解成有效角度→死咬；前端只用 Kin.ik 做可達預檢，不算馬達角度。
 const POSE_AXES = [['ps-x',0],['ps-y',1],['ps-z',2],['ps-r',3],['ps-p',4],['ps-w',5]];
 function poseReadOffset() {
   const o = [0,0,0,0,0,0];
@@ -928,20 +942,21 @@ function poseUpdateGhost() {
 }
 POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', poseUpdateGhost));
 window.poseGo = function() {
-  const o = poseReadOffset();
+  const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
   const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
-  const r = window.Kin.deltaAngle([0,0,NEUTRAL_Z,0,0,0], o);   // ik(中位+offset) − ik(中位)
   const st = document.getElementById('pose-ctl-status');
-  if (!r.valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
-  const denc = r.d.map((v,i) => v * window.DisturbModes.MOTOR_SIGN[i]);   // IK 慣例 → enc 慣例
-  window.sendCmd(`G ${denc.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
+  // 絕對 pose：xy/rpy 中位=0、z 疊中位 NEUTRAL_Z。送韌體 P，由韌體 IK 解→死咬（前端不算角度）。
+  const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  if (!window.Kin.ik(pose).valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
+  window.sendCmd(`P ${pose.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
   st.style.color = 'var(--sub)';
-  st.textContent = `→ Δenc max ${Math.max(...denc.map(Math.abs)).toFixed(1)}°`;
+  st.textContent = `→ 絕對 pose [${pose.map(x=>x.toFixed(1)).join(', ')}] ${ms}ms`;
 };
 window.poseHome = function() {
   POSE_AXES.forEach(([id]) => { document.getElementById(id).value = 0; });
   poseUpdateGhost();
-  window.sendCmd(`G 0 0 0 0 0 0 ${parseInt(document.getElementById('ps-ms').value)||1500}`);
+  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
+  window.sendCmd(`P 0 0 ${NEUTRAL_Z} 0 0 0 ${ms}`);   // 絕對中位
 };
 
 // ===== 更新視覺化 =====
@@ -1212,28 +1227,55 @@ function btnForTune(t) {
 // ===== Per-motor 最後好值 cache（跨 reboot 平滑 3D viz）=====
 const lastGoodAngles = [null, null, null, null, null, null];
 
-// ===== CAN health: per-motor success ring (50-frame window) =====
-const CAN_WINDOW = 50;
-const canHist = [[],[],[],[],[],[]]; // each motor: array of 0/1
+// ===== CAN health: per-motor success ring（時間窗，可調）=====
+// 窗以「時間」而非幀數定義 → WiFi(24Hz)/USB(更高) 速率不同時讀數語意一致。
+const CAN_WIN_OPTS = [2000, 5000, 10000, 30000, 60000];   // ms
+let canWindowMs = (() => { const v = +localStorage.getItem('can.winMs'); return CAN_WIN_OPTS.includes(v) ? v : 5000; })();
+const canTs = [];                          // 與 canHist[i] index 對齊的取樣時刻
+const canHist = [[],[],[],[],[],[]];       // each motor: array of 0/1
+(function buildCanWinSel() {
+  const host = document.getElementById('canwin'); if (!host) return;
+  CAN_WIN_OPTS.forEach(ms => {
+    const b = document.createElement('button');
+    b.textContent = ms >= 1000 ? (ms/1000) + 's' : ms + 'ms';
+    b.dataset.ms = ms;
+    if (ms === canWindowMs) b.classList.add('active');
+    b.onclick = () => {
+      canWindowMs = ms; localStorage.setItem('can.winMs', ms);
+      [...host.children].forEach(c => c.classList.toggle('active', +c.dataset.ms === ms));
+    };
+    host.appendChild(b);
+  });
+})();
 function updateCANHealth(rawArr) {
+  const now = performance.now();
+  canTs.push(now);
+  for (let i = 0; i < 6; i++) canHist[i].push(rawArr[i] < -1e18 ? 0 : 1);  // INT64_MIN=失敗
+  // 依「最大」窗修剪緩衝（避免切大窗時前段資料已被丟），再按當前窗統計
+  const keep = now - CAN_WIN_OPTS[CAN_WIN_OPTS.length - 1];
+  let cut = 0; while (cut < canTs.length && canTs[cut] < keep) cut++;
+  if (cut > 0) { canTs.splice(0, cut); for (let i = 0; i < 6; i++) canHist[i].splice(0, cut); }
+
+  // 當前窗內樣本範圍 [start, end)
+  const cutoff = now - canWindowMs;
+  let start = 0; while (start < canTs.length && canTs[start] < cutoff) start++;
+  const n = canTs.length - start;
+
   const nowCells = document.getElementById('can-now').children;
   const statCells = document.getElementById('can-stats').children;
   for (let i = 0; i < 6; i++) {
-    const ok = !(rawArr[i] < -1e18); // INT64_MIN check
-    canHist[i].push(ok ? 1 : 0);
-    if (canHist[i].length > CAN_WINDOW) canHist[i].shift();
-
-    // current cycle indicator
-    const mark = ok ? '✓' : '✗';
-    const color = ok ? 'var(--contra)' : 'var(--dev)';
-    nowCells[i].innerHTML = `M${i+1}<br><span style="color:${color}">${mark}</span>`;
-
-    // rolling % over window
-    const sum = canHist[i].reduce((a,b)=>a+b, 0);
-    const pct = Math.round(100 * sum / canHist[i].length);
-    const pctColor = pct >= 95 ? 'var(--sub)' : pct >= 80 ? 'var(--contra)' : 'var(--dev)';
+    const ok = canHist[i][canHist[i].length - 1] === 1;
+    nowCells[i].innerHTML = `M${i+1}<br><span style="color:${ok ? 'var(--contra)' : 'var(--dev)'}">${ok ? '✓' : '✗'}</span>`;
+    let sum = 0; for (let j = start; j < canHist[i].length; j++) sum += canHist[i][j];
+    const pct = n ? Math.round(100 * sum / n) : 100;
+    statCells[i].style.color = pct >= 95 ? 'var(--sub)' : pct >= 80 ? 'var(--contra)' : 'var(--dev)';
     statCells[i].textContent = pct + '%';
-    statCells[i].style.color = pctColor;
+  }
+  // 透明度：窗內實際樣本數 + 速率（避免在短窗誤讀雜訊）
+  const meta = document.getElementById('canwin-n');
+  if (meta) {
+    const span = n > 1 ? (canTs[canTs.length - 1] - canTs[start]) / 1000 : 0;
+    meta.textContent = `n=${n} · ${span > 0 ? (n / span).toFixed(0) : '—'}Hz`;
   }
 }
 
