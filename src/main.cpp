@@ -371,11 +371,35 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 mA, okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
         }
     } else if (cmd.startsWith("P ")) {
-        float v[6];
-        if (sscanf(cmd.c_str(), "P %f %f %f %f %f %f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]) == 6) {
+        // 絕對姿態目標 `P x y z r p y [ms]`。前 6 值=絕對 pose（mm/度）。
+        //  - n>=6：一律更新 targetPose（mode0/1 控制器讀它）。
+        //  - HOLD 下：把絕對 pose 用 IK 解成有效馬達角度，重用 holdMoveMs smoothstep 平滑死咬過去。
+        //    用 IK 解（非 holdBase+Δ 增量）保證 6 角度對應真實剛體姿態 → 不 over-constrain 較勁。
+        //    第 7 值 ms = 軌跡時長（缺省 1500）。holdAngles==enc==IK 同為下腿絕對幾何角度，可直接插值。
+        float v[6]; float ms_f = -1;
+        int n = sscanf(cmd.c_str(), "P %f %f %f %f %f %f %f",
+                       &v[0],&v[1],&v[2],&v[3],&v[4],&v[5], &ms_f);
+        if (n >= 6) {
             targetPose = {v[0], v[1], v[2], v[3], v[4], v[5]};
-            Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
-                v[0],v[1],v[2],v[3],v[4],v[5]);
+            if (holdMode) {
+                IKResult ik = inverse_kinematics(targetPose);
+                if (!ik.valid) {
+                    Out.println("{\"error\":\"P pose unreachable (IK invalid)\"}");
+                } else {
+                    uint16_t ms = (n >= 7) ? (uint16_t)constrain((int)ms_f, 1, 10000) : 1500;
+                    for (int i = 0; i < NUM_MOTORS; i++) {
+                        holdStart[i]  = holdAngles[i];     // 從當下死咬目標起步（多段可接續）
+                        holdTarget[i] = ik.angles[i];      // IK 解 = 有效幾何角度
+                    }
+                    holdMoveStart = millis();
+                    holdMoveMs = ms;
+                    Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%u}\n",
+                        v[0],v[1],v[2],v[3],v[4],v[5], ms);
+                }
+            } else {
+                Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
+                    v[0],v[1],v[2],v[3],v[4],v[5]);
+            }
         }
     } else if (cmd.startsWith("CM ")) {
         // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
