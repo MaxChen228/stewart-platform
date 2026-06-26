@@ -147,6 +147,18 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
 | `M mu` | 設定自適應追蹤震動懲罰係數 |
 | `T0`~`T5` | 單馬達方向測試（以 3 RPM 轉 0.5 秒，回報角度變化） |
+| `WIFI ssid pass` | 設定 WiFi 憑證存 NVS（namespace netcfg；naive space-split，不支援含空格） |
+| `WIFION` / `WIFIOFF` | 啟用／停用 WiFi 並存 NVS；WIFION 即時連線回報 IP |
+| `WIFI?` | 查 WiFi 狀態（enabled/connected/ssid/ip/rssi/heap，不回 pass 明文） |
+| `FS 0`/`FS 1` | 斷線失效保護策略（0=HOLD-current 預設保形 / 1=斷電），存 NVS |
+| `HB ms` | 心跳逾時(ms)，0=停用心跳檢查（僅靠 socket-close 偵測），存 NVS |
+
+### WiFi 遠端控制（TCP :3333，與 USB 並存）
+
+- TCP 與 USB 共用同一條 dispatch，指令語意一致、ack 經 DualPrint 鏡像回兩路。
+- **TCP 禁 `Z`/`Z0~Z5`（校正）**：寫 NVS 不可逆、且校正須實體 home 姿態（手邊操作）→ 僅 USB。
+- **失效保護恢復**：HOLD-current 觸發後（凍結當前姿態），TCP 重連送 `P`/`G` 會被 holdMode 吞掉；**需先送 `E`（或 `S`→`E`）重入正常控制**才恢復可驅動。此「需顯式重 arm」是刻意的安全設計，非自動續控。
+- **heartbeat caveat**：`HB ms`>0 時，client 須週期性「上行」（server tcp 模式每秒送 `\n`）；只收不送的 client 會在逾時後誤觸 failsafe，故預設 `HB 0`（僅靠 socket-close/WiFi-down 偵測）。
 
 ## 位置控制 — 現狀
 
