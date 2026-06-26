@@ -1014,8 +1014,10 @@ window.poseHome = function() {
   });
   poseUpdateGhost();   // followActive 時此呼叫會 streamPF(home) → 濾波器 ease 回 home
   if (followActive) return;
+  const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
+  const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
-  window.sendCmd(`P ${homePose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
+  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
 };
 window.poseSetHome = function() {
   // 把當前目標姿態（滑桿值→絕對 pose）設為 Home，存 localStorage 跨 F5 存活。
@@ -1052,7 +1054,7 @@ function updateFollowUI() {
   b.style.color = followActive ? '#fff' : '';
 }
 window.toggleFollow = function() {
-  if (followActive) { followActive = false; window.sendCmd('FOLLOW 0'); updateFollowUI(); }
+  if (followActive) { window.sendCmd('FOLLOW 0'); followReset(); }   // followReset：清串流 + 停實跑動作 + UI
   else { window.sendCmd('FOLLOW 1'); }   // followActive 待韌體 {"status":"follow on"} 回覆才設真
 };
 // 韌體確認進跟隨 → 用回傳的絕對 pose 同步滑桿+ghost（不跳），再啟用串流
@@ -1346,10 +1348,10 @@ function connectWS() {
         const holding = !!(data.pos && data.hold);
         platHolding = holding;          // 動作播放前置條件
         setHoldingUI(holding, data.hmax);
-        // 韌體 followMode（"fl"）為權威：前端以為在跟隨但韌體已退出（failsafe/E/任何路徑）→ 同步歸零，
-        // 避免持續送被靜默丟棄的 PF。涵蓋 enterHoldCurrent 保 posEnabled=true（pos 仍 1）的漏網 case。
-        if (data.fl !== undefined && !data.fl && followActive) followReset();
       }
+      // 韌體 followMode（"fl"）為權威，獨立於 pos 判斷：前端以為在跟隨但韌體已退出
+      // （failsafe/E/任何路徑）→ 同步歸零，避免持續送被靜默丟棄的 PF。
+      if (data.fl !== undefined && !data.fl && followActive) followReset();
 
       // Per-motor joint error
       if (data.herr) {
