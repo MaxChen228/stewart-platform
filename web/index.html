@@ -1383,13 +1383,23 @@ scope.on('telemetry', d => {
 });
 
 // vFOC PID 欄位反寫韌體真值（SoT：telemetry d.pid 是唯一真相源，非編輯中才覆寫）
+// dirty 追蹤：欄位一被編輯就標記，反寫跳過 → 未按 Apply 的編輯不會被 60Hz 反寫打回韌體舊值。
+// 韌體值追上欄位（Apply 成功）時清 dirty，回歸真值同步。
 let pidSynced=false;
+const PID_FIELDS=['m-kp','m-ki','m-kd','m-kv'];
+const pidDirty=[false,false,false,false];
+PID_FIELDS.forEach((id,i)=>{ const el=$o(id); if(el) el.addEventListener('input',()=>{ pidDirty[i]=true; const s=$o('pid-sot'); if(s){ s.textContent='✎ 未套用（按 Apply PID）'; s.style.color='var(--dual)'; } }); });
 scope.on('telemetry', d => {
   if (!Array.isArray(d.pid)) return;
-  [['m-kp',0],['m-ki',1],['m-kd',2],['m-kv',3]].forEach(([id,i]) => {
-    const el=$o(id); if (el && document.activeElement!==el && +el.value!==d.pid[i]) el.value=d.pid[i];
+  let anyDirty=false;
+  PID_FIELDS.forEach((id,i) => {
+    const el=$o(id); if (!el) return;
+    if (+el.value === d.pid[i]) { pidDirty[i]=false; return; }      // 韌體已追上 → 清 dirty、無需覆寫
+    if (pidDirty[i]) { anyDirty=true; return; }                     // 有未套用編輯 → 別覆寫（修被打回 bug）
+    if (document.activeElement===el) return;                        // 正在編輯 → 別覆寫
+    el.value = d.pid[i];                                            // 純顯示陳舊 → 反寫韌體真值
   });
-  if (!pidSynced){ pidSynced=true; const s=$o('pid-sot'); if(s) s.textContent='✓ 同步韌體真值'; }
+  const s=$o('pid-sot'); if(s && !anyDirty){ s.textContent='✓ 同步韌體真值'; s.style.color='var(--contra)'; pidSynced=true; }
 });
 
 // FFT + σ（選定軸，herr 優先 fallback a）
