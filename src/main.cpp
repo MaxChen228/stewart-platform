@@ -343,6 +343,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
             adaptiveFirstCycle = true;
         }
 
+        followMode = false;   // E 啟動 mode0/1 控制 → 清跟隨，避免 follow-HOLD 下殘留追 followTgt
         posEnabled = true;
         Out.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d,"
             "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
