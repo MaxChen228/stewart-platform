@@ -66,7 +66,7 @@ async function openWs(host, timeoutMs = 3000) {
 }
 
 function send(ws, cmd, opts = {}) {
-  if (opts.log !== false) console.log(`> ${cmd}`);
+  if (opts.log !== false) console.log(`${opts.prefix || '>'} ${cmd}`);
   ws.send(cmd);
 }
 

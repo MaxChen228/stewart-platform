@@ -2,7 +2,11 @@
 // Offline pose motion-profile generator.
 // Produces PF/P command samples for smooth testing and future firmware parity.
 
+const { NEUTRAL_Z } = require('./kin');
+const PlatformSoT = require('./platform_sot');
+
 const AXES = ['x', 'y', 'z', 'roll', 'pitch', 'yaw'];
+const DEFAULT_LIMITS = PlatformSoT.DEFAULT_PLATFORM_CONFIG.followLimits;
 
 function usage() {
   console.log(`Usage:
@@ -31,12 +35,12 @@ function parsePose(s, fallback) {
 
 function parseArgs(argv) {
   const o = {
-    from: [0, 0, 105, 0, 0, 0],
+    from: [0, 0, NEUTRAL_Z, 0, 0, 0],
     to: null,
     hz: 100,
     duration: null,
-    vmaxT: 60,
-    vmaxR: 45,
+    vmaxT: DEFAULT_LIMITS.vmaxT,
+    vmaxR: DEFAULT_LIMITS.vmaxR,
     profile: 'smootherstep',
     format: 'json',
   };

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // One-shot machine health check for experiments.
 
+const { rest } = require('./rig_client');
+
 const DEFAULT_HOST = 'localhost:3000';
 
 function usage() {
@@ -20,12 +22,6 @@ function parseArgs(argv) {
     else throw new Error(`Unknown option: ${a}`);
   }
   return o;
-}
-
-async function getJson(host, path) {
-  const r = await fetch(`http://${host}/api/${path}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status} for /api/${path}`);
-  return r.json();
 }
 
 function severityRank(s) {
@@ -82,9 +78,9 @@ function printReport(r) {
 async function main() {
   const opts = parseArgs(process.argv);
   const [latest, transport, rec] = await Promise.all([
-    getJson(opts.host, 'latest').catch((e) => ({ _error: e.message })),
-    getJson(opts.host, 'transport').catch((e) => ({ _error: e.message })),
-    getJson(opts.host, 'rec/status').catch((e) => ({ _error: e.message })),
+    rest(opts.host, 'latest').catch((e) => ({ _error: e.message })),
+    rest(opts.host, 'transport').catch((e) => ({ _error: e.message })),
+    rest(opts.host, 'rec/status').catch((e) => ({ _error: e.message })),
   ]);
   const report = analyze(latest, transport, rec);
   if (opts.json) console.log(JSON.stringify(report, null, 2));

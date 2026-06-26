@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { rest, safeName } = require('./rig_client');
 
 const DEFAULT_HOST = 'localhost:3000';
 const DATA_DIR = path.join(__dirname, 'data');
@@ -43,17 +44,7 @@ function sh(cmd, args) {
 }
 
 async function getJson(host, api) {
-  try {
-    const r = await fetch(`http://${host}/api/${api}`);
-    if (!r.ok) return { error: `HTTP ${r.status}` };
-    return r.json();
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
-function safeName(s) {
-  return String(s || 'manifest').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return rest(host, api).catch((e) => ({ error: e.message }));
 }
 
 async function buildManifest(opts) {

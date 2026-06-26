@@ -8,17 +8,16 @@
 //   node sysid/pose_ctl.js 0 0 0 3 0 0          # roll +3°
 //   node sysid/pose_ctl.js 0 0 0 0 0 0          # 回中位
 'use strict';
-const { ik, NEUTRAL_Z } = require('./kin.js');
-const WebSocket = require('ws');
+const { ik } = require('./kin.js');
+const { openWs, poseLine, relToAbs, rest, sleep } = require('./rig_client');
 const HOST = 'localhost:3000';
-const rest = (p) => fetch(`http://${HOST}/api/${p}`).then(r => r.json()).catch(() => ({}));
 
 const off = [0, 1, 2, 3, 4, 5].map(i => parseFloat(process.argv[2 + i] ?? '0'));   // [dx,dy,dz,droll,dpitch,dyaw]
 const MS = parseInt(process.argv[8] ?? '1500', 10);
 
 // 相對中位偏移 → 絕對 pose（xy/rpy 中位=0、z 疊 NEUTRAL_Z）
 function offsetToAbsPose(offset) {
-  const pose = [offset[0], offset[1], NEUTRAL_Z + offset[2], offset[3], offset[4], offset[5]];
+  const pose = relToAbs(offset);
   if (!ik(pose).valid) throw new Error('IK invalid（pose 超出工作空間）');
   return pose;
 }
@@ -27,13 +26,12 @@ function offsetToAbsPose(offset) {
   const pose = offsetToAbsPose(off);
   console.log(`偏移 [${off.join(' ')}] → 絕對 pose [${pose.map(x => x.toFixed(2)).join(' ')}]  ${MS}ms`);
 
-  const s = await rest('latest');
+  const s = await rest(HOST, 'latest').catch(() => ({}));
   if (s.pos !== 1) { console.log('⚠ 不在 HOLD（pos≠1），先送 H 鎖位再用 P'); process.exit(1); }
 
-  const ws = new WebSocket(`ws://${HOST}`);
-  await new Promise((r, j) => { ws.on('open', r); ws.on('error', j); });
-  ws.send(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${MS}`);
-  await new Promise(r => setTimeout(r, 400));
+  const ws = await openWs(HOST);
+  ws.send(`P ${poseLine(pose)} ${MS}`);
+  await sleep(400);
   ws.close();
   console.log('✓ P 已送');
   process.exit(0);

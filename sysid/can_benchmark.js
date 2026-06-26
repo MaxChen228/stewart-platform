@@ -4,9 +4,16 @@
 // Default mode is dry-run: prints the planned sequence and exits.
 // Add --live only when a human is beside the rig and power cutoff is reachable.
 
-const WebSocket = require('ws');
 const { execFileSync } = require('child_process');
 const path = require('path');
+const {
+  openWs,
+  rest,
+  send: rigSend,
+  sleep,
+  startRecording,
+  stopRecording,
+} = require('./rig_client');
 
 const DEFAULTS = {
   host: 'localhost:3000',
@@ -61,14 +68,6 @@ function parseArgs(argv) {
   return o;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function rest(host, path) {
-  const r = await fetch(`http://${host}/api/${path}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status} for /api/${path}`);
-  return r.json();
-}
-
 function manifestPathForRecording(recPath, label) {
   if (!recPath) return null;
   const dir = path.dirname(recPath);
@@ -101,15 +100,8 @@ function writeManifest(opts, label, condition, recPath, latest) {
   return out;
 }
 
-async function openWs(host) {
-  const ws = new WebSocket(`ws://${host}`);
-  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
-  return ws;
-}
-
 function send(ws, cmd) {
-  ws.send(cmd);
-  console.log(`  -> ${cmd}`);
+  rigSend(ws, cmd, { prefix: '  ->' });
 }
 
 function summarize(rows) {
@@ -151,7 +143,7 @@ async function runCondition(opts, ws, resp, loop, ar) {
     await sleep(opts.settleMs);
   }
 
-  const rec = await rest(opts.host, `rec/start?name=${opts.name}_${label}`);
+  const rec = await startRecording(opts.host, `${opts.name}_${label}`);
   const latestAtStart = await rest(opts.host, 'latest').catch(() => null);
   const manifestPath = writeManifest(opts, label, { resp, loop, ar, seconds: opts.seconds, enable: opts.enable }, rec.path, latestAtStart);
   const rows = [];
@@ -164,7 +156,7 @@ async function runCondition(opts, ws, resp, loop, ar) {
   ws.on('message', onMessage);
   await sleep(opts.seconds * 1000);
   ws.off('message', onMessage);
-  const stopped = await rest(opts.host, 'rec/stop');
+  const stopped = await stopRecording(opts.host);
 
   if (opts.enable) {
     send(ws, 'D');

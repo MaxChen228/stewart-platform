@@ -8,7 +8,7 @@
 //   C 1 0  restore immediate command response mode
 //   L 20   50Hz conservative control loop
 
-const WebSocket = require('ws');
+const { openWs, send, sleep } = require('./rig_client');
 
 const DEFAULT_HOST = 'localhost:3000';
 const COMMANDS = ['D', 'A0', 'C 1 0', 'L 20'];
@@ -35,14 +35,6 @@ function parseArgs(argv) {
   return o;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function openWs(host) {
-  const ws = new WebSocket(`ws://${host}`);
-  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
-  return ws;
-}
-
 async function main() {
   const opts = parseArgs(process.argv);
   console.log('Safe baseline plan:');
@@ -55,8 +47,7 @@ async function main() {
   const ws = await openWs(opts.host);
   try {
     for (const c of COMMANDS) {
-      ws.send(c);
-      console.log(`sent: ${c}`);
+      send(ws, c);
       await sleep(400);
     }
   } finally {
