@@ -42,9 +42,11 @@ bool holdMode = false;
 float holdAngles[NUM_MOTORS] = {0};
 float maxHoldErr = 0;
 
-// 擾動注入器（U 指令）：HOLD 模式下對單顆馬達的 F5 目標短暫加偏移 → 馬達主動衝出再彈回 = 脈衝
-float    bumpDeg[NUM_MOTORS] = {0};   // 六軸脈衝偏移（enc 慣例度）；U=單軸填一格、W=六軸全填
-uint32_t bumpUntilMs = 0;             // 脈衝結束時刻（millis）；過期由 hold 迴圈歸零
+// 擾動注入器（U/W 指令）：對 F5 目標短暫加偏移持續 ms 後歸零。疊加在 F5 匯流口 → 全控制模式通用
+// （HOLD 保持中或運動中皆可注入）。U=單軸、W=六軸協同。
+float    bumpDeg[NUM_MOTORS] = {0};   // 六軸擾動偏移（enc 慣例度）
+uint32_t bumpUntilMs = 0;            // 0=無擾動，否則=結束時刻(millis)；過期由 F5 匯流口 clearBump 歸零
+constexpr uint32_t BUMP_MAX_MS = 60000;  // 擾動時長上限（放寬自 5s→60s，支援「持續一段時間」）
 
 // 姿態軌跡（P 指令）：HOLD 下把 holdAngles 從 holdStart 平滑移到 holdTarget=IK(絕對 pose)。
 // 保留 HOLD 直送機制 → 馬達純 P 死咬移動中的目標 = 穩定性不變，只是目標會動。
@@ -115,8 +117,7 @@ float maxGain = 0.3f;
 float smoothKinetic = 0;
 bool adaptiveFirstCycle = true;
 
-// 擾動歸零（plant-input 疊加層）：清六軸偏移與計時哨兵。
-// phase 2 會在 posStop/posDisable/enterHoldCurrent/失效保護一併呼叫，確保斷線/停止必歸零。
+// 擾動歸零：清六軸偏移 + 計時，F5 匯流口偵測脈衝過期時呼叫。
 static void clearBump() {
     for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
     bumpUntilMs = 0;
@@ -562,23 +563,23 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 idx + 1, delta, degChange);
         }
     } else if (cmd.startsWith("U ")) {
-        // 擾動脈衝（單軸）：U <motor 0-5> <deg> <ms> — HOLD 模式下對該馬達 F5 目標加 deg 偏移持續 ms，再自動歸零
+        // 擾動脈衝（單軸）：U <motor 0-5> <deg> <ms> — 對該馬達 F5 目標加 deg 偏移持續 ms 後歸零。全模式通用。
         int idx, ms; float deg;
         if (sscanf(cmd.c_str(), "U %d %f %d", &idx, &deg, &ms) == 3 && idx >= 0 && idx < NUM_MOTORS) {
             for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
-            bumpDeg[idx] = constrain(deg, -30.0f, 30.0f);   // 對齊 W 的幅度上限（安全：避免手滑大角度甩出）
-            bumpUntilMs = millis() + constrain(ms, 1, 5000);
+            bumpDeg[idx] = constrain(deg, -30.0f, 30.0f);   // 對齊 W 幅度上限（安全：避免手滑大角度甩出）
+            bumpUntilMs = millis() + constrain(ms, 1, BUMP_MAX_MS);
             Out.printf("{\"status\":\"bump\",\"motor\":%d,\"deg\":%.2f,\"ms\":%d,\"hold\":%d}\n",
-                idx + 1, deg, ms, holdMode ? 1 : 0);
+                idx + 1, bumpDeg[idx], ms, holdMode ? 1 : 0);   // 回報 clamp 後實際值，不謊報
         }
     } else if (cmd.startsWith("W ")) {
-        // 擾動脈衝（六軸協同）：W <d0> <d1> <d2> <d3> <d4> <d5> <ms> — HOLD 模式下六軸同時加各自偏移持續 ms
+        // 擾動脈衝（六軸協同）：W <d0> <d1> <d2> <d3> <d4> <d5> <ms> — 六軸同時加各自偏移持續 ms 後歸零。全模式通用。
         // host 端 disturb.js 用 task-space IK 算各軸 deg（已乘 MOTOR_SIGN 轉 enc 慣例），這裡只照單全收
         float d[NUM_MOTORS]; int ms;
         if (sscanf(cmd.c_str(), "W %f %f %f %f %f %f %d",
                    &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &ms) == 7) {
             for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = constrain(d[i], -30.0f, 30.0f);
-            bumpUntilMs = millis() + constrain(ms, 1, 5000);
+            bumpUntilMs = millis() + constrain(ms, 1, BUMP_MAX_MS);
             Out.printf("{\"status\":\"bumpW\",\"deg\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],\"ms\":%d,\"hold\":%d}\n",
                 bumpDeg[0], bumpDeg[1], bumpDeg[2], bumpDeg[3], bumpDeg[4], bumpDeg[5], ms, holdMode ? 1 : 0);
         }
