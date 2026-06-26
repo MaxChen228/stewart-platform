@@ -1,0 +1,93 @@
+/* ===== Stewart 研究頁共用主題 + 元件 =====
+   所有 web/research/*.html 共用。新實驗頁只 <link> 這支即可拿到一致外觀。 */
+
+:root {
+  --bg:#0a0a0a; --surface:#141414; --surface2:#1c1c1c; --line:#2a2a2a; --line2:#333;
+  --ink:#ddd; --dim:#999; --faint:#666;
+  --go:#4a8; --go-bg:#14331f; --go-ink:#9fe;
+  --warn:#e84; --warn-bg:#33231a; --warn-ink:#fb8;
+  --bad:#a33; --bad-bg:#2a1414; --bad-ink:#f88;
+  --ok:#6c9; --accent:#8fd;
+  --mono:'SF Mono','Consolas','Menlo',monospace;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--ink); font-family:var(--mono); font-size:14px;
+       min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:24px; }
+a { color:#6cf; text-decoration:none; }
+a:hover { color:#9df; }
+code, .mono { font-family:var(--mono); }
+
+/* 統一頂欄（lab.js 自動注入到 #lab-header） */
+.lab-top { width:100%; max-width:820px; display:flex; justify-content:space-between; align-items:center;
+           margin-bottom:18px; }
+.lab-top .left { display:flex; align-items:center; gap:14px; }
+.lab-back  { font-size:12px; color:var(--dim); letter-spacing:0.06em; }
+.lab-title { font-weight:700; letter-spacing:0.10em; font-size:13px; }
+.lab-ws    { font-size:11px; color:var(--bad); letter-spacing:0.08em; }
+.lab-ws.ok { color:var(--go); }
+
+.wrap { width:100%; max-width:820px; }
+
+/* 標題 + 提示 */
+.lab-status { text-align:center; font-size:24px; font-weight:700; letter-spacing:0.04em; margin:8px 0; }
+.lab-hint   { text-align:center; color:var(--dim); font-size:13px; min-height:20px; margin-bottom:18px; }
+
+/* 步驟條 */
+.steps { display:flex; gap:10px; margin-bottom:20px; }
+.step  { flex:1; text-align:center; padding:10px 0; border:1px solid var(--line2); border-radius:6px;
+         color:var(--faint); font-size:13px; letter-spacing:0.05em; }
+.step.cur  { border-color:var(--go); color:var(--accent); background:var(--go-bg); }
+.step.done { border-color:#2a5a2a; color:#6a6; }
+.step .sub { font-size:10px; opacity:0.6; display:block; margin-top:3px; }
+
+/* 即時量表 */
+.meter { position:relative; height:46px; background:var(--surface); border:1px solid var(--line);
+         border-radius:8px; overflow:hidden; margin-bottom:6px; }
+.meter .fill { position:absolute; left:0; top:0; bottom:0; width:0; background:var(--go); opacity:0.5;
+               transition:width 0.05s; }
+.meter .thr  { position:absolute; top:0; bottom:0; width:2px; background:var(--warn); }
+.meter .txt  { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+               font-size:13px; color:#bbb; }
+.counts { display:flex; justify-content:space-between; color:#888; font-size:12px; margin-bottom:18px; }
+.counts b { color:var(--accent); }
+
+/* 按鈕 */
+.btns { display:flex; gap:12px; margin-bottom:20px; }
+button { flex:1; padding:18px 0; font-family:inherit; font-size:16px; font-weight:700; letter-spacing:0.04em;
+         border:1px solid var(--line2); border-radius:8px; background:var(--surface2); color:var(--ink);
+         cursor:pointer; }
+button:hover:not(:disabled) { background:#262626; }
+button:disabled { opacity:0.35; cursor:not-allowed; }
+button.go   { background:var(--go-bg);   border-color:var(--go);   color:var(--go-ink); }
+button.stop { background:var(--warn-bg); border-color:var(--warn); color:var(--warn-ink); }
+button.danger { flex:0 0 110px; background:var(--bad-bg); border-color:var(--bad); color:var(--bad-ink); }
+
+/* 紀錄列表 */
+.log { border:1px solid var(--line2); border-radius:8px; max-height:240px; overflow-y:auto; }
+.log .row { display:flex; gap:10px; padding:7px 12px; border-bottom:1px solid #1a1a1a; font-size:13px; }
+.log .row:last-child { border-bottom:none; }
+.log .n  { color:var(--faint); width:34px; }
+.log .ok { color:var(--ok); }  .log .weak { color:#caa; }  .log .sat { color:var(--warn); }
+.log .empty { padding:18px; text-align:center; color:#555; font-size:13px; }
+
+/* 完成卡 */
+.done { display:none; text-align:center; padding:24px; border:1px solid #2a5a2a; border-radius:8px;
+        background:var(--go-bg); }
+.done h2 { color:var(--accent); margin-bottom:12px; }
+.done code { display:block; background:#000; padding:12px; border-radius:6px; color:var(--go-ink);
+             margin:12px 0; user-select:all; }
+.tiny { color:#777; font-size:12px; line-height:1.6; margin-top:14px; }
+
+/* 中樞卡片 */
+.cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
+.card  { display:block; padding:18px; border:1px solid var(--line2); border-radius:10px; background:var(--surface);
+         transition:border-color .15s, background .15s; }
+.card:hover { border-color:var(--go); background:#101510; }
+.card .ic   { font-size:22px; margin-bottom:8px; }
+.card .name { font-weight:700; color:var(--ink); letter-spacing:0.04em; margin-bottom:6px; }
+.card .desc { color:var(--dim); font-size:12.5px; line-height:1.6; }
+.card .tag  { display:inline-block; margin-top:10px; font-size:10px; letter-spacing:0.08em; padding:2px 8px;
+              border-radius:10px; border:1px solid var(--line2); color:var(--faint); }
+.card .tag.ready { color:var(--go); border-color:var(--go); }
+.card .tag.wip   { color:var(--warn); border-color:var(--warn); }

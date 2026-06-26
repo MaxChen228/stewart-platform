@@ -94,8 +94,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 靜態檔案
-  const filePath = path.join(__dirname, 'web', req.url === '/' ? 'index.html' : req.url);
+  // 靜態檔案（去查詢字串；目錄/結尾 → index.html）
+  let urlPath = req.url.split('?')[0];
+  if (urlPath === '/') urlPath = '/index.html';
+  else if (urlPath.endsWith('/')) urlPath += 'index.html';
+  const filePath = path.join(__dirname, 'web', urlPath);
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
@@ -108,6 +111,12 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 let clientCount = 0;
 
+// 對等廣播匯流排：所有 client（monitor 頁、腳本）共用同一條送出路徑。
+// telemetry（序列埠回覆）與指令 echo 都走這裡 → 任何來源的操作對所有人可見。
+function broadcast(line) {
+  for (const client of wss.clients) if (client.readyState === 1) client.send(line);
+}
+
 wss.on('connection', (ws) => {
   clientCount++;
   console.log(`[WS] client connected (${clientCount})`);
@@ -117,11 +126,14 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (msg) => {
     const cmd = msg.toString().trim();
+    if (!cmd) return;
     console.log(`[WS] cmd: ${cmd}`);
     recWrite('cmd', cmd);
     if (serial && serial.isOpen) {
       serial.write(cmd + '\n');
     }
+    // echo 給所有 client（含其他來源）→ 操作對等可見，monitor 用此唯一來源畫指令標記
+    broadcast(JSON.stringify({ evt: 'cmd', c: cmd }));
   });
 
   ws.on('close', () => {
@@ -155,11 +167,7 @@ async function connectSerial() {
     if (!line) return;
     lastData = line;
     recWrite('in', line);
-
-    // 廣播給所有 WebSocket client
-    for (const client of wss.clients) {
-      if (client.readyState === 1) client.send(line);
-    }
+    broadcast(line);   // telemetry → 所有 client
   });
 
   serial.on('close', () => {

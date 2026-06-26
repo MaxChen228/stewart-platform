@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<!-- ============================================================
+  新實驗骨架。用法：
+    1. 複製本檔 → 改名（如 stepresp.html）
+    2. 改 <title> 與 Lab title
+    3. 在 onData() 寫你的訊號處理；按鈕接 startSeg/endSeg 之類
+    4. 用 lab.recStart('<實驗名>_...') 錄製 → 分析器讀 sysid/data/
+    5. 到 index.html 的 EXPERIMENTS registry 加一行
+  lab.js 已提供：lab.send() / lab.recStart()/recStop() / lab.on('telemetry'|'status'|'open'|'close')
+               Lab.stat.{norm,median,mad,medianRows} / Lab.sleep / 自動頂欄
+  lab.css 已提供：.steps .meter .btns .log .done .cards 等元件，照抄 class 即可
+============================================================ -->
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>實驗名稱</title>
+<link rel="stylesheet" href="lab.css">
+</head>
+<body>
+<div id="lab-header"></div>
+<div class="wrap">
+  <div class="lab-status" id="status">準備中…</div>
+  <div class="lab-hint" id="hint">這裡寫操作提示。</div>
+
+  <div class="btns">
+    <button id="primary" class="go" disabled>連線中…</button>
+    <button id="abort" class="danger">⛔ 中止</button>
+  </div>
+
+  <div class="log" id="log"><div class="empty">尚無資料。</div></div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+const { norm, median, mad } = Lab.stat;
+const sleep = Lab.sleep;
+const lab = new Lab({ title: '實驗名稱' });
+
+let phase = 'init';
+
+lab.on('open', () => { if (phase === 'init') { phase = 'idle'; ready(); } });
+lab.on('telemetry', onData);
+
+function ready() {
+  $('status').textContent = '就緒';
+  const b = $('primary'); b.disabled = false; b.textContent = '▶ 開始';
+}
+
+function onData(d) {
+  if (d.pos !== 1) return;          // 只在控制啟用時處理
+  // TODO: 你的訊號處理。d.a=六軸角度, d.err=pose誤差(mode1), d.tx/rx=CAN錯誤計數…
+}
+
+async function start() {
+  $('primary').disabled = true;
+  lab.send('A0'); await sleep(300);            // 乾淨輪詢
+  lab.send('E'); await sleep(1500);            // enable（hold 當前姿態，不暴衝）
+  await lab.recStart('myexp_' + Date.now());
+  phase = 'armed';
+  $('status').textContent = '🟢 錄製中';
+}
+
+async function abort() {
+  await lab.recStop(); lab.send('D');
+  phase = 'idle'; $('status').textContent = '已中止（斷電）';
+  const b = $('primary'); b.disabled = false; b.textContent = '▶ 開始';
+}
+
+$('primary').onclick = () => { if (phase === 'idle') start(); };
+$('abort').onclick = abort;
+</script>
+</body>
+</html>

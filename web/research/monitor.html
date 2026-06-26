@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>即時監控研究儀</title>
+<link rel="stylesheet" href="lab.css">
+<style>
+  body { max-width:none; padding:0; align-items:stretch; height:100vh; overflow:hidden; }
+  .topbar { display:flex; align-items:center; gap:12px; padding:8px 14px; background:#151515; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .topbar a { font-size:12px; color:var(--dim); }
+  .topbar .ttl { font-weight:700; letter-spacing:0.08em; font-size:13px; }
+  .status { width:8px; height:8px; border-radius:50%; background:#555; } .status.connected { background:var(--go); }
+  #legend { display:flex; gap:10px; } .leg-item { display:flex; align-items:center; gap:4px; cursor:pointer; opacity:0.9; font-size:11px; }
+  .leg-item.hidden { opacity:0.3; } .leg-dot { width:10px; height:10px; border-radius:2px; }
+  .topbar button { background:#222; color:#ccc; border:1px solid #444; border-radius:4px; padding:4px 10px; cursor:pointer; font:inherit; font-size:12px; flex:none; }
+  .topbar button.active { background:#2a5a2a; border-color:#4a4; color:#8f8; }
+  .spacer { flex:1; }
+
+  .main { display:grid; grid-template-columns:1fr 340px; grid-template-rows:1fr; height:calc(100vh - 86px); }
+  #charts { display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--line); }
+  .chart-row { display:flex; flex:1; min-height:0; }
+  .chart-wrap { flex:1; position:relative; min-width:0; min-height:0; border-bottom:1px solid #1c1c1c; }
+  .chart-wrap.phase { flex:0 0 240px; border-left:1px solid #1c1c1c; }
+  .chart-label { position:absolute; top:4px; left:8px; z-index:1; font-size:10px; color:#666; letter-spacing:0.5px; pointer-events:none; }
+  .chart-label .val { color:#aaa; }
+  /* 絕對定位填滿 relative 的 .chart-wrap：脫離內容流不反撐 parent。
+     必須有明確 width/height:100% 覆寫 canvas intrinsic 尺寸——否則 replaced element 退回 buffer 尺寸，
+     _setup 讀它設更大 buffer → 指數爆炸破圖。100% 把渲染尺寸鎖定為 parent、與 buffer 脫鉤。 */
+  canvas.trace { position:absolute; top:0; left:0; width:100%; height:100%; display:block; }
+  body.paused .chart-wrap:not(.phase) canvas { cursor:grab; }
+
+  .side { overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:10px; }
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .panel h3 { font-size:10px; letter-spacing:0.1em; color:var(--dim); font-weight:700; margin-bottom:8px; text-transform:uppercase; }
+  .health { display:flex; gap:6px; flex-wrap:wrap; }
+  .h-cell { flex:1; min-width:60px; background:var(--surface2); border:1px solid var(--line); border-radius:6px; padding:5px; text-align:center; }
+  .h-cell .lbl { font-size:9px; color:var(--faint); letter-spacing:0.06em; } .h-cell .val { font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .h-cell.good .val { color:var(--go-ink); } .h-cell.warn { border-color:var(--warn); } .h-cell.warn .val { color:var(--warn-ink); }
+  .h-cell.bad { border-color:var(--bad); } .h-cell.bad .val { color:var(--bad-ink); }
+  .quant { display:flex; gap:6px; margin-bottom:8px; }
+  .quant .q { flex:1; background:var(--surface2); border:1px solid var(--line); border-radius:6px; padding:5px; text-align:center; }
+  .quant .q .lbl { font-size:8px; color:var(--faint); } .quant .q .val { font-size:15px; font-weight:700; color:var(--accent); font-variant-numeric:tabular-nums; }
+  .row { display:flex; gap:6px; align-items:center; margin-bottom:7px; }
+  .row label { font-size:11px; color:var(--dim); width:30px; flex:none; }
+  input[type=range] { flex:1; accent-color:var(--go); }
+  input[type=number], select { background:#000; color:var(--ink); border:1px solid var(--line2); border-radius:5px; padding:4px 5px; font:inherit; font-size:12px; width:58px; }
+  .kv { font-size:12px; color:var(--accent); width:38px; text-align:right; font-variant-numeric:tabular-nums; }
+  .ctl-btns { display:flex; gap:6px; flex-wrap:wrap; }
+  .ctl-btns button { flex:1 1 40px; padding:8px 0; font:inherit; font-size:12px; font-weight:700; border:1px solid var(--line2); border-radius:6px; background:var(--surface2); color:var(--ink); cursor:pointer; }
+  .ctl-btns button:hover { background:#262626; }
+  .ctl-btns button.go { background:var(--go-bg); border-color:var(--go); color:var(--go-ink); }
+  .ctl-btns button.stop { background:var(--warn-bg); border-color:var(--warn); color:var(--warn-ink); }
+  .ctl-btns button.danger { background:var(--bad-bg); border-color:var(--bad); color:var(--bad-ink); }
+  .evlog { max-height:130px; overflow-y:auto; font-size:11px; }
+  .evlog .e { padding:3px 4px; border-bottom:1px solid #1a1a1a; color:var(--dim); display:flex; gap:6px; }
+  .evlog .e .t { color:var(--faint); flex:none; } .evlog .e.cmd { color:var(--accent); } .evlog .e.bad { color:var(--bad-ink); }
+  .hint { font-size:10px; color:var(--faint); line-height:1.5; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="status" id="ws-status"></div>
+  <a href="./">‹ 研究首頁</a>
+  <span class="ttl">即時監控研究儀</span>
+  <div class="group" style="display:flex;gap:4px;">
+    <button data-tw="100">2s</button><button data-tw="250" class="active">5s</button><button data-tw="500">10s</button><button data-tw="1500">30s</button>
+  </div>
+  <div id="legend"></div>
+  <div class="spacer"></div>
+  <span id="view-pos" style="color:var(--warn);font-size:11px;"></span>
+  <button id="btn-pause">⏸ Pause</button>
+  <button id="btn-csv">CSV</button>
+  <span id="stats" style="color:#666;font-size:11px;"></span>
+</div>
+
+<div class="main">
+  <!-- 左：scope-core 引擎畫的標準圖（與 scope.html 同一份引擎） -->
+  <div id="charts">
+    <div class="chart-row" style="flex:2">
+      <div class="chart-wrap">
+        <div class="chart-label">Angles / herr (°) <span class="val" id="lbl-angles"></span></div>
+        <canvas class="trace" id="c-angles"></canvas>
+      </div>
+      <div class="chart-wrap phase">
+        <div class="chart-label">Phase <span class="val" id="lbl-phase"></span></div>
+        <canvas class="trace" id="c-phase"></canvas>
+      </div>
+    </div>
+    <div class="chart-row" style="flex:1.5">
+      <div class="chart-wrap">
+        <div class="chart-label">Error tgt−act (°) <span class="val" id="lbl-errors"></span></div>
+        <canvas class="trace" id="c-errors"></canvas>
+      </div>
+    </div>
+    <div class="chart-row" style="flex:1">
+      <div class="chart-wrap">
+        <div class="chart-label">Gain / Kinetic <span class="val" id="lbl-gain"></span></div>
+        <canvas class="trace" id="c-gain"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右：研究面板（只疊加，數據/繪圖全走 scope-core） -->
+  <div class="side">
+    <div class="panel">
+      <h3>CAN / 迴圈健康</h3>
+      <div class="health" id="health"></div>
+    </div>
+
+    <div class="panel">
+      <h3>選定軸 <span id="sel-name" style="color:var(--accent)">M4</span> 即時量化 + FFT</h3>
+      <div class="quant">
+        <div class="q"><div class="lbl">峰峰°</div><div class="val" id="q-pp">—</div></div>
+        <div class="q"><div class="lbl">主頻Hz</div><div class="val" id="q-f">—</div></div>
+        <div class="q"><div class="lbl">RMS°</div><div class="val" id="q-rms">—</div></div>
+        <div class="q"><div class="lbl">σ/s</div><div class="val" id="q-sig">—</div></div>
+      </div>
+      <canvas id="fft" height="120" style="width:100%;display:block;background:#070707;border-radius:5px;"></canvas>
+      <div class="hint" style="margin-top:4px">雙擊頂部圖例選分析軸；σ&gt;0 衰減、≈0 自持。</div>
+    </div>
+
+    <div class="panel">
+      <h3>緊急 / 狀態機</h3>
+      <div class="ctl-btns" style="margin-bottom:6px;"><button class="danger" style="flex:1 1 100%;" onclick="S.send('D')">⏹ D 斷電（暴走急停）</button></div>
+      <div class="ctl-btns"><button onclick="S.send('H')">H 鎖位</button><button onclick="S.send('S')">S 停追</button><button onclick="S.send('E')">E 使能</button></div>
+    </div>
+
+    <div class="panel">
+      <h3>擾動注入 U（HOLD 下打一發）</h3>
+      <div class="row">
+        <label>軸</label><select id="u-m"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option></select>
+        <label style="width:auto">幅°</label><input type="number" id="u-deg" value="8">
+        <label style="width:auto">ms</label><input type="number" id="u-ms" value="200">
+      </div>
+      <div class="ctl-btns"><button class="go" style="flex:1 1 100%;" onclick="bump()">⚡ 打一發脈衝</button></div>
+    </div>
+
+    <div class="panel">
+      <h3>vFOC PID 即時調 K <span id="k-applied" class="hint"></span></h3>
+      <div class="row"><label>Kp</label><input type="range" id="k-kp" min="0" max="1024" value="220"><span class="kv" id="k-kp-v">220</span></div>
+      <div class="row"><label>Ki</label><input type="range" id="k-ki" min="0" max="1024" value="30"><span class="kv" id="k-ki-v">30</span></div>
+      <div class="row"><label>Kd</label><input type="range" id="k-kd" min="0" max="1024" value="270"><span class="kv" id="k-kd-v">270</span></div>
+      <div class="row"><label>Kv</label><input type="range" id="k-kv" min="0" max="1024" value="320"><span class="kv" id="k-kv-v">320</span></div>
+      <div class="ctl-btns"><button class="go" onclick="applyK()">套用 K</button><button onclick="setK(220,30,270,320)">↺ 開機值 220/30/270/320</button></div>
+      <div class="hint" style="margin-top:4px">滑桿放開即套用，波形上有標記線。<span id="k-sot"></span></div>
+    </div>
+
+    <div class="panel">
+      <h3>運動參數 / 錄製 <span id="rec-stat" class="hint"></span></h3>
+      <div class="row"><label>V</label>spd<input type="number" id="v-spd" value="30" style="width:46px">acc<input type="number" id="v-acc" value="5" style="width:46px"><button onclick="applyV()" style="flex:1;padding:5px;font:inherit">套用</button></div>
+      <div class="row"><label>J</label>mA<input type="number" id="j-ma" value="2200" step="100" style="width:56px"><button onclick="applyJ()" style="flex:1;padding:5px;font:inherit">電流</button></div>
+      <div class="row"><input type="text" id="rec-name" value="mon" style="flex:1;width:auto"><button class="" id="rec-go" onclick="recToggle()" style="flex:0 0 90px;padding:6px;font:inherit;font-weight:700;border:1px solid var(--go);background:var(--go-bg);color:var(--go-ink);border-radius:6px;cursor:pointer">● 錄製</button></div>
+    </div>
+
+    <div class="panel">
+      <h3>事件日誌</h3>
+      <div class="evlog" id="evlog"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/shared/scope-core.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const HOST = `${location.hostname}:${location.port || 3000}`;
+
+// 單一引擎：六軸圖 + 相圖 + 誤差 + Gain + 暫停/CSV/echo標記全繼承
+const S = new ScopeCore({
+  charts: { angles:'c-angles', anglesLabel:'lbl-angles', phase:'c-phase', phaseLabel:'lbl-phase',
+            errors:'c-errors', errorsLabel:'lbl-errors', gain:'c-gain', gainLabel:'lbl-gain' },
+  ui: { status:'ws-status', legend:'legend', stats:'stats', viewPos:'view-pos',
+        pauseBtn:'btn-pause', csvBtn:'btn-csv', charts:'charts' },
+});
+S.selectedMotor = 3;   // 預設 M4
+window.S = S;          // 讓 inline onclick 取得引擎實例（const 不掛 window）
+
+// ===== 事件日誌（指令標記由 core 畫線，這裡列文字）=====
+function logEv(msg, kind='') {
+  const el = $('evlog'), line = document.createElement('div');
+  line.className = 'e ' + kind;
+  line.innerHTML = `<span class="t">${new Date().toLocaleTimeString('en',{hour12:false})}</span><span>${msg}</span>`;
+  el.prepend(line); while (el.children.length > 50) el.removeChild(el.lastChild);
+}
+S.on('cmd', d => logEv('→ ' + d.c, 'cmd'));
+S.on('status', d => { if (d.status||d.tune||d.error) logEv(JSON.stringify(d).slice(0,70), d.error?'bad':''); });
+
+// ===== 控制（全走 S.send → server echo → core 自動標記）=====
+function bump(){ S.send(`U ${(+$('u-m').value)-1} ${+$('u-deg').value} ${+$('u-ms').value}`); }
+function applyV(){ S.send(`V ${+$('v-spd').value} ${+$('v-acc').value}`); }
+function applyJ(){ S.send(`J ${+$('j-ma').value}`); }
+function applyK(){ const kp=+$('k-kp').value,ki=+$('k-ki').value,kd=+$('k-kd').value,kv=+$('k-kv').value; S.send(`K ${kp} ${ki} ${kd} ${kv}`); $('k-applied').textContent=`→${kp}/${ki}/${kd}/${kv}`; }
+function setK(kp,ki,kd,kv){ [['k-kp',kp],['k-ki',ki],['k-kd',kd],['k-kv',kv]].forEach(([id,v])=>{$(id).value=v;$(id+'-v').textContent=v;}); applyK(); }
+['kp','ki','kd','kv'].forEach(k=>{ const s=$('k-'+k); s.oninput=()=>$('k-'+k+'-v').textContent=s.value; s.onchange=applyK; });
+
+let recording=false;
+async function recToggle(){
+  const rest=p=>fetch(`http://${HOST}/api/${p}`).then(r=>r.json()).catch(()=>({}));
+  if(!recording){ const r=await rest(`rec/start?name=${encodeURIComponent($('rec-name').value||'mon')}`); recording=true; $('rec-go').textContent='■ 停止'; $('rec-stat').textContent=(r.path||'').split('/').pop()||''; logEv('● 錄製開始','cmd'); }
+  else { const r=await rest('rec/stop'); recording=false; $('rec-go').textContent='● 錄製'; logEv(`■ 停止 ${r.lines??''}行`,'cmd'); }
+}
+
+// ===== CAN 健康（用 S.last 最近遙測）=====
+const HCELLS = [
+  ['ok', d=>`${d.ok??0}/6`, d=>d.ok===6?'good':d.ok>=4?'warn':'bad'],
+  ['TEC', d=>d.tx??'—', d=>(d.tx??0)>200?'bad':(d.tx??0)>96?'warn':'good'],
+  ['REC', d=>d.rx??'—', d=>(d.rx??0)>96?'warn':'good'],
+  ['EFLG', d=>d.ef??'—', d=>(d.ef??0)?'warn':'good'],
+  ['迴圈Hz', d=>d.lhz??'—', d=>(d.lhz??0)<40?'warn':'good'],
+  ['讀µs', d=>d.cus??'—', ()=>''],
+];
+let lastBad=0;
+S.on('telemetry', d=>{
+  $('health').innerHTML = HCELLS.map(([l,v,c])=>`<div class="h-cell ${c?c(d):''}"><div class="lbl">${l}</div><div class="val">${v(d)}</div></div>`).join('');
+  if((d.ok??6)<6 || (d.tx??0)>96){ const n=performance.now(); if(n-lastBad>800){ S.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
+});
+
+// ===== FFT + σ（用 core.buf 選定軸，herr 優先 fallback a）=====
+let fsEst=60, lastT=0;
+S.on('telemetry', ()=>{ const n=performance.now(); if(lastT) fsEst=0.9*fsEst+0.1*(1000/Math.max(1,n-lastT)); lastT=n; });
+function selSeries(){ const i=S.selectedMotor; const h=S.buf.herr[i]; return (h.some(v=>v!=null))? h : S.buf.a[i]; }
+function computeFFT(){
+  const src=selSeries(), M=Math.min(512, src.length);
+  if(M<32) return {pp:0,rms:0,f:0,spec:[]};
+  const x=[]; let mean=0; for(let k=src.length-M;k<src.length;k++){ const v=src[k]??0; x.push(v); mean+=v; } mean/=M;
+  let hi=-1e9,lo=1e9,ss=0; for(const v of x){ if(v>hi)hi=v; if(v<lo)lo=v; ss+=(v-mean)**2; }
+  const rms=Math.sqrt(ss/M), fs=fsEst, fmax=Math.min(8,fs/2), nb=80, spec=[]; let peak=0,pf=0;
+  const w=k=>0.5-0.5*Math.cos(2*Math.PI*k/(M-1));
+  for(let b=1;b<=nb;b++){ const f=fmax*b/nb, om=2*Math.PI*f/fs; let re=0,im=0;
+    for(let k=0;k<M;k++){ const s=(x[k]-mean)*w(k); re+=s*Math.cos(om*k); im-=s*Math.sin(om*k); }
+    const mag=Math.sqrt(re*re+im*im)/M*2; spec.push({f,mag}); if(mag>peak){peak=mag;pf=f;} }
+  return {pp:hi-lo,rms,f:pf,spec};
+}
+function estSigma(){
+  const i=S.selectedMotor, src=selSeries(), ts=S.buf.ts, now=performance.now(), span=6000, pts=[];
+  for(let k=0;k<src.length;k++){ if(ts[k]!=null && now-ts[k]<=span && src[k]!=null) pts.push([ts[k],src[k]]); }
+  if(pts.length<30) return NaN;
+  const m=pts.reduce((a,b)=>a+b[1],0)/pts.length, amp=[];
+  for(let j=1;j<pts.length-1;j++){ const a0=Math.abs(pts[j-1][1]-m),a1=Math.abs(pts[j][1]-m),a2=Math.abs(pts[j+1][1]-m); if(a1>=a0&&a1>=a2&&a1>0.4) amp.push([(pts[j][0]-pts[0][0])/1000,a1]); }
+  if(amp.length<4) return NaN;
+  const xs=amp.map(p=>p[0]),ys=amp.map(p=>Math.log(p[1])),n=xs.length,sx=xs.reduce((a,b)=>a+b),sy=ys.reduce((a,b)=>a+b);
+  const sxx=xs.reduce((a,b)=>a+b*b,0),sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
+  return -((n*sxy-sx*sy)/(n*sxx-sx*sx+1e-9));
+}
+const fft=$('fft'), fctx=fft.getContext('2d');
+S.on('render', ()=>{
+  $('sel-name').textContent = S.NAMES[S.selectedMotor];
+  const r=computeFFT(), sig=estSigma();
+  $('q-pp').textContent=r.pp?r.pp.toFixed(1):'—'; $('q-f').textContent=r.f?r.f.toFixed(2):'—';
+  $('q-rms').textContent=r.rms?r.rms.toFixed(2):'—'; $('q-sig').textContent=isFinite(sig)?sig.toFixed(2):'—';
+  const dpr=devicePixelRatio||1, W=fft.width=fft.clientWidth*dpr, H=fft.height;
+  fctx.clearRect(0,0,W,H); if(!r.spec.length) return;
+  const maxM=Math.max(0.05,...r.spec.map(s=>s.mag)), bw=W/r.spec.length;
+  fctx.fillStyle=S.COLORS[S.selectedMotor];
+  r.spec.forEach((s,i)=>{ const h=s.mag/maxM*(H-16*dpr); fctx.fillRect(i*bw,H-h,bw*0.85,h); });
+  fctx.fillStyle='#666'; fctx.font=`${10*dpr}px monospace`;
+  for(let hz=0;hz<=r.spec[r.spec.length-1].f;hz+=2){ const px=hz/r.spec[r.spec.length-1].f*W; fctx.fillText(hz+'Hz',px+2*dpr,H-3*dpr); }
+  if(r.f){ fctx.fillStyle=S.COLORS[S.selectedMotor]; fctx.fillText('peak '+r.f.toFixed(2),W-72*dpr,12*dpr); }
+});
+
+// K 滑桿同步韌體真值（SoT）：非拖動時反映 telemetry 上報的當前 PID
+let kSynced = false;
+S.on('telemetry', d => {
+  if (!Array.isArray(d.pid)) return;
+  [['k-kp',0],['k-ki',1],['k-kd',2],['k-kv',3]].forEach(([id,i]) => {
+    const el = $(id); if (document.activeElement !== el && +el.value !== d.pid[i]) { el.value = d.pid[i]; $(id+'-v').textContent = d.pid[i]; }
+  });
+  if (!kSynced) { kSynced = true; $('k-sot').textContent = '✓ 已同步韌體真值'; }
+});
+logEv('引擎=scope-core（與 scope.html 共用）；K 滑桿同步韌體 PID 真值','');
+</script>
+</body>
+</html>

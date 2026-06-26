@@ -36,6 +36,19 @@ bool holdMode = false;
 float holdAngles[NUM_MOTORS] = {0};
 float maxHoldErr = 0;
 
+// 擾動注入器（U 指令）：HOLD 模式下對單顆馬達的 F5 目標短暫加偏移 → 馬達主動衝出再彈回 = 脈衝
+int      bumpMotor   = -1;
+float    bumpDeg     = 0;
+uint32_t bumpUntilMs = 0;
+
+// 開機預設 vFOC PID：Ki 由出廠 100 → 30，殺 M4 自持極限環（2026-06-26 45格矩陣定：
+// 門檻40-60、Ki30 殺住16°擾動、跨六軸通用、剛性零代價）。runtime K 指令仍可覆蓋微調；
+// 無支架(P3)重力力矩變大若門檻移再改此值。不靠馬達 EEPROM，版本控制在韌體。
+constexpr uint16_t BOOT_KP = 220, BOOT_KI = 30, BOOT_KD = 270, BOOT_KV = 320;
+
+// 當前 vFOC PID（單一真相源）：開機=BOOT 值，收 K 指令更新，telemetry 上報 → 前端滑桿反映真值不寫死
+uint16_t curKp = BOOT_KP, curKi = BOOT_KI, curKd = BOOT_KD, curKv = BOOT_KV;
+
 // ===== 控制模式 =====
 // 0 = joint-space（舊版自適應追蹤）
 // 1 = task-space PD（FK + IK）
@@ -119,6 +132,15 @@ void setup() {
         servos.setResponseMode(MOTOR_ADDR[i], 1, 0);
         delay(10);
     }
+
+    // 開機持久化 vFOC PID：下發抗自持的 Ki=30（重開機馬達回出廠 100→一推暴走，故每次開機重設）
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        servos.setVFOC_KpKi(MOTOR_ADDR[i], BOOT_KP, BOOT_KI);
+        delay(10);
+        servos.setVFOC_KdKv(MOTOR_ADDR[i], BOOT_KD, BOOT_KV);
+        delay(10);
+    }
+
     delay(200);
     servos.flushReceiveBuffer();
 
@@ -291,10 +313,11 @@ void handleSerial() {
             Serial.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
                 v[0],v[1],v[2],v[3],v[4],v[5]);
         }
-    } else if (cmd.startsWith("C ")) {
-        // 控制模式切換：C 0 = joint-space, C 1 [kp kd] = task-space PD
+    } else if (cmd.startsWith("CM ")) {
+        // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
+        // （前綴從 "C " 改為 "CM "：避開上方 0x8C 回覆模式 "C " 的撞名遮蔽）
         float mode_f, kp = -1, kd = -1;
-        int n = sscanf(cmd.c_str(), "C %f %f %f", &mode_f, &kp, &kd);
+        int n = sscanf(cmd.c_str(), "CM %f %f %f", &mode_f, &kp, &kd);
         if (n >= 1) {
             controlMode = (int)mode_f;
             if (controlMode == 1 && n >= 2) {
@@ -319,6 +342,7 @@ void handleSerial() {
                 okMask[i] = (a && b) ? 1 : 0;
                 if (okMask[i]) okCnt++;
             }
+            curKp = kp; curKi = ki; curKd = kd; curKv = kv;   // 更新 SoT 當前 PID
             Serial.printf("{\"tune\":\"pid\",\"kp\":%d,\"ki\":%d,\"kd\":%d,\"kv\":%d,"
                 "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
                 kp, ki, kd, kv,
@@ -359,6 +383,16 @@ void handleSerial() {
             float degChange = MOTOR_SIGN[idx] * (float)delta * 360.0f / 16384.0f;
             Serial.printf("{\"status\":\"test M%d\",\"raw_delta\":%lld,\"deg_change\":%.2f}\n",
                 idx + 1, delta, degChange);
+        }
+    } else if (cmd.startsWith("U ")) {
+        // 擾動脈衝：U <motor 0-5> <deg> <ms> — HOLD 模式下對該馬達 F5 目標加 deg 偏移持續 ms，再自動歸零
+        int idx, ms; float deg;
+        if (sscanf(cmd.c_str(), "U %d %f %d", &idx, &deg, &ms) == 3 && idx >= 0 && idx < NUM_MOTORS) {
+            bumpMotor = idx;
+            bumpDeg = deg;
+            bumpUntilMs = millis() + constrain(ms, 1, 5000);
+            Serial.printf("{\"status\":\"bump\",\"motor\":%d,\"deg\":%.2f,\"ms\":%d,\"hold\":%d}\n",
+                idx + 1, deg, ms, holdMode ? 1 : 0);
         }
     } else if (cmd.startsWith("R ")) {
         float v[6];
@@ -751,8 +785,11 @@ void loop() {
 
         if (holdMode) {
             // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
+            bool bumpActive = (bumpMotor >= 0 && millis() < bumpUntilMs);
+            if (bumpMotor >= 0 && !bumpActive) bumpMotor = -1;   // 脈衝結束，自動歸零
             for (int i = 0; i < NUM_MOTORS; i++) {
                 motorTargets[i] = holdAngles[i];
+                if (bumpActive && i == bumpMotor) motorTargets[i] += bumpDeg;
             }
             float maxAbs = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
@@ -847,13 +884,15 @@ void loop() {
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
-                  "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d",
+                  "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
+                  "\"pid\":[%u,%u,%u,%u]",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
         ok, enc.zeroed ? 1 : 0, posEnabled ? 1 : 0, controlMode,
         eflg, tec, rec,
-        nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0);
+        nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0,
+        curKp, curKi, curKd, curKv);
 
     if (posEnabled && holdMode) {
         float herr[NUM_MOTORS];

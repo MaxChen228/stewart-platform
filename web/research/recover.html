@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Push-Recovery 操作台</title>
+<link rel="stylesheet" href="lab.css">
+</head>
+<body>
+<div id="lab-header"></div>
+<div class="wrap">
+  <div class="counts" style="margin-bottom:14px;">
+    <span>控制律</span>
+    <span>
+      <button class="modebtn" data-m="0" style="flex:none;padding:6px 14px;font-size:12px">mode 0 · joint-space</button>
+      <button class="modebtn" data-m="1" style="flex:none;padding:6px 14px;font-size:12px">mode 1 · task-space PD</button>
+    </span>
+  </div>
+  <div class="steps" id="steps"></div>
+
+  <div class="lab-status" id="status">準備中…</div>
+  <div class="lab-hint" id="hint"></div>
+
+  <div class="meter">
+    <div class="fill" id="fill"></div>
+    <div class="thr" id="thr"></div>
+    <div class="txt" id="meterTxt">位移 —</div>
+  </div>
+  <div class="counts">
+    <span>有效推：<b id="cValid">0</b> ／ 偵測 <b id="cAll">0</b></span>
+    <span id="cBase">基線校正中…</span>
+  </div>
+
+  <div class="btns">
+    <button id="primary" disabled>連線中…</button>
+    <button id="abort" class="danger">⛔ 中止</button>
+  </div>
+
+  <div class="log" id="log"><div class="empty">尚無推動。開始本段後，推平台一下就會出現在這裡。</div></div>
+
+  <div class="done" id="done">
+    <h2>✅ 三段掃頻完成</h2>
+    <div>跑分析看 σ vs 迴圈頻率：</div>
+    <code>uv run sysid/recover_analyze.py</code>
+    <div class="tiny">σ=回正衰減率（越大越穩）。σ 隨迴圈變快而增大→頻寬是槓桿；持平→控制律/機械問題。<br>
+      ⚠️ 絕對 σ 只描述「被支撐」的平台，可外推的是趨勢 σ(迴圈)。</div>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+// ===== 實驗參數 =====
+const LOOPS = [20, 10, 6];                 // 50 / 100 / 167 Hz
+const NEUTRAL = [0, 0, 105, 0, 0, 0];      // = home（校正後靜止位），enable 不暴衝
+const CAPTURE_MS = 1300;                    // enable 後校正基線/雜訊
+const K_ON = 6, K_SETTLE = 3, K_MINPEAK = 8;
+const SETTLE_HOLD_MS = 400, REFRACTORY_MS = 1500, METER_FULL = 8;
+
+const { norm, median, mad, medianRows } = Lab.stat;
+const sleep = Lab.sleep, hz = (l) => Math.round(1000 / l);
+const lab = new Lab({ title: 'PUSH-RECOVERY 操作台' });
+
+// ===== 狀態 =====
+let seg = 0, phase = 'init', mode = 1;     // 預設 task-space PD（已修撞名 bug 解鎖）
+let aRest = null, noise = 0.05, base = 0, capBuf = [];
+let pushState = 'quiet', peak = 0, peakT = 0, belowSince = 0, lastPushEnd = -1e9;
+let nValid = 0, nAll = 0;
+const sessionTs = stamp();
+
+function stamp() { const d = new Date(), p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}`; }
+
+lab.on('open', () => { if (phase === 'init') gotoIdle(); });
+lab.on('telemetry', onData);
+
+function onData(d) {
+  if (d.pos !== 1) return;
+  if (phase === 'capturing') { capBuf.push(d.a); return; }
+  if (phase !== 'armed' || !aRest) return;
+
+  const dev = norm(d.a.map((v, i) => v - aRest[i]));
+  drawMeter(dev);
+  const now = performance.now();
+  if (pushState === 'quiet') {
+    if (dev > base + K_ON * noise && (now - lastPushEnd) > REFRACTORY_MS) {
+      pushState = 'push'; peak = dev; peakT = now; belowSince = 0;
+    }
+  } else {
+    if (dev > peak) { peak = dev; peakT = now; }
+    if (dev < base + K_SETTLE * noise) {
+      if (!belowSince) belowSince = now;
+      else if (now - belowSince > SETTLE_HOLD_MS) endPush();
+    } else belowSince = 0;
+  }
+}
+
+function endPush() {
+  pushState = 'quiet'; lastPushEnd = performance.now(); nAll++;
+  const settleS = (belowSince - peakT) / 1000;
+  let tag, cls;
+  if (peak < base + K_MINPEAK * noise) { tag = '太弱·重推'; cls = 'weak'; }
+  else { nValid++; tag = '已登記'; cls = 'ok'; }
+  addLog(nAll, peak, settleS, tag, cls);
+  $('cValid').textContent = nValid; $('cAll').textContent = nAll;
+  if (phase === 'armed') $('primary').textContent = `■ 結束 ${hz(LOOPS[seg])}Hz（有效 ${nValid}）`;
+}
+
+function drawMeter(dev) {
+  $('fill').style.width = Math.min(100, dev / METER_FULL * 100) + '%';
+  $('thr').style.left = Math.min(100, (base + K_ON * noise) / METER_FULL * 100) + '%';
+  $('meterTxt').textContent = `位移 ${dev.toFixed(2)}°`;
+  $('fill').style.background = dev > base + K_ON * noise ? 'var(--warn)' : 'var(--go)';
+}
+
+// ===== 流程 =====
+function renderSteps() {
+  $('steps').innerHTML = LOOPS.map((l, i) => {
+    const c = i < seg ? 'done' : i === seg ? 'cur' : '';
+    return `<div class="step ${c}">${i < seg ? '✓ ' : ''}${hz(l)}Hz<span class="sub">loop ${l}ms</span></div>`;
+  }).join('');
+}
+
+function gotoIdle() {
+  phase = 'idle'; renderSteps();
+  $('status').textContent = `mode ${mode} · 第 ${seg + 1}/${LOOPS.length} 段 — ${hz(LOOPS[seg])}Hz`;
+  $('hint').textContent = '確認平台在中位、周圍淨空、手放電源旁，再按開始。';
+  $('cBase').textContent = '基線：待校正';
+  const b = $('primary'); b.disabled = false; b.className = 'go'; b.textContent = `▶ 開始 ${hz(LOOPS[seg])}Hz 段`;
+}
+
+async function startSeg() {
+  const loop = LOOPS[seg];
+  $('primary').disabled = true;
+  $('status').textContent = `${hz(loop)}Hz — enable + 校正基線…`;
+  $('hint').textContent = '平台正在使能並 hold 當前姿態，請勿觸碰…';
+
+  if (seg === 0) { lab.send('A0'); await sleep(300); }   // 乾淨輪詢
+  lab.send(`CM ${mode}`); await sleep(200);              // 切控制律（mode 0/1）
+  lab.send(`L ${loop}`); await sleep(200);
+  lab.send('P ' + NEUTRAL.join(' ')); await sleep(200);
+  lab.send('E'); await sleep(1500);                        // enable，hold home
+
+  phase = 'capturing'; capBuf = [];
+  await sleep(CAPTURE_MS);
+  phase = 'idle';
+  if (capBuf.length < 5) {
+    $('status').textContent = '⚠️ 收不到遙測'; $('hint').textContent = '確認 ok:6、序列埠連線後重試。';
+    $('primary').disabled = false; return;
+  }
+  aRest = medianRows(capBuf);
+  const devs = capBuf.map(a => norm(a.map((v, i) => v - aRest[i])));
+  noise = Math.max(0.02, mad(devs) * 1.4826); base = median(devs);
+  $('cBase').textContent = `基線 ${base.toFixed(2)}° · 雜訊 ${noise.toFixed(3)}°`;
+
+  await lab.recStart(`recover_m${mode}_${hz(loop)}Hz_${sessionTs}`);
+  phase = 'armed'; pushState = 'quiet'; nValid = 0; nAll = 0; lastPushEnd = -1e9;
+  clearLog(); $('cValid').textContent = 0; $('cAll').textContent = 0;
+  $('status').textContent = `🟢 ${hz(loop)}Hz 錄製中 — 推它！`;
+  $('hint').textContent = '推平台一下就放手（脈衝），等 ~3 秒回穩再推。目標 6~8 次有效。';
+  const b = $('primary'); b.disabled = false; b.className = 'stop'; b.textContent = `■ 結束 ${hz(loop)}Hz（有效 0）`;
+}
+
+async function endSeg() {
+  $('primary').disabled = true; phase = 'idle';
+  await lab.recStop(); lab.send('D');
+  $('fill').style.width = '0'; seg++;
+  if (seg >= LOOPS.length) finish();
+  else { await sleep(600); gotoIdle(); }
+}
+
+function finish() {
+  phase = 'done'; renderSteps();
+  $('hint').textContent = '';
+  document.querySelector('.done code').textContent =
+    `uv run sysid/recover_analyze.py 'sysid/data/recover_m${mode}_*.jsonl'`;
+  $('status').style.display = 'none';
+  document.querySelector('.btns').style.display = 'none';
+  document.querySelector('.meter').style.display = 'none';
+  document.querySelector('.counts').style.display = 'none';
+  $('done').style.display = 'block';
+}
+
+async function abort() {
+  await lab.recStop(); lab.send('D'); lab.send('L 20');
+  phase = 'idle'; pushState = 'quiet'; $('fill').style.width = '0';
+  $('status').textContent = '已中止（斷電）'; $('hint').textContent = '按開始可重跑本段。';
+  const b = $('primary'); b.disabled = false; b.className = 'go'; b.textContent = `▶ 開始 ${hz(LOOPS[seg])}Hz 段`;
+}
+
+$('primary').onclick = () => { if (phase === 'idle') startSeg(); else if (phase === 'armed') endSeg(); };
+$('abort').onclick = abort;
+
+// 控制律切換（只在未開始時可改；切換=重置掃頻進度，因兩模式分開比）
+function renderMode() {
+  document.querySelectorAll('.modebtn').forEach(b => {
+    const on = +b.dataset.m === mode;
+    b.className = 'modebtn' + (on ? ' go' : '');
+  });
+}
+document.querySelectorAll('.modebtn').forEach(b => b.onclick = () => {
+  if (phase === 'armed') return;            // 段內不可改
+  const m = +b.dataset.m;
+  if (m === mode) return;
+  mode = m; seg = 0; renderMode(); gotoIdle();
+});
+renderMode();
+
+// ===== log =====
+function clearLog() { $('log').innerHTML = ''; }
+function addLog(n, pk, st, tag, cls) {
+  const e = document.querySelector('.log .empty'); if (e) e.remove();
+  const settle = (cls === 'ok' && isFinite(st) && st > 0) ? `回穩 ${st.toFixed(1)}s` : '—';
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<span class="n">#${n}</span><span class="pk" style="width:90px;color:#bbb">峰 ${pk.toFixed(2)}°</span>` +
+                  `<span class="st" style="color:#89c">${settle}</span><span class="${cls}">${tag}</span>`;
+  $('log').prepend(row);
+}
+
+renderSteps();
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stewart 研究實驗室</title>
+<link rel="stylesheet" href="lab.css">
+</head>
+<body>
+<div id="lab-header"></div>
+<div class="wrap">
+  <div class="lab-status" style="font-size:20px;">研究實驗室</div>
+  <div class="lab-hint">受控物理實驗操作台。與主控頁（控制 UI／Scope）解耦，各自獨立。</div>
+  <div class="cards" id="cards"></div>
+  <div class="tiny" style="text-align:center;margin-top:24px;">
+    新增實驗：複製 <code>_template.html</code> → 改名 → 在本頁 <code>EXPERIMENTS</code> registry 加一行。
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+// 中樞頁：注入頂欄（返回主控、不需連線燈），不開 WS
+Lab.mountHeader('研究實驗室', { back: { text: '‹ 主控頁', href: '/' }, showWs: false });
+
+// ===== 實驗註冊表：加實驗 = 加一筆 =====
+const EXPERIMENTS = [
+  {
+    file: 'monitor.html', icon: '📈', name: '即時監控研究儀',
+    desc: '六軸滾動波形＋選定軸即時 FFT/峰峰/主頻/σ、CAN 健康常駐預警、K-PID 滑桿即時調＋事件標記、U 擾動注入、一鍵錄製。改參數那一刻波形連續可見。',
+    status: 'ready',
+  },
+  {
+    file: 'recover.html', icon: '⟳', name: 'Push-Recovery 掃頻',
+    desc: '手推平台、量回正衰減率 σ，跨迴圈頻率（50/100/167Hz）比較，回答「迴圈加速治不治發散」。',
+    status: 'ready',
+  },
+  // { file:'xxx.html', icon:'…', name:'…', desc:'…', status:'wip' },
+];
+
+const TAG = { ready: ['ready', '可用'], wip: ['wip', '開發中'] };
+$('cards').innerHTML = EXPERIMENTS.map(e => {
+  const [cls, label] = TAG[e.status] || ['', e.status];
+  const href = e.status === 'wip' ? null : e.file;
+  const tag = `<span class="tag ${cls}">${label}</span>`;
+  const inner = `<div class="ic">${e.icon}</div><div class="name">${e.name}</div>` +
+                `<div class="desc">${e.desc}</div>${tag}`;
+  return href ? `<a class="card" href="${href}">${inner}</a>`
+              : `<div class="card" style="opacity:.55;cursor:default">${inner}</div>`;
+}).join('');
+</script>
+</body>
+</html>
