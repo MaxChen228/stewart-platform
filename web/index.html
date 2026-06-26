@@ -1126,10 +1126,10 @@ function poseReadOffset() {
 }
 function poseToOffset(pose) {
   if (!Array.isArray(pose)) return null;
-  return [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
+  return window.PlatformSoT.absToRel(pose, NEUTRAL_Z);
 }
 function poseFromOffset(off) {
-  return [off[0], off[1], NEUTRAL_Z + off[2], off[3], off[4], off[5]];
+  return window.PlatformSoT.relToAbs(off, NEUTRAL_Z);
 }
 function pctIn(el, v) {
   const mn = parseFloat(el.min), mx = parseFloat(el.max);
@@ -1283,7 +1283,7 @@ function setPoseErrorLive(actual) {
 let poseReachable = true;
 function poseUpdateGhost() {
   const o = poseReadOffset();
-  ghostTarget = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];   // 絕對 pose（z 疊中位）
+  ghostTarget = poseFromOffset(o);   // 絕對 pose（z 疊中位）
   for (const [id, idx] of POSE_AXES) document.getElementById(id+'-v').textContent = o[idx].toFixed(1);
   schedulePoseWorkspaceScan(o);
   // 6D 工作空間非立方：各 DOF 耦合 → 即時 ik valid 判斷此「組合」是否真可達（滑桿單軸範圍只是上界）
@@ -1302,7 +1302,7 @@ POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input'
 // Home 姿態（絕對 pose）：HOME 鍵與實驗腳本共用的目的地。
 // Server `/api/platform-config` 是 SoT；localStorage 只當離線/舊版備援。
 let platformConfig = window.PlatformSoT ? window.PlatformSoT.mergeConfig({}) : null;
-let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
+let homePose = poseFromOffset([0, 0, 28, 0, 0, 0]);
 try { const h = JSON.parse(localStorage.getItem('pose.home')); if (Array.isArray(h) && h.length === 6 && h.every(Number.isFinite)) homePose = h; } catch (e) {}
 let platformSaveTimer = null;
 function clampInputValue(el, v) {
@@ -1386,7 +1386,7 @@ function applyPersistedUiState() {
   poseUpdateGhost();
 }
 function poseHomeOffset() {
-  return [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
+  return poseToOffset(homePose);
 }
 function poseApplyHomeToSliders() {
   const off = poseHomeOffset();
@@ -1428,7 +1428,7 @@ window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
   const st = document.getElementById('pose-ctl-status');
   // 絕對 pose：xy/rpy 中位=0、z 疊中位 NEUTRAL_Z。送韌體 P，由韌體 IK 解→死咬（前端不算角度）。
-  const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  const pose = poseFromOffset(o);
   if (!window.Kin.ik(pose).valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
   st.style.color = 'var(--sub)';
   if (followActive) {   // 跟隨下：GO = 更新跟隨目標（濾波器 ease 過去），不發 smoothstep P
@@ -1446,14 +1446,14 @@ window.poseHome = function() {
   poseUpdateGhost();   // followActive 時此呼叫會 streamPF(home) → 濾波器 ease 回 home
   if (followActive) return;
   const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
-  const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  const pose = poseFromOffset(o);
   const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
   window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
 };
 window.poseSetHome = function() {
   // 把當前目標姿態（滑桿值→絕對 pose）設為 Home，寫 server SoT；localStorage 只作備援。
   const o = poseReadOffset();
-  homePose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  homePose = poseFromOffset(o);
   try { localStorage.setItem('pose.home', JSON.stringify(homePose)); } catch (e) {}
   poseSaveHomeToServer();
   const st = document.getElementById('pose-ctl-status');
@@ -1492,7 +1492,7 @@ window.toggleFollow = function() {
 };
 // 韌體確認進跟隨 → 用回傳的絕對 pose 同步滑桿+ghost（不跳），再啟用串流
 function onFollowOn(pose) {
-  const off = [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
+  const off = poseToOffset(pose);
   for (const [id, idx] of POSE_AXES) {
     const el = document.getElementById(id);
     el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));   // clamp 進滑桿範圍
