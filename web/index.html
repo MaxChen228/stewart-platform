@@ -504,6 +504,8 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     <div class="ui-card">
       <div class="ui-card-title">CAN / 迴圈健康</div>
       <div class="h-row" id="bus-health" style="margin-bottom:8px"></div>
+      <div class="dev-label" style="margin-bottom:3px">趨勢 · ok / 迴圈Hz / 讀µs（紅標=EFLG 或 ok&lt;6）</div>
+      <canvas id="can-spark" style="width:100%;height:78px;display:block;background:#070708;border-radius:3px;margin-bottom:8px"></canvas>
       <div class="dev-label" style="margin-bottom:4px">Per-motor 回覆 / 失敗</div>
       <div id="can-now" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;line-height:1.4;font-family:var(--font-mono);font-size:11px">
         <span>M1<br>—</span><span>M2<br>—</span><span>M3<br>—</span>
@@ -1332,6 +1334,48 @@ scope.on('telemetry', d => {
   if ((d.ok??6)<6 || (d.tx??0)>96) { const n=performance.now(); if (n-lastBad>800) {
     scope.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
 });
+
+// CAN 健康簡易時間圖表：3 帶 sparkline（ok 0-6 固定 / 迴圈Hz / 讀µs 自動），EFLG≠0 或 ok<6 畫紅標
+const canBuf = { ok:[], hz:[], us:[], ef:[] }, CAN_N = 400;
+scope.on('telemetry', d => {
+  if (!Array.isArray(d.a)) return;
+  canBuf.ok.push(d.ok ?? null); canBuf.hz.push(d.lhz ?? null);
+  canBuf.us.push(d.cus ?? null); canBuf.ef.push(d.ef ?? 0);
+  for (const k in canBuf) if (canBuf[k].length > CAN_N) canBuf[k].shift();
+});
+const canSpark = $o('can-spark'), csx = canSpark && canSpark.getContext('2d');
+const CAN_BANDS = [
+  { key:'ok', label:'ok',  color:'#27ae60', min:0, max:6, fmt:v=>`${v}/6` },
+  { key:'hz', label:'Hz',  color:'#3498db', auto:true, fmt:v=>v.toFixed(0) },
+  { key:'us', label:'µs',  color:'#e67e22', auto:true, fmt:v=>v.toFixed(0) },
+];
+function drawCanSpark() {
+  if (!canSpark) return;
+  const dpr = devicePixelRatio||1, W = canSpark.width = canSpark.clientWidth*dpr, H = canSpark.height = 78*dpr;
+  csx.clearRect(0,0,W,H);
+  const n = canBuf.ok.length; if (n < 2) return;
+  const bh = H/3;
+  CAN_BANDS.forEach((b, bi) => {
+    const y0 = bi*bh, arr = canBuf[b.key];
+    let mn = b.min, mx = b.max;
+    if (b.auto) { mn=Infinity; mx=-Infinity; for(const v of arr) if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; }
+      if(mn===Infinity){mn=0;mx=1;} const pad=(mx-mn)*0.15||1; mn-=pad; mx+=pad; }
+    const rng = mx-mn || 1;
+    csx.strokeStyle='#1a1a1a'; csx.lineWidth=1; csx.beginPath(); csx.moveTo(0,y0+bh-0.5); csx.lineTo(W,y0+bh-0.5); csx.stroke();
+    // 固定 CAN_N 比例、右錨定（newest 在右、每樣本固定像素）→ 未滿時從右流入、不壓縮
+    const xOf = i => W - (n-1-i) * (W/(CAN_N-1));
+    if (b.key==='ok') for(let i=0;i<n;i++){ if((canBuf.ef[i]||0)!==0 || (arr[i]??6)<6){ const x=xOf(i);
+      csx.strokeStyle='rgba(192,57,43,0.35)'; csx.beginPath(); csx.moveTo(x,y0+2*dpr); csx.lineTo(x,y0+bh-2*dpr); csx.stroke(); } }
+    csx.strokeStyle=b.color; csx.lineWidth=1.4*dpr; csx.beginPath(); let first=true;
+    for(let i=0;i<n;i++){ const v=arr[i]; if(v==null){first=true;continue;}
+      const x=xOf(i), y=y0+bh-3*dpr-((v-mn)/rng)*(bh-6*dpr); if(first){csx.moveTo(x,y);first=false;}else csx.lineTo(x,y); }
+    csx.stroke();
+    const last = arr[n-1];
+    csx.fillStyle='#888'; csx.font=`${9*dpr}px monospace`; csx.textAlign='left'; csx.fillText(b.label, 3*dpr, y0+10*dpr);
+    if(last!=null){ csx.fillStyle=b.color; csx.textAlign='right'; csx.fillText(b.fmt(last), W-3*dpr, y0+10*dpr); }
+  });
+}
+scope.on('render', drawCanSpark);
 
 // 擾動卡即時 HOLD 指示（純資訊：未鎖位時脈衝/battery 無效，提醒不鎖死按鈕）
 scope.on('telemetry', d => {
