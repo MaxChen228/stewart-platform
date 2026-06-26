@@ -6,6 +6,7 @@
 //
 // 用法: node sysid/amp_sweep.js [Ki]   (預設 Ki=30；傳 100 可跑對照)
 const WebSocket = require('ws');
+const { pp, rms } = require('./lc_lib');   // 峰峰/RMS 共用分析函式（SoT，不再內嵌）
 const HOST = 'localhost:3000';
 const M4 = 3;
 const KI = parseInt(process.argv[2] || '30', 10);
@@ -35,10 +36,6 @@ function collector(durMs) {
     ws.on('message', onMsg); await sleep(durMs); ws.off('message', onMsg); resolve({ pts, total, bad, txMax });
   });
 }
-const pp = (pts) => pts.length < 2 ? 0 : Math.max(...pts.map(p => p[1])) - Math.min(...pts.map(p => p[1]));
-const rms = (pts) => { if (!pts.length) return 0; const m = pts.reduce((a, b) => a + b[1], 0) / pts.length;
-  return Math.sqrt(pts.reduce((a, b) => a + (b[1] - m) ** 2, 0) / pts.length); };
-
 async function canHealthy() { const s = await rest('latest'); return s.ok === 6 || (s.ok >= 4 && (s.tx || 0) < 96); }
 
 async function main() {
