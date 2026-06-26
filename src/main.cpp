@@ -109,6 +109,8 @@ static void enterHoldCurrent() {
 // 斷線偵測 + 安全態切換（core1 執行；netTask 只設旗標、不碰馬達）。
 static void checkFailsafe() {
     if (!netIsControlSource || !posEnabled) return;
+    // hbTimeout 心跳僅在 client 週期上行時有效（lastNetRxMs 只認入站 byte）；
+    // 只收不送的 client 會誤觸，故預設 hbTimeoutMs=0 停用、僅靠 socket-close/WiFi-down。
     bool linkLost = !netConnected ||
         (netCfg.hbTimeoutMs > 0 && (millis() - lastNetRxMs > netCfg.hbTimeoutMs));
     if (!linkLost) return;
@@ -833,7 +835,7 @@ void handleSerial() {
     if (!Serial.available()) return;
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    netIsControlSource = false;    // USB 操作員接手 → 解除 WiFi failsafe arm
+    netIsControlSource = false;    // USB 任何指令（含純查詢如 WIFI?）→ 解除 WiFi failsafe arm
     dispatch(cmd, false);
 }
 
