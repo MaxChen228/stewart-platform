@@ -162,14 +162,21 @@ function onLine(line) {
 function createSerialTransport({ onLine, baud }) {
   let serial = null;
   let suppressReconnect = false;
+  let pendingTimer = null;   // 單一待連線 timer：reconnect/release/retry 共用、互斥不堆疊
+
+  // 排程下一次 connect；先清前一個 → 雙重 release（雙擊/upload retry）不會堆出多個 socket
+  function schedule(ms, fn) {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingTimer = null; (fn || connect)(); }, ms);
+  }
 
   async function connect() {
-    if (suppressReconnect) return;
+    if (suppressReconnect || serial) return;   // 既有 socket 即返回，防覆蓋洩漏
     const ports = await SerialPort.list();
     const usbPort = ports.find(p => p.path.includes('usbserial'));
     if (!usbPort) {
       console.error('[Serial] No USB serial port found. Retrying in 3s...');
-      setTimeout(connect, 3000);
+      schedule(3000);
       return;
     }
     // macOS: 用 cu. 開啟避免 tty. 的 carrier detect block
@@ -182,7 +189,7 @@ function createSerialTransport({ onLine, baud }) {
       console.log(`[Serial] ${why}. Reconnecting in 3s...`);
       serial = null;
       lastData = null;
-      if (!suppressReconnect) setTimeout(connect, 3000);
+      if (!suppressReconnect) schedule(3000);
     };
     serial.on('close', () => onGone('disconnected'));
     serial.on('error', (err) => { console.error(`[Serial] error: ${err.message}`); onGone('error'); });  // error 留 stderr
@@ -198,7 +205,7 @@ function createSerialTransport({ onLine, baud }) {
         serial.close();
         console.log(`[Serial] released for upload (${holdMs}ms hold)`);
       }
-      setTimeout(() => { suppressReconnect = false; connect(); }, holdMs);
+      schedule(holdMs, () => { suppressReconnect = false; connect(); });
     },
   };
 }
@@ -209,8 +216,9 @@ function createSerialTransport({ onLine, baud }) {
 function createTcpTransport({ onLine, host, port }) {
   let socket = null;
   let suppressReconnect = false;
-  let hbTimer = null;     // 對 ESP32 週期送 '\n' 心跳（韌體 lastNetRxMs 基準；空行被忽略）
-  let idleTimer = null;   // read-idle 檢查
+  let hbTimer = null;       // 對 ESP32 週期送 '\n' 心跳（韌體 lastNetRxMs 基準；空行被忽略）
+  let idleTimer = null;     // read-idle 檢查
+  let pendingTimer = null;  // 單一待連線 timer：reconnect/release 共用、互斥不堆疊
   let lastRead = 0;
 
   function clearTimers() {
@@ -218,8 +226,14 @@ function createTcpTransport({ onLine, host, port }) {
     if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
   }
 
+  // 排程下一次 connect；先清前一個 → 雙重 release 不會堆出多個 socket/心跳 interval
+  function schedule(ms, fn) {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingTimer = null; (fn || connect)(); }, ms);
+  }
+
   function connect() {
-    if (suppressReconnect) return;
+    if (suppressReconnect || socket) return;   // 既有 socket 即返回，防覆蓋洩漏
     console.log(`[TCP] connecting ${host}:${port}`);
     socket = net.connect({ host, port });
     socket.setNoDelay(true);
@@ -244,7 +258,7 @@ function createTcpTransport({ onLine, host, port }) {
       clearTimers();
       socket = null;
       lastData = null;
-      if (!suppressReconnect) setTimeout(connect, 3000);
+      if (!suppressReconnect) schedule(3000);
     };
     socket.on('close', () => onGone('closed'));
     socket.on('error', (err) => console.error('[TCP] error:', err.message));  // close 隨後觸發 onGone
@@ -261,7 +275,7 @@ function createTcpTransport({ onLine, host, port }) {
         socket.destroy();
         console.log(`[TCP] released for upload (${holdMs}ms hold)`);
       }
-      setTimeout(() => { suppressReconnect = false; connect(); }, holdMs);
+      schedule(holdMs, () => { suppressReconnect = false; connect(); });
     },
   };
 }
