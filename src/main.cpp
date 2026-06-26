@@ -5,6 +5,7 @@
 #include "encoder.h"
 #include "forward_kinematics.h"
 #include "control.h"
+#include "net_transport.h"
 
 Servo42D servos;
 EncoderState enc;
@@ -152,6 +153,10 @@ void setup() {
     delay(200);
     servos.flushReceiveBuffer();
 
+    // WiFi bring-up（P1）：載入 NVS 憑證，若已啟用則自動連線並印 IP。
+    // 失敗不致命——USB Serial 仍是主路徑。WiFi 細節封裝在 net_transport。
+    netBoot();
+
     Serial.println("{\"status\":\"ready\"}");
 }
 
@@ -159,6 +164,9 @@ void handleSerial() {
     if (!Serial.available()) return;
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
+
+    // WIFI 系列指令（P1）先攔截，命中即短路
+    if (netHandleCommand(cmd)) return;
 
     if (cmd == "Z") {
         if (enc.zeroAll(servos)) {
