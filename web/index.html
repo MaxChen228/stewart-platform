@@ -397,14 +397,14 @@ body.paused .chart-wrap:not(.phase) canvas { cursor: grab; }
       </div>
       <div id="tune-motion-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-6px 0 12px 0;min-height:14px"></div>
 
-      <div class="dev-label" style="margin-bottom:6px">vFOC PID (0x96)</div>
+      <div class="dev-label" style="margin-bottom:6px">vFOC PID (0x96) <span id="pid-sot" style="color:var(--contra);font-size:9px;letter-spacing:0;margin-left:4px"></span></div>
       <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
-        <span>Kp</span><input type="number" id="m-kp" value="220" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <span>Ki</span><input type="number" id="m-ki" value="100" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Kp</span><input type="number" id="m-kp" value="1024" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Ki</span><input type="number" id="m-ki" value="0" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
       <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
-        <span>Kd</span><input type="number" id="m-kd" value="270" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <span>Kv</span><input type="number" id="m-kv" value="320" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Kd</span><input type="number" id="m-kd" value="0" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Kv</span><input type="number" id="m-kv" value="0" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
       <button class="chip zbtn" style="width:100%" onclick="updateMotorPID()" disabled>Apply PID</button>
       <div id="tune-pid-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:6px 0 0 0;min-height:14px"></div>
@@ -1090,11 +1090,11 @@ function connectWS() {
         }
       }
       if (data.tune) {
-        // Apply 成功就把當下值存 localStorage，重整後復原
+        // Apply 成功就把當下值存 localStorage，重整後復原。
+        // PID 不存：telemetry d.pid 是唯一真相源（SoT），開機後反寫，不靠 localStorage 第二來源。
         try {
           if (data.tune === 'current' && data.okCnt === 6) localStorage.setItem('tune.mA', data.mA);
           if (data.tune === 'motion'  && data.okCnt === 6) { localStorage.setItem('tune.speed', data.speed); localStorage.setItem('tune.acc', data.acc); }
-          if (data.tune === 'pid'     && data.okCnt === 6) { localStorage.setItem('tune.kp', data.kp); localStorage.setItem('tune.ki', data.ki); localStorage.setItem('tune.kd', data.kd); localStorage.setItem('tune.kv', data.kv); }
         } catch(e) {}
         const targetMap = {
           current: { el: 'tune-current-status', label: `${data.mA}mA` },
@@ -1287,14 +1287,11 @@ window.connectSerial = connectWS;
 // Restore tuning inputs from localStorage（覆蓋 HTML 預設值）
 (function restoreTuning() {
   try {
+    // PID 不在此復原：由 telemetry d.pid 反寫（SoT）。僅 mA/speed/acc 無 telemetry 真值源，靠 localStorage。
     const map = [
       ['tune.mA',    'work-current'],
       ['tune.speed', 'pos-speed'],
       ['tune.acc',   'pos-acc'],
-      ['tune.kp',    'm-kp'],
-      ['tune.ki',    'm-ki'],
-      ['tune.kd',    'm-kd'],
-      ['tune.kv',    'm-kv'],
     ];
     for (const [k, id] of map) {
       const v = localStorage.getItem(k);
@@ -1345,6 +1342,16 @@ scope.on('telemetry', d => {
     `<div class="h-cell ${c?c(d):''}"><div class="lbl">${l}</div><div class="val">${v(d)}</div></div>`).join('');
   if ((d.ok??6)<6 || (d.tx??0)>96) { const n=performance.now(); if (n-lastBad>800) {
     scope.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
+});
+
+// vFOC PID 欄位反寫韌體真值（SoT：telemetry d.pid 是唯一真相源，非編輯中才覆寫）
+let pidSynced=false;
+scope.on('telemetry', d => {
+  if (!Array.isArray(d.pid)) return;
+  [['m-kp',0],['m-ki',1],['m-kd',2],['m-kv',3]].forEach(([id,i]) => {
+    const el=$o(id); if (el && document.activeElement!==el && +el.value!==d.pid[i]) el.value=d.pid[i];
+  });
+  if (!pidSynced){ pidSynced=true; const s=$o('pid-sot'); if(s) s.textContent='✓ 同步韌體真值'; }
 });
 
 // FFT + σ（選定軸，herr 優先 fallback a）
