@@ -415,6 +415,29 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
     </div>
 
+    <!-- 1.6 標準動作（host 串流 pose(t) → PF → 韌體速限濾波器跟隨；參數可即時調）-->
+    <div class="ui-card">
+      <div class="ui-card-title">標準動作</div>
+      <div class="dev-label" style="margin-bottom:6px">host 串流 · 速度受限跟隨（拖快不硬撲）· 需先 HOLD</div>
+      <select id="motion-sel" onchange="onMotionSel()" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 4px;border:1px solid var(--borderBase);border-radius:2px;background:var(--bgBase);color:var(--fg)"></select>
+      <div id="motion-params" style="display:flex;flex-direction:column;gap:5px;margin-top:8px"></div>
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
+        <span title="跑幾圈後自動回中位（0=無限循環）">圈</span>
+        <input type="number" id="motion-loops" value="0" min="0" max="999" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="chip zbtn" id="motion-play" onclick="motionToggle()" disabled style="flex:2;font-weight:600">▶ 播放</button>
+        <button class="chip zbtn" onclick="motionStopBtn()" disabled style="flex:1">■ 停</button>
+      </div>
+      <div style="display:grid;grid-template-columns:38px 1fr 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px" title="跟隨速度上限 = 所有動作的硬體安全閥">
+        <span>vmax</span>
+        <input type="number" id="vf-t" value="60" min="1" max="500" step="5" title="平移 mm/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <input type="number" id="vf-r" value="45" min="1" max="360" step="5" title="旋轉 °/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <button class="chip zbtn" onclick="applyVF()" disabled style="padding:2px 8px;font-size:11px">套用</button>
+      </div>
+      <div id="motion-status" style="color:var(--sub);font-size:10px;margin-top:6px;min-height:12px"></div>
+    </div>
+
     <!-- 2. 繞擾動控制（U 單軸 / W 模態 / battery 序列；client 看門狗，韌體 U/W 自限保底）-->
     <div class="ui-card">
       <div class="ui-card-title">擾動控制</div>
@@ -1023,8 +1046,132 @@ function onFollowOn(pose) {
   poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
   followActive = true;
   updateFollowUI();
+  if (pendingPlay) _motionStart();   // 動作播放觸發的 arm → 跟隨就緒即啟動
 }
-function followReset() { if (followActive || _pfTrailTimer) { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } updateFollowUI(); } }
+function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } motionStop(); updateFollowUI(); }
+
+// ===== 標準動作庫：host 串流 pose(t) → PF → 韌體速限濾波器跟隨 =====
+// 每個動作 = pose(t,p) 回「絕對 pose」[x,y,z,roll,pitch,yaw]；參數可即時調（每 tick 重讀）。
+const TAU = Math.PI * 2;
+const ss = (x) => { x = Math.max(0, Math.min(1, x)); return x*x*(3-2*x); };   // smoothstep 0..1
+const MOTIONS = [
+  { id:'helix', label:'螺旋升降', per:(p)=>p.T,
+    params:[{k:'r',l:'半徑',min:0,max:40,def:15,step:1,u:'mm'},{k:'zlo',l:'低點',min:-15,max:0,def:-8,step:1,u:'mm'},
+            {k:'zhi',l:'高點',min:0,max:30,def:8,step:1,u:'mm'},{k:'T',l:'週期',min:1,max:20,def:6,step:0.5,u:'s'},
+            {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
+    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t, z=p.zlo+(p.zhi-p.zlo)*(0.5-0.5*Math.cos(w*t));
+      return [p.r*Math.cos(th), p.r*Math.sin(th), NEUTRAL_Z+z, 0,0,0]; } },
+  { id:'poke', label:'法向推擠回彈', per:(p)=>p.push+p.ret+p.rest,
+    params:[{k:'d',l:'距離',min:0,max:30,def:18,step:1,u:'mm'},{k:'push',l:'推時長',min:0.1,max:1,def:0.25,step:0.05,u:'s'},
+            {k:'ret',l:'回時長',min:0.1,max:2,def:0.6,step:0.05,u:'s'},{k:'rest',l:'間隔',min:0,max:3,def:0.6,step:0.1,u:'s'}],
+    fn:(t,p)=>{ const T=p.push+p.ret+p.rest, ph=t%T; let a=0;          // 法向=+z（平台水平），非對稱推/回
+      if(ph<p.push) a=ss(ph/p.push); else if(ph<p.push+p.ret) a=1-ss((ph-p.push)/p.ret);
+      return [0,0,NEUTRAL_Z+p.d*a,0,0,0]; } },
+  { id:'yaw', label:'偏航擺盪', per:(p)=>p.T,
+    params:[{k:'A',l:'幅度',min:0,max:60,def:30,step:1,u:'°'},{k:'T',l:'週期',min:0.5,max:10,def:3,step:0.5,u:'s'},
+            {k:'sym',l:'雙向',min:0,max:1,def:0,step:1,u:''}],
+    fn:(t,p)=>{ const w=TAU/p.T, yaw=p.sym? p.A*Math.sin(w*t) : p.A*(0.5-0.5*Math.cos(w*t));   // sym0=純CCW單向
+      return [0,0,NEUTRAL_Z,0,0,yaw]; } },
+  { id:'coning', label:'進動 coning', per:(p)=>p.T,
+    params:[{k:'A',l:'傾角',min:0,max:12,def:6,step:0.5,u:'°'},{k:'T',l:'週期',min:1,max:12,def:4,step:0.5,u:'s'},
+            {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
+    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t; return [0,0,NEUTRAL_Z, p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
+  { id:'idle', label:'漂浮 idle', per:()=>0,    // 無自然週期 → 僅無限循環
+    params:[{k:'tr',l:'平移範圍',min:0,max:20,def:8,step:1,u:'mm'},{k:'rr',l:'旋轉範圍',min:0,max:12,def:4,step:0.5,u:'°'},
+            {k:'spd',l:'速度',min:0.2,max:3,def:1,step:0.1,u:'×'}],
+    fn:(t,p)=>{ const s=p.spd, d=(f1,f2,ph)=>0.5*Math.sin(s*f1*t)+0.5*Math.sin(s*f2*t+ph);   // 互質頻率和=平滑準隨機
+      return [p.tr*d(0.17,0.31,1.3), p.tr*d(0.13,0.27,2.1), NEUTRAL_Z+p.tr*0.6*d(0.11,0.23,0.7),
+              p.rr*d(0.19,0.29,0.4), p.rr*d(0.23,0.37,1.9), p.rr*d(0.15,0.33,2.7)]; } },
+  { id:'fig8', label:'8字 Lissajous', per:(p)=>p.T,
+    params:[{k:'ax',l:'X幅',min:0,max:40,def:20,step:1,u:'mm'},{k:'ay',l:'Y幅',min:0,max:40,def:15,step:1,u:'mm'},
+            {k:'ratio',l:'頻比',min:1,max:4,def:2,step:1,u:'×'},{k:'T',l:'週期',min:1,max:15,def:6,step:0.5,u:'s'}],
+    fn:(t,p)=>{ const w=TAU/p.T; return [p.ax*Math.sin(w*t), p.ay*Math.sin(p.ratio*w*t), NEUTRAL_Z, 0,0,0]; } },
+  { id:'buoy', label:'海浪 buoy', per:(p)=>p.T,
+    params:[{k:'A',l:'傾角',min:0,max:12,def:5,step:0.5,u:'°'},{k:'H',l:'起伏',min:0,max:25,def:4,step:1,u:'mm'},
+            {k:'T',l:'週期',min:1,max:12,def:5,step:0.5,u:'s'},{k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
+    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t;
+      return [0,0,NEUTRAL_Z+p.H*Math.sin(w*t), p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
+  { id:'heartbeat', label:'心跳 heartbeat', per:(p)=>p.T,
+    params:[{k:'d',l:'強度',min:0,max:25,def:12,step:1,u:'mm'},{k:'T',l:'節律',min:0.6,max:3,def:1.2,step:0.1,u:'s'}],
+    fn:(t,p)=>{ const ph=t%p.T, w=0.05*p.T, g=(tc,amp)=>amp*Math.exp(-(((ph-tc)/w)**2));
+      return [0,0,NEUTRAL_Z+p.d*(g(0.08*p.T,1.0)+g(0.22*p.T,0.6)), 0,0,0]; } },   // lub-dub
+];
+
+const MOTION_HZ = 30;
+let platHolding = false, pendingPlay = false;
+let motion = { def:null, t0:0, raf:null, mLast:0 };
+function motionParamBox(){ return document.getElementById('motion-params'); }
+function selectedMotion(){ return MOTIONS.find(m => m.id === document.getElementById('motion-sel').value); }
+function renderMotionParams(){
+  const def = selectedMotion(), box = motionParamBox(); box.innerHTML = '';
+  if (!def) return;
+  def.params.forEach(pr => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:grid;grid-template-columns:54px 1fr 44px;gap:4px;align-items:center;font-size:11px';
+    row.innerHTML = `<span title="${pr.l}">${pr.l}</span>` +
+      `<input type="range" data-k="${pr.k}" min="${pr.min}" max="${pr.max}" value="${pr.def}" step="${pr.step}">` +
+      `<span class="mp-v" style="text-align:right">${pr.def}${pr.u}</span>`;
+    const inp = row.querySelector('input'), vv = row.querySelector('.mp-v');
+    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; });
+    box.appendChild(row);
+  });
+}
+function readMotionParams(){ const o = {}; motionParamBox().querySelectorAll('input').forEach(i => o[i.dataset.k] = parseFloat(i.value)); return o; }
+function updateMotionUI(running){
+  const b = document.getElementById('motion-play'); if (!b) return;
+  b.textContent = running ? '⏸ 運行中' : '▶ 播放';
+  b.style.background = running ? 'var(--contra)' : ''; b.style.color = running ? '#fff' : '';
+}
+function motionTick(now){
+  if (!motion.def || !followActive) { motion.raf = null; return; }   // follow 掉了就停
+  motion.raf = requestAnimationFrame(motionTick);
+  if (now - motion.mLast < 1000 / MOTION_HZ) return;
+  motion.mLast = now;
+  const t = (now - motion.t0) / 1000, p = readMotionParams();        // 即時重讀參數 → 邊跑邊調
+  const per = motion.def.per(p);
+  if (motion.maxLoops > 0 && per > 0 && t >= motion.maxLoops * per) { motionStop(); return; }   // N 圈後回中
+  const pose = motion.def.fn(t, p), ok = window.Kin.ik(pose).valid;
+  ghostMat.color.setHex(ok ? 0x27AE60 : 0xC0392B);
+  ghostPlatMesh.material.color.setHex(ok ? 0x27AE60 : 0xC0392B);
+  ghostTarget = pose; updateGhost();
+  if (ok) streamPF(pose);                                            // 超工作空間的瞬時 sample 跳過（韌體也會 hold）
+}
+function _motionStart(){
+  pendingPlay = false;
+  motion.def = selectedMotion();
+  motion.t0 = performance.now(); motion.mLast = 0;
+  motion.maxLoops = parseInt(document.getElementById('motion-loops').value) || 0;
+  if (!motion.raf) motion.raf = requestAnimationFrame(motionTick);
+  updateMotionUI(true);
+  document.getElementById('motion-status').textContent = `▶ ${motion.def.label}${motion.maxLoops>0?` ×${motion.maxLoops}`:' 循環'}`;
+}
+window.motionToggle = function(){
+  if (motion.def) { motionStop(); return; }
+  const st = document.getElementById('motion-status');
+  if (!platHolding) { st.textContent = '需先按 HOLD'; st.style.color = 'var(--dev)'; return; }
+  st.style.color = 'var(--sub)';
+  if (followActive) _motionStart();
+  else { pendingPlay = true; window.sendCmd('FOLLOW 1'); }   // 先 arm 跟隨，onFollowOn 回來再啟動
+};
+function motionStop(){
+  if (motion.raf) cancelAnimationFrame(motion.raf);
+  motion.raf = null; motion.def = null; pendingPlay = false;
+  if (followActive) streamPF([0, 0, NEUTRAL_Z, 0, 0, 0]);    // 回中位（濾波器 ease）
+  ghostTarget = [0, 0, NEUTRAL_Z, 0, 0, 0]; ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
+  updateMotionUI(false);
+}
+window.motionStopBtn = function(){ const st = document.getElementById('motion-status'); st.textContent = '■ 已停'; st.style.color = 'var(--sub)'; motionStop(); };
+window.applyVF = function(){
+  const vt = parseFloat(document.getElementById('vf-t').value) || 60, vr = parseFloat(document.getElementById('vf-r').value) || 45;
+  window.sendCmd(`VF ${vt} ${vr}`);
+};
+window.onMotionSel = function(){ motionStop(); renderMotionParams(); };
+// 填充動作選單（單一真相源 = MOTIONS）+ 首次參數渲染
+(function initMotions(){
+  const sel = document.getElementById('motion-sel');
+  MOTIONS.forEach(m => { const o = document.createElement('option'); o.value = m.id; o.textContent = m.label; sel.appendChild(o); });
+  renderMotionParams();
+})();
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
@@ -1161,8 +1308,11 @@ function connectWS() {
       // STATE card: mode + hmax + button
       if (data.pos !== undefined) {
         const holding = !!(data.pos && data.hold);
+        platHolding = holding;          // 動作播放前置條件
         setHoldingUI(holding, data.hmax);
-        if (!data.pos) followReset();   // 馬達失能（D/S/failsafe）→ 韌體 followMode 已關，前端同步
+        // 韌體 followMode（"fl"）為權威：前端以為在跟隨但韌體已退出（failsafe/E/任何路徑）→ 同步歸零，
+        // 避免持續送被靜默丟棄的 PF。涵蓋 enterHoldCurrent 保 posEnabled=true（pos 仍 1）的漏網 case。
+        if (data.fl !== undefined && !data.fl && followActive) followReset();
       }
 
       // Per-motor joint error
