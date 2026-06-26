@@ -279,6 +279,16 @@ body {
 .winsel button:hover { border-color: var(--sub); }
 .winsel button.active { background: var(--contra); border-color: transparent; color: #fff; }
 
+/* 500kbps 匯流排佔用 stacked bar */
+.busbar { display: flex; height: 14px; width: 100%; border: 1px solid var(--borderBase); border-radius: 3px; overflow: hidden; background: var(--bg); margin-bottom: 4px; }
+.busbar .seg { height: 100%; width: 0; transition: width 0.25s ease; }
+.busbar .seg.f5   { background: var(--dual); }
+.busbar .seg.ar   { background: var(--contra); }
+.busbar .seg.poll { background: var(--sub); }
+.bus-legend { display: flex; gap: 10px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 9px; color: var(--sub); margin-bottom: 8px; }
+.bus-legend .it { display: flex; align-items: center; gap: 3px; }
+.bus-legend .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
 /* ===== Canvas Zone ===== */
 .canvas-zone {
   flex: 1;
@@ -390,8 +400,8 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Heave</span><input type="range" id="ps-z" min="-10" max="105" value="0" step="1"><span id="ps-z-v" style="text-align:right">0</span></div>
         <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Surge</span><input type="range" id="ps-x" min="-110" max="110" value="0" step="1"><span id="ps-x-v" style="text-align:right">0</span></div>
         <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Sway</span><input type="range" id="ps-y" min="-100" max="140" value="0" step="1"><span id="ps-y-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Roll</span><input type="range" id="ps-r" min="-6" max="9" value="0" step="0.5"><span id="ps-r-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Pitch</span><input type="range" id="ps-p" min="-7" max="7" value="0" step="0.5"><span id="ps-p-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Roll</span><input type="range" id="ps-r" min="-20" max="20" value="0" step="0.5"><span id="ps-r-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Pitch</span><input type="range" id="ps-p" min="-20" max="20" value="0" step="0.5"><span id="ps-p-v" style="text-align:right">0</span></div>
         <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Yaw</span><input type="range" id="ps-w" min="-70" max="70" value="0" step="1"><span id="ps-w-v" style="text-align:right">0</span></div>
       </div>
       <div style="display:grid;grid-template-columns:34px 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
@@ -402,6 +412,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <button class="chip zbtn" onclick="poseGo()" disabled style="flex:2;font-weight:600">GO</button>
         <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
       </div>
+      <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
     </div>
 
     <!-- 2. 繞擾動控制（U 單軸 / W 模態 / battery 序列；client 看門狗，韌體 U/W 自限保底）-->
@@ -530,6 +541,14 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     <div class="ui-card">
       <div class="ui-card-title">CAN / 迴圈健康</div>
       <div class="h-row" id="bus-health" style="margin-bottom:8px"></div>
+      <div class="dev-label" style="margin-bottom:3px;display:flex;align-items:center">
+        <span>匯流排佔用 · 500kbps</span>
+        <span id="bus-total" style="margin-left:auto;text-transform:none;letter-spacing:0;font-variant-numeric:tabular-nums"></span>
+      </div>
+      <div class="busbar" id="busbar">
+        <span class="seg f5"></span><span class="seg ar"></span><span class="seg poll"></span>
+      </div>
+      <div class="bus-legend" id="bus-legend"></div>
       <div class="dev-label" style="margin-bottom:3px">趨勢 · ok / 迴圈Hz / 讀µs（紅標=EFLG 或 ok&lt;6）</div>
       <canvas id="can-spark" style="width:100%;height:78px;display:block;background:#070708;border-radius:3px;margin-bottom:8px"></canvas>
       <div class="dev-label" style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
@@ -939,25 +958,73 @@ function poseUpdateGhost() {
   const st = document.getElementById('pose-ctl-status');
   if (!poseReachable) { st.textContent = '✗ 此組合超工作空間'; st.style.color = '#C0392B'; }
   else { st.textContent = ''; st.style.color = 'var(--sub)'; }
+  if (followActive && poseReachable) streamPF(ghostTarget);   // 跟隨：滑桿即時串流 PF
 }
 POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', poseUpdateGhost));
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
-  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
   const st = document.getElementById('pose-ctl-status');
   // 絕對 pose：xy/rpy 中位=0、z 疊中位 NEUTRAL_Z。送韌體 P，由韌體 IK 解→死咬（前端不算角度）。
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   if (!window.Kin.ik(pose).valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
-  window.sendCmd(`P ${pose.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
   st.style.color = 'var(--sub)';
+  if (followActive) {   // 跟隨下：GO = 更新跟隨目標（濾波器 ease 過去），不發 smoothstep P
+    streamPF(pose);
+    st.textContent = `→ 跟隨目標 [${pose.map(x=>x.toFixed(1)).join(', ')}]`;
+    return;
+  }
+  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
+  window.sendCmd(`P ${pose.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
   st.textContent = `→ 絕對 pose [${pose.map(x=>x.toFixed(1)).join(', ')}] ${ms}ms`;
 };
 window.poseHome = function() {
   POSE_AXES.forEach(([id]) => { document.getElementById(id).value = 0; });
-  poseUpdateGhost();
+  poseUpdateGhost();   // followActive 時此呼叫會 streamPF(neutral) → 濾波器 ease 回中位
+  if (followActive) return;
   const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
   window.sendCmd(`P 0 0 ${NEUTRAL_Z} 0 0 0 ${ms}`);   // 絕對中位
 };
+
+// ===== 跟隨模式：FOLLOW 1/0 + PF 串流（速度受限濾波器在韌體；拖快不硬撲）=====
+let followActive = false;
+const PF_THROTTLE_MS = 30;          // PF 串流節流（coalesce 到最新）
+let _pfPending = null, _pfLast = 0, _pfTrailTimer = null;
+function _pfFlush() {
+  _pfTrailTimer = null;
+  if (_pfPending == null || !followActive) { _pfPending = null; return; }
+  _pfLast = performance.now();
+  window.sendCmd(`PF ${_pfPending.map(x=>x.toFixed(3)).join(' ')}`);
+  _pfPending = null;
+}
+function streamPF(pose) {        // 共用串流原語（Phase 3 動作引擎也走這條）
+  _pfPending = pose.slice();
+  const dt = performance.now() - _pfLast;
+  if (dt >= PF_THROTTLE_MS) _pfFlush();
+  else if (!_pfTrailTimer) _pfTrailTimer = setTimeout(_pfFlush, PF_THROTTLE_MS - dt);
+}
+function updateFollowUI() {
+  const b = document.getElementById('follow-toggle');
+  if (!b) return;
+  b.textContent = followActive ? '🎯 跟隨模式 ON · 拖滑桿即時跟' : '🎯 跟隨模式 OFF';
+  b.style.background = followActive ? 'var(--contra)' : '';
+  b.style.color = followActive ? '#fff' : '';
+}
+window.toggleFollow = function() {
+  if (followActive) { followActive = false; window.sendCmd('FOLLOW 0'); updateFollowUI(); }
+  else { window.sendCmd('FOLLOW 1'); }   // followActive 待韌體 {"status":"follow on"} 回覆才設真
+};
+// 韌體確認進跟隨 → 用回傳的絕對 pose 同步滑桿+ghost（不跳），再啟用串流
+function onFollowOn(pose) {
+  const off = [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
+  for (const [id, idx] of POSE_AXES) {
+    const el = document.getElementById(id);
+    el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));   // clamp 進滑桿範圍
+  }
+  poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
+  followActive = true;
+  updateFollowUI();
+}
+function followReset() { if (followActive || _pfTrailTimer) { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } updateFollowUI(); } }
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
@@ -1095,6 +1162,7 @@ function connectWS() {
       if (data.pos !== undefined) {
         const holding = !!(data.pos && data.hold);
         setHoldingUI(holding, data.hmax);
+        if (!data.pos) followReset();   // 馬達失能（D/S/failsafe）→ 韌體 followMode 已關，前端同步
       }
 
       // Per-motor joint error
@@ -1121,6 +1189,8 @@ function connectWS() {
       if (data.status) {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
+        if (data.status === 'follow on' && Array.isArray(data.pose)) onFollowOn(data.pose);
+        if (data.status === 'follow off') followReset();
         if (data.status.includes('zeroed')) {
           lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
         }
@@ -1174,6 +1244,7 @@ function connectWS() {
     document.getElementById('status').className = 'nav-status disconnected';
     updateTransportBadge({ kind: null, state: 'selecting', detail: '' });  // server 斷 → 傳輸狀態未知，轉灰
     document.querySelectorAll('.zbtn').forEach(b => b.disabled = true);
+    followReset();   // 斷線 → 韌體跟隨態不可知，前端歸零（重連後須重按 HOLD+跟隨）
     setTimeout(connectWS, 1000);
   };
 }
@@ -1413,6 +1484,41 @@ scope.on('telemetry', d => {
   if ((d.ok??6)<6 || (d.tx??0)>96) { const n=performance.now(); if (n-lastBad>800) {
     scope.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
 });
+
+// ===== 500kbps 匯流排佔用（韌體實測幀數 → CAN 幀位元換算）=====
+// 幀位元（CAN 2.0A, 11-bit ID, 含 3-bit IFS, 未含位填充）= 47 + 8×DLC：
+//   F5(DLC8)=111  0x35查詢(DLC2)=63  0x35回覆/廣播(DLC8)=111
+// STUFF=平均位填充近似（標稱，實際依資料內容 0~25%）。佔用% = bits /(窗ms×500)。
+const BUS_STUFF = 1.10;
+function busOccupancy(bus, ar) {
+  if (!bus || !bus.ms) return null;
+  const cap = bus.ms * 500;                       // @500kbps 窗內可用位元
+  const f5   = (bus.f5||0) * 111 * BUS_STUFF;     // F5 指令
+  const poll = (bus.q ||0) * (63 + 111) * BUS_STUFF; // 輪詢：查詢 + 保證回覆
+  const arb  = (bus.rx||0) * 111 * BUS_STUFF;     // auto-return 實收廣播
+  const o = { f5: 100*f5/cap, poll: 100*poll/cap, ar: 100*arb/cap };
+  o.total = o.f5 + o.poll + o.ar;
+  // AR 新鮮度 = 實收/應收（取代 AR 模式下恆 100% 失真的 per-motor 指標）
+  o.arFresh = ar > 0 ? Math.min(100, 100 * (bus.rx||0) / (6 * bus.ms / ar)) : null;
+  return o;
+}
+function updateBusLoad(d) {
+  const bar = document.getElementById('busbar'), tot = document.getElementById('bus-total'), leg = document.getElementById('bus-legend');
+  if (!bar) return;
+  const o = busOccupancy(d.bus, d.ar);
+  if (!o) { if (tot) tot.textContent = '—'; return; }
+  bar.querySelector('.f5').style.width   = o.f5.toFixed(1) + '%';
+  bar.querySelector('.ar').style.width   = o.ar.toFixed(1) + '%';
+  bar.querySelector('.poll').style.width = o.poll.toFixed(1) + '%';
+  tot.textContent = `${o.total.toFixed(0)}% 用 · ${Math.max(0,100-o.total).toFixed(0)}% 餘`;
+  tot.style.color = o.total > 80 ? 'var(--dev)' : o.total > 50 ? 'var(--dual)' : 'var(--sub)';
+  const items = [['F5 指令','var(--dual)',o.f5], ['auto-return','var(--contra)',o.ar], ['輪詢讀取','var(--sub)',o.poll]];
+  let html = items.filter(([,,v]) => v > 0.05).map(([n,c,v]) =>
+    `<span class="it"><span class="dot" style="background:${c}"></span>${n} ${v.toFixed(1)}%</span>`).join('');
+  if (o.arFresh != null) html += `<span class="it" style="color:${o.arFresh<90?'var(--dev)':'var(--contra)'}">AR新鮮 ${o.arFresh.toFixed(0)}% (實收/應收)</span>`;
+  leg.innerHTML = html;
+}
+scope.on('telemetry', d => { if (Array.isArray(d.a)) updateBusLoad(d); });
 
 // CAN 健康簡易時間圖表：3 帶 sparkline（ok 0-6 固定 / 迴圈Hz / 讀µs 自動），EFLG≠0 或 ok<6 畫紅標
 const canBuf = { ok:[], hz:[], us:[], ef:[] }, CAN_N = 400;

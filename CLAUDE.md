@@ -143,6 +143,9 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `E` | 啟動位置控制（0x92 + enable + 開始發 F5） |
 | `S` | 停止追蹤（馬達保持使能，有保持力矩） |
 | `P x y z roll pitch yaw [ms]` | 設定絕對目標姿態（z 絕對 mm）；HOLD 下帶 ms（軌跡時長，預設 1500）→ 韌體 IK→smoothstep 平滑死咬到該絕對 pose；非 HOLD 僅更新 targetPose 供 mode0/1 |
+| `FOLLOW 1`/`FOLLOW 0` | 進/出跟隨模式（僅 HOLD）。進入用 FK(當前角度) 當濾波器起點不跳，回 `{"status":"follow on","pose":[...]}` 供前端同步滑桿。離開凍結當前姿態續純P 死咬 |
+| `PF x y z roll pitch yaw` | 跟隨目標串流（絕對 pose）：高頻、僅更新 followTgt、不回 ack；韌體速限濾波器每 cycle 把關 IK 有效性（超工作空間維持上一有效點）。非 followMode 忽略。host 動作庫亦走此指令 |
+| `VF vmaxT vmaxR` | 跟隨速度上限（mm/s, deg/s）：濾波器追蹤速度的硬上限 = 所有 host 動作的硬體安全閥。預設 60/45 |
 | `K kp ki kd kv` | 設定馬達內部 vFOC PID（0x96，範圍 0-1024） |
 | `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
 | `M mu` | 設定自適應追蹤震動懲罰係數 |
