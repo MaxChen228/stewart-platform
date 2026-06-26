@@ -101,5 +101,3 @@ async function main() {
   ws.close();
 }
 if (require.main === module) main().catch(async e => { console.error(e); await safeStop(); process.exit(1); });
-
-module.exports = require('./disturb_modes.js');   // 向後相容：encDelta/ALL_MODES/DIRS 同源 re-export

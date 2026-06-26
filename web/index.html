@@ -199,7 +199,6 @@ body {
 }
 
 .matrix-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
-.matrix-grid.cols-6 { grid-template-columns: repeat(6, 1fr); }
 
 .matrix-cell {
   background: var(--surface);
@@ -311,6 +310,7 @@ canvas {
 .chart-label .val { color: #9a9a9a; }
 canvas.trace { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; }
 body.paused .chart-wrap:not(.phase) canvas { cursor: grab; }
+body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
 /* ===== 右區：觀測欄（淺色面板，FFT canvas 深色 inset）===== */
 .obs-rail { overflow-y: auto; padding: 20px 16px; display: flex; flex-direction: column; gap: 16px; background: var(--surface); border-left: 1px solid var(--borderBase); }
@@ -955,7 +955,7 @@ window.poseGo = function() {
   const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
   const r = window.Kin.deltaAngle([0,0,NEUTRAL_Z,0,0,0], o);   // ik(中位+offset) − ik(中位)
   const st = document.getElementById('pose-ctl-status');
-  if (!r.valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--danger,#c0392b)'; return; }
+  if (!r.valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
   const denc = r.d.map((v,i) => v * window.DisturbModes.MOTOR_SIGN[i]);   // IK 慣例 → enc 慣例
   window.sendCmd(`G ${denc.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
   st.style.color = 'var(--sub)';
@@ -1314,7 +1314,6 @@ window.resetFK = function() {
   document.getElementById('fk-debug').style.color = 'var(--sub)';
 };
 
-window.connectSerial = connectWS;
 // Restore tuning inputs from localStorage（覆蓋 HTML 預設值）
 (function restoreTuning() {
   try {

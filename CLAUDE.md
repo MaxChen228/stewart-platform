@@ -57,21 +57,18 @@ SERVO42D ×6 (0xF5 position mode, internal 10kHz PID)
 
 ## 幾何定義 — CW 排列
 
-實體馬達從上方俯視為**順時針** M1→M6。程式碼的 base/platform joint 角度已配合 CW：
+實體馬達從上方俯視為**順時針** M1→M6。base/platform joint 角度已配合 CW：
 
 ```
-Pair 1 (M1,M2) @ 0°
-Pair 2 (M3,M4) @ -120° (= 240°)
-Pair 3 (M5,M6) @ +120°
+Pair 1 (M1,M2) @ 210°
+Pair 2 (M3,M4) @ 90°
+Pair 3 (M5,M6) @ -30°
 ```
 
-三個陣列（韌體 `kinematics.h` + 前端 `index.html` 同步）：
-```
-BASE_ANGLES:          [-9.46, 9.46, -129.46, -110.54, 110.54, 129.46]
-PLATFORM_ANGLES:      [-14.035, 14.035, -134.035, -105.965, 105.965, 134.035]
-MOTOR_PLANE_ANGLE:    [-90, 90, -210, -30, 30, 210]
-MOTOR_SIGN:           [1, -1, 1, -1, 1, -1]
-```
+奇數馬達在 `+ANGLE/2` 側、偶數在 `-ANGLE/2` 側（`BASE_ANGLE=18.92` / `PLATFORM_ANGLE=28.07`）。
+`MOTOR_PLANE_ANGLE=[300,120,180,0,60,240]`、`MOTOR_SIGN=[1,-1,1,-1,1,-1]`。
+
+**真相源三處須同步**（改幾何時一起改）：韌體 `kinematics.h`、前端 `web/index.html`（本地 `ik()`+常數）、共用模組 `sysid/kin.js`。實際數值以這三處為準，別在本文件重列（易腐）。
 
 ## CAN 指令
 

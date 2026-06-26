@@ -91,7 +91,7 @@ async function main() {
     // 掃完恢復安靜工作點 [1024,0,0,0]
     ws.send(`K ${KP} ${KI} 0 0`);
     console.log(`\n✓ ${names.length} 格完成。恢復 K=[${KP},${KI},0,0]`);
-    console.log(`分析: uv run sysid/sweep_analyze.py 'sysid/data/sweep_${VAR}*_${ts}*.jsonl'`);
+    console.log(`分析: uv run sysid/recover_analyze.py 'sysid/data/sweep_${VAR}*_${ts}*.jsonl'`);
   }
   ws.close();
   process.exit(0);

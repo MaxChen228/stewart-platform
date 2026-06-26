@@ -2,7 +2,7 @@
 .vscode
 .DS_Store
 node_modules
-.claude/worktrees
+.claude/
 .env
 report_parsed/
 rag_storage/
