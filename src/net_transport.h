@@ -51,6 +51,13 @@ extern DualPrint Out;
 // 建立 in/out queue 並啟動 core0 的 netTask（TCP server）。setup() 末呼叫。
 void netInit();
 
+// Optional OTA upload service. Safe to call repeatedly after WiFi is connected.
+// The callback runs in loop/core1 context from netOtaHandle(), so it may safely
+// call motion-stop code before flash update begins.
+void netOtaBegin();
+void netOtaHandle();
+void netSetOtaStartCallback(void (*cb)());
+
 // 非阻塞取一條 TCP 來源指令（P3）：有則填入 out 回 true，否則 false。
 // loop 端呼叫，語意同 Serial.available 輪詢；指令由 netTask 從 socket 收進 qIn。
 bool netNextCommand(String& out);
@@ -67,4 +74,4 @@ void netBoot();
 // 攔截 WIFI 系列指令：WIFI <ssid> <pass> / WIFION / WIFIOFF / WIFI?
 // 有處理回 true（呼叫端據此短路 dispatch）；非 WIFI 指令回 false。
 // 限制：naive space-split，含空格的 SSID/密碼不支援。
-bool netHandleCommand(const String& cmd);
+bool netHandleCommand(const String& cmd, bool fromNet, bool motionActive);

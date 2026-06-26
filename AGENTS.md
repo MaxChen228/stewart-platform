@@ -1,5 +1,28 @@
 # Stewart Platform — ESP32 + MCP2515 + SERVO42D
 
+## Codex 使用規則
+
+- 先讀本檔，再依任務讀最相關文件；不要把 `.claude/worktrees/` 當成目前真相源。
+- 不要覆蓋或刪除使用者未提交修改。動手前先看 `git status --short`，遇到不相關 dirty files 只忽略。
+- 涉及硬體通電、馬達 enable、歸零、燒錄、長時間實驗、改 CAN bitrate、改 NVS/校正值時，先確認使用者人在硬體旁且同意。
+- 禁止在遠端 TCP/WiFi 控制流程中執行 `Z`/`Z0`~`Z5` 類校正；校正只能 USB 且需實體 home 姿態。
+- 需要即時狀態時優先讀 `curl localhost:3000/api/latest`。不要憑記憶推斷目前姿態、PID、CAN 錯誤或是否連線。
+- 改幾何時必須同步三處：`src/kinematics.h`、`web/index.html`、`sysid/kin.js`。
+- CAN 指令細節以 `docs/servo42d/00-index.md` 作入口；不要只靠本檔摘要猜封包。
+- 系統辨識與控制結論以實測資料為準。新增實驗記錄時追加到 `docs/sysid-research-log.md`，不要改舊 entry。
+- 前端修改通常不必重啟 server；韌體修改才需要 `npm run upload`。
+- 驗證優先順序：JS/server 改動跑相應 Node 流程；韌體改動至少跑 `pio run`；需要硬體才可驗證的項目要明確說明未實測。
+
+## Codex 可用技能與代理
+
+- Repo 技能在 `.agents/skills/`。常用：
+  - `stewart-servo42d-can`：查 SERVO42D CAN 協定、封包、CRC、MCP2515 注意事項。
+  - `stewart-sysid-gate`：規劃/執行系統辨識、Gate A、資料記錄與分析。
+  - `stewart-firmware-safety`：韌體、校正、enable、failsafe、WiFi/TCP 控制的安全檢查。
+- Project custom agents 在 `.codex/agents/`。只有使用者明確要求 subagent/代理時才啟用。
+  - `firmware-safety-reviewer`：韌體/硬體安全與控制回歸審查。
+  - `sysid-data-reviewer`：系統辨識資料與結論審查。
+
 ## 硬體配置
 
 | 組件 | 規格 |

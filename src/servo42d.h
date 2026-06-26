@@ -1,6 +1,7 @@
 #pragma once
 #include <SPI.h>
 #include <mcp2515.h>
+#include <freertos/semphr.h>
 
 // SPI 腳位
 constexpr uint8_t CAN_CS_PIN  = 5;
@@ -14,14 +15,38 @@ constexpr uint8_t CAN_INT_PIN = 17;
 #define CAN_MSGAVAIL  3
 #define CAN_NOMSG     1
 
+class MCP_CAN;
+
+struct CanGuard {
+    MCP_CAN& can;
+    explicit CanGuard(MCP_CAN& c);
+    ~CanGuard();
+};
+
 class MCP_CAN {
     MCP2515 mcp;
     can_frame cached;
     bool hasCached = false;
+    SemaphoreHandle_t canMux = nullptr;
+
+    void ensureMutex() {
+        if (!canMux) canMux = xSemaphoreCreateRecursiveMutex();
+    }
+
 public:
     MCP_CAN(uint8_t cs) : mcp(cs) {}
 
+    void lock() {
+        ensureMutex();
+        if (canMux) xSemaphoreTakeRecursive(canMux, portMAX_DELAY);
+    }
+
+    void unlock() {
+        if (canMux) xSemaphoreGiveRecursive(canMux);
+    }
+
     bool begin() {
+        CanGuard _g(*this);
         mcp.reset();
         if (mcp.setBitrate(CAN_500KBPS, MCP_8MHZ) != MCP2515::ERROR_OK) return false;
         // accept all motor IDs 1-6（生產用）
@@ -40,6 +65,7 @@ public:
     }
 
     uint8_t sendMsgBuf(uint32_t id, uint8_t /*ext*/, uint8_t len, const uint8_t* buf) {
+        CanGuard _g(*this);
         can_frame f;
         f.can_id  = id & 0x7FF;  // standard 11-bit
         f.can_dlc = len > 8 ? 8 : len;
@@ -48,6 +74,7 @@ public:
     }
 
     uint8_t checkReceive() {
+        CanGuard _g(*this);
         if (hasCached) return CAN_MSGAVAIL;
         if (mcp.readMessage(&cached) == MCP2515::ERROR_OK) {
             hasCached = true;
@@ -57,6 +84,7 @@ public:
     }
 
     uint8_t readMsgBuf(unsigned long* id, uint8_t* len, uint8_t* buf) {
+        CanGuard _g(*this);
         if (!hasCached) {
             if (mcp.readMessage(&cached) != MCP2515::ERROR_OK) return CAN_FAIL;
         }
@@ -68,15 +96,16 @@ public:
     }
 
     // ===== 錯誤計數（用來分離硬體 vs 軟體問題）=====
-    uint8_t getEFLG()    { return mcp.getErrorFlags(); }
-    uint8_t getTEC()     { return mcp.errorCountTX(); }
-    uint8_t getREC()     { return mcp.errorCountRX(); }
+    uint8_t getEFLG()    { CanGuard _g(*this); return mcp.getErrorFlags(); }
+    uint8_t getTEC()     { CanGuard _g(*this); return mcp.errorCountTX(); }
+    uint8_t getREC()     { CanGuard _g(*this); return mcp.errorCountRX(); }
     // 清掉 RX overflow bits（讀完後手動 clear）
-    void clearRXOverflow() { mcp.clearRXnOVRFlags(); }
+    void clearRXOverflow() { CanGuard _g(*this); mcp.clearRXnOVRFlags(); }
 
     // ===== 硬體 ID 過濾 =====
     // 只接受指定 ID 的 frame，其他都被 MCP2515 硬體丟棄
     bool setHardwareFilterToId(uint32_t id) {
+        CanGuard _g(*this);
         if (mcp.setFilterMask(MCP2515::MASK0, false, 0x7FF) != MCP2515::ERROR_OK) return false;
         if (mcp.setFilterMask(MCP2515::MASK1, false, 0x7FF) != MCP2515::ERROR_OK) return false;
         if (mcp.setFilter(MCP2515::RXF0, false, id) != MCP2515::ERROR_OK) return false;
@@ -87,6 +116,7 @@ public:
     }
     // 還原成「全收」
     bool setHardwareFilterAcceptAll() {
+        CanGuard _g(*this);
         if (mcp.setFilterMask(MCP2515::MASK0, false, 0) != MCP2515::ERROR_OK) return false;
         if (mcp.setFilterMask(MCP2515::MASK1, false, 0) != MCP2515::ERROR_OK) return false;
         if (mcp.setNormalMode() != MCP2515::ERROR_OK) return false;
@@ -97,11 +127,13 @@ public:
     // ===== 完全 passive 模式：只看 bus，不 ACK 任何 frame =====
     // 用來判斷 spam 是不是因為 ACK 沒到位才觸發 retry
     bool setListenOnly() {
+        CanGuard _g(*this);
         if (mcp.setListenOnlyMode() != MCP2515::ERROR_OK) return false;
         hasCached = false;
         return true;
     }
     bool setNormal() {
+        CanGuard _g(*this);
         if (mcp.setNormalMode() != MCP2515::ERROR_OK) return false;
         hasCached = false;
         return true;
@@ -109,6 +141,7 @@ public:
 
     // 直接 SPI 讀 MCP2515 register
     uint8_t rawReadReg(uint8_t addr) {
+        CanGuard _g(*this);
         SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
         digitalWrite(CAN_CS_PIN, LOW);
         SPI.transfer(0x03);
@@ -120,6 +153,7 @@ public:
     }
     // 直接 SPI 寫 MCP2515 register
     void rawWriteReg(uint8_t addr, uint8_t val) {
+        CanGuard _g(*this);
         SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
         digitalWrite(CAN_CS_PIN, LOW);
         SPI.transfer(0x02);   // WRITE instruction
@@ -130,6 +164,7 @@ public:
     }
     // 切 mode via raw SPI — 直接寫絕對值，不保留 ABAT/OSM
     bool rawSetMode(uint8_t mode_bits) {
+        CanGuard _g(*this);
         rawWriteReg(0x0F, mode_bits);  // CANCTRL = mode only, clear ABAT/OSM/CLKPRE
         uint32_t t0 = millis();
         while (millis() - t0 < 10) {
@@ -148,6 +183,7 @@ public:
     }
     // 回傳 diagnostic: bit0=mode_to_config_ok, bit1=mode_to_normal_ok, hi=rxm0_in_config
     uint32_t rawSetHardwareFilterDiag(uint32_t targetId) {
+        CanGuard _g(*this);
         uint32_t diag = 0;
         if (rawSetMode(0x80)) diag |= 1;
         uint8_t buf[4];
@@ -178,6 +214,7 @@ public:
         return rawSetHardwareFilterDiag(targetId) & 3;
     }
     bool rawSetFilterAcceptAll() {
+        CanGuard _g(*this);
         if (!rawSetMode(0x80)) return false;
         for (int i = 0; i < 4; i++) rawWriteReg(0x20 + i, 0);  // RXM0 = 0 (don't care)
         for (int i = 0; i < 4; i++) rawWriteReg(0x24 + i, 0);  // RXM1 = 0
@@ -186,6 +223,9 @@ public:
         return true;
     }
 };
+
+inline CanGuard::CanGuard(MCP_CAN& c) : can(c) { can.lock(); }
+inline CanGuard::~CanGuard() { can.unlock(); }
 
 // 馬達數量與位址
 constexpr uint8_t NUM_MOTORS = 6;
@@ -213,6 +253,7 @@ public:
     // 讀取單顆馬達的編碼器原始值（14-bit, 0~16383）
     // 回傳 -1 表示通訊失敗，-2 表示 CRC 錯誤
     int32_t readEncoderRaw(uint8_t motorId) {
+        CanGuard _g(can);
         uint8_t cmd[2];
         cmd[0] = 0x30;
         cmd[1] = (motorId + 0x30) & 0xFF;
@@ -253,6 +294,7 @@ public:
     // 讀取馬達累計坐標值 (0x31) — F5 使用的絕對坐標系
     // 回傳 INT32_MIN 表示失敗
     int32_t readCoordinate(uint8_t motorId) {
+        CanGuard _g(can);
         uint8_t cmd[3];
         cmd[0] = 0x31;
         cmd[1] = 0x00; // 校正後的值
@@ -283,6 +325,7 @@ public:
 
     // 清空 CAN 接收緩衝區（丟棄所有待讀訊息）
     void flushReceiveBuffer() {
+        CanGuard _g(can);
         unsigned long rxId;
         uint8_t rxLen;
         uint8_t rxBuf[8];
@@ -293,6 +336,7 @@ public:
 
     // 讀取所有馬達編碼器原始值（0x30，保留供相容）
     int readAllEncoders(int32_t rawValues[NUM_MOTORS]) {
+        CanGuard _g(can);
         int ok = 0;
         for (int i = 0; i < NUM_MOTORS; i++) {
             rawValues[i] = readEncoderRaw(MOTOR_ADDR[i]);
@@ -305,6 +349,7 @@ public:
     // ===== 0x35: 讀取 RAW 累計編碼器值（不受 0x92 影響）=====
     // 回傳 INT64_MIN 表示失敗
     int64_t readRawEncoderValue(uint8_t motorId, uint32_t timeoutMs = 10) {
+        CanGuard _g(can);
         uint8_t cmd[2];
         cmd[0] = 0x35;
         cmd[1] = (motorId + 0x35) & 0xFF;
@@ -343,6 +388,7 @@ public:
 
     // 非阻塞排空：把當前 RX buffer 內所有 0x35 回覆配對解析進 rawValues，回傳新收數。
     int drainEncoderReplies(int64_t rawValues[NUM_MOTORS]) {
+        CanGuard _g(can);
         int n = 0;
         while (can.checkReceive() == CAN_MSGAVAIL) {
             unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
@@ -373,6 +419,7 @@ public:
 
     // 設定馬達定時主動上報唯讀參數（0x01）。code=0x35 位置；periodMs=0 停用。
     bool setAutoReturn(uint8_t motorId, uint8_t code, uint16_t periodMs) {
+        CanGuard _g(can);
         uint8_t cmd[5];
         cmd[0] = 0x01;
         cmd[1] = code;
@@ -384,9 +431,26 @@ public:
         return can.sendMsgBuf(motorId, 0, 5, cmd) == CAN_OK;
     }
 
+    // [Phase0 診斷] 每馬達窗內實收 0x35 計數（main 讀後歸零）＋ 單次 drainInto 最大排空量。
+    // 用途：以「每馬達投遞率」直接量馬達真實廣播率（idle 無損→等於 timer 實際週期），
+    // 並比 HOLD vs idle 投遞率判招式 A 是否對症。量完移除。
+    uint16_t rxPerId[NUM_MOTORS] = {0};
+    uint8_t  maxDrain = 0;
+
+    void snapshotAndResetRxStats(uint16_t per[NUM_MOTORS], uint8_t* maxDrainOut) {
+        CanGuard _g(can);
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            per[i] = rxPerId[i];
+            rxPerId[i] = 0;
+        }
+        if (maxDrainOut) *maxDrainOut = maxDrain;
+        maxDrain = 0;
+    }
+
     // 連續排空：把 RX buffer 內所有 0x35 上報幀「覆蓋寫入」latest[]（永遠保留最新值）。
     // 與 drainEncoderReplies 差別：不跳過已收的，總是更新。供 auto-return 高頻呼叫。
     int drainInto(int64_t latest[NUM_MOTORS]) {
+        CanGuard _g(can);
         int n = 0;
         while (can.checkReceive() == CAN_MSGAVAIL) {
             unsigned long rxId; uint8_t rxLen; uint8_t rxBuf[8];
@@ -408,13 +472,16 @@ public:
             val = (val << 8) | rxBuf[6];
             latest[idx] = val;
             n++;
+            rxPerId[idx]++;                  // [Phase0]
         }
+        if (n > maxDrain) maxDrain = n;      // [Phase0]
         return n;
     }
 
     // Pipelining：送一個 0x35 查詢就立刻排空已到回覆，避免 2-buffer MCP2515
     // 在 send 期間溢位（naive「先全送再收」實測 18% 掉幀、撞 timeout）。
     int readAllRawEncoders(int64_t rawValues[NUM_MOTORS]) {
+        CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) rawValues[i] = INT64_MIN;
         int got = 0;
 
@@ -439,6 +506,7 @@ public:
     // 使能/禁用馬達 (0xF3)
     // 回傳 true 表示馬達實際 ACK 0xF3 成功；最多 retry 3 次
     bool setEnable(uint8_t motorId, bool enable) {
+        CanGuard _g(can);
         uint8_t cmd[3];
         cmd[0] = 0xF3;
         cmd[1] = enable ? 0x01 : 0x00;
@@ -467,6 +535,7 @@ public:
 
     // 禁用所有馬達：每顆之間 delay + 失敗重試，避免 MCP2515 TX buffer 滿被丟
     void disableAll() {
+        CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) {
             bool ok = setEnable(MOTOR_ADDR[i], false);
             if (!ok) {
@@ -480,6 +549,7 @@ public:
     // 使能所有馬達：回傳 per-motor success mask (bit i = motor i+1)
     // 同樣每顆之間 delay + 失敗重試，避免 TX buffer 滿被丟
     uint8_t enableAll() {
+        CanGuard _g(can);
         uint8_t mask = 0;
         for (int i = 0; i < NUM_MOTORS; i++) {
             bool ok = setEnable(MOTOR_ADDR[i], true);
@@ -494,6 +564,7 @@ public:
     // 速度控制 (0xF6)
     // speed: 0-3000 RPM, dir: 0=CCW 1=CW, acc: 0-255 (0=instant)
     void setSpeed(uint8_t motorId, uint16_t speed, uint8_t dir, uint8_t acc) {
+        CanGuard _g(can);
         if (speed > 3000) speed = 3000;
         uint8_t cmd[5];
         cmd[0] = 0xF6;
@@ -506,6 +577,7 @@ public:
 
     // 停止所有馬達速度模式
     void stopAllSpeed() {
+        CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) {
             setSpeed(MOTOR_ADDR[i], 0, 0, 0);
         }
@@ -513,6 +585,7 @@ public:
 
     // 緊急停止 (0xF7)
     void emergencyStop(uint8_t motorId) {
+        CanGuard _g(can);
         uint8_t cmd[2];
         cmd[0] = 0xF7;
         cmd[1] = (motorId + 0xF7) & 0xFF;
@@ -520,6 +593,7 @@ public:
     }
 
     void emergencyStopAll() {
+        CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) {
             emergencyStop(MOTOR_ADDR[i]);
         }
@@ -527,6 +601,7 @@ public:
 
     // 設定馬達零點 (0x92) — 將當前位置設為坐標原點
     bool setZeroPoint(uint8_t motorId) {
+        CanGuard _g(can);
         uint8_t cmd[2];
         cmd[0] = 0x92;
         cmd[1] = (motorId + 0x92) & 0xFF;
@@ -551,6 +626,7 @@ public:
     // 絕對坐標位置指令 (0xF5)
     // speed: 0-3000 RPM（最大移動速度）, acc: 0-255, coord: int24_t 絕對坐標值 (16384 counts/turn)
     void setAbsoluteCoord(uint8_t motorId, uint16_t speed, uint8_t acc, int32_t coord) {
+        CanGuard _g(can);
         if (speed > 3000) speed = 3000;
         if (coord > 8388607) coord = 8388607;
         if (coord < -8388607) coord = -8388607;
@@ -571,6 +647,7 @@ public:
 
     // 停止絕對坐標運動 (0xF5 speed=0)
     void stopAbsoluteCoord(uint8_t motorId, uint8_t acc = 5) {
+        CanGuard _g(can);
         uint8_t cmd[8];
         cmd[0] = 0xF5;
         cmd[1] = 0; cmd[2] = 0; // speed = 0
@@ -583,6 +660,7 @@ public:
     }
 
     void stopAllPosition(uint8_t acc = 5) {
+        CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) {
             stopAbsoluteCoord(MOTOR_ADDR[i], acc);
             delay(5);
@@ -593,6 +671,7 @@ public:
     // 設定 vFOC 模式 PID 參數 (0x96)
     // Kp, Ki: 位置環比例和積分
     bool setVFOC_KpKi(uint8_t motorId, uint16_t kp, uint16_t ki) {
+        CanGuard _g(can);
         uint8_t cmd[7];
         cmd[0] = 0x96;
         cmd[1] = 0x00; // CMD = set Kp/Ki
@@ -613,6 +692,7 @@ public:
     // 0x83 設工作電流（不存 flash 版本，DLC=5）
     // current: uint16 mA, 42D max 3000
     bool setWorkingCurrent(uint8_t motorId, uint16_t current) {
+        CanGuard _g(can);
         if (current > 3000) current = 3000;
         uint8_t cmd[5];
         cmd[0] = 0x83;
@@ -630,6 +710,7 @@ public:
     // 0x8C 設回應模式：XX=1 YY=0 → 只回 start/fail 不回 completion
     // 減少 MCP2515 RX buffer 壓力（每 cycle 6 顆 F5 不會塞爆）
     void setResponseMode(uint8_t motorId, uint8_t xx, uint8_t yy) {
+        CanGuard _g(can);
         uint8_t cmd[4];
         cmd[0] = 0x8C;
         cmd[1] = xx;
@@ -640,6 +721,7 @@ public:
 
     // Kd, Kv: 位置環微分和速度環增益
     bool setVFOC_KdKv(uint8_t motorId, uint16_t kd, uint16_t kv) {
+        CanGuard _g(can);
         uint8_t cmd[7];
         cmd[0] = 0x96;
         cmd[1] = 0x01; // CMD = set Kd/Kv

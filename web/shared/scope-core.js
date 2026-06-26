@@ -20,11 +20,13 @@ class ScopeCore {
     this.host = cfg.host || `${location.hostname}:${location.port || 3000}`;
     this.COLORS = cfg.colors || ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#3498db', '#9b59b6'];
     this.NAMES = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'];
+    this.POSE_NAMES = ['X', 'Y', 'Z', 'Rol', 'Pit', 'Yaw'];
     this.MAX_BUF = cfg.maxBuf || 3000;
     this.DPR = window.devicePixelRatio || 1;
     this.dt = cfg.dt || 0.02;
     this.charts = cfg.charts || {};
     this.ui = cfg.ui || {};
+    this.displayMode = cfg.displayMode || 'motor';
 
     this.handlers = { telemetry: [], cmd: [], status: [], render: [], open: [], close: [] };
     this.ws = null;
@@ -38,7 +40,7 @@ class ScopeCore {
     this._yrange = {};                // 每圖的穩定 Y 範圍（遲滯，避免每幀抖動）
 
     const mk6 = () => Array.from({ length: 6 }, () => []);
-    this.buf = { a: mk6(), tgt: mk6(), adj: mk6(), vel: mk6(), herr: mk6(), g: [], kinetic: [], ts: [] };
+    this.buf = { a: mk6(), tgt: mk6(), adj: mk6(), vel: mk6(), herr: mk6(), pose: mk6(), poseTgt: mk6(), poseVel: mk6(), g: [], kinetic: [], ts: [] };
     this.last = null;                 // 最近一筆原始遙測（研究頁取 ok/tx/herr…）
 
     if (cfg.autostart !== false) this.start();
@@ -71,6 +73,8 @@ class ScopeCore {
     if (!d.a || d.a.length !== 6) return;
     this.sampleCount++;
     const b = this.buf;
+    const pose = this._poseFromAngles(d.a);
+    const poseTgt = this._poseFromAngles(d.tgt);
     for (let i = 0; i < 6; i++) {
       const aArr = b.a[i];
       const prev = aArr.length > 0 ? aArr[aArr.length - 1] : d.a[i];
@@ -79,7 +83,14 @@ class ScopeCore {
       b.tgt[i].push(d.tgt ? d.tgt[i] : null);
       b.adj[i].push(d.adj ? d.adj[i] : null);
       b.herr[i].push(Array.isArray(d.herr) ? d.herr[i] : null);
-      if (aArr.length > this.MAX_BUF) { aArr.shift(); b.vel[i].shift(); b.tgt[i].shift(); b.adj[i].shift(); b.herr[i].shift(); }
+      const pArr = b.pose[i], pPrev = pArr.length > 0 ? pArr[pArr.length - 1] : (pose ? pose[i] : null);
+      pArr.push(pose ? pose[i] : null);
+      b.poseTgt[i].push(poseTgt ? poseTgt[i] : null);
+      b.poseVel[i].push(pose && pPrev != null ? (pose[i] - pPrev) / this.dt : null);
+      if (aArr.length > this.MAX_BUF) {
+        aArr.shift(); b.vel[i].shift(); b.tgt[i].shift(); b.adj[i].shift(); b.herr[i].shift();
+        b.pose[i].shift(); b.poseTgt[i].shift(); b.poseVel[i].shift();
+      }
     }
     b.g.push(d.g != null ? d.g : null);
     let kin = 0;
@@ -91,6 +102,35 @@ class ScopeCore {
 
   send(cmd) { if (this.ws && this.ws.readyState === 1) { this.ws.send(cmd); return true; } return false; }
   markEvent(label, kind = 'cmd') { this.events.push({ sample: this.buf.a[0].length, label, kind }); if (this.events.length > 300) this.events.shift(); }
+  setDisplayMode(mode) {
+    this.displayMode = mode === 'pose' ? 'pose' : 'motor';
+    this._yrange = {};
+    this._updateLegend();
+    document.querySelectorAll('[data-scope-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.scopeMode === this.displayMode));
+  }
+  _poseFromAngles(angles) {
+    if (!Array.isArray(angles) || angles.length !== 6 || typeof this.cfg.poseFromAngles !== 'function') return null;
+    try {
+      const p = this.cfg.poseFromAngles(angles.slice());
+      if (!Array.isArray(p) || p.length !== 6 || !p.every(Number.isFinite)) return null;
+      const z0 = Number.isFinite(this.cfg.poseNeutralZ) ? this.cfg.poseNeutralZ : 0;
+      return [p[0], p[1], p[2] - z0, p[3], p[4], p[5]];
+    } catch (e) { return null; }
+  }
+  _series() {
+    const pose = this.displayMode === 'pose';
+    return {
+      names: pose ? this.POSE_NAMES : this.NAMES,
+      units: pose ? ['mm', 'mm', 'mm', '°', '°', '°'] : ['°', '°', '°', '°', '°', '°'],
+      value: pose ? this.buf.pose : this.buf.a,
+      target: pose ? this.buf.poseTgt : this.buf.tgt,
+      vel: pose ? this.buf.poseVel : this.buf.vel,
+      title: pose ? 'Board pose / target (mm, °)' : 'Angles / hold (°)',
+      errTitle: pose ? 'Pose error · target−act (mm, °)' : 'Hold error · hold−act (°)',
+      phaseX: pose ? 'err' : 'err(°)',
+      phaseY: pose ? 'vel' : 'vel(°/s)',
+    };
+  }
 
   // ===== 視窗 =====
   // _vStart 不 clamp 到 0：視窗恆 = timeWindow 寬（ve-vs 永遠 = timeWindow）→ 每樣本佔固定像素，
@@ -188,31 +228,35 @@ class ScopeCore {
     const cv = this._el(this.charts.angles); if (!cv) return;
     const { ctx, w, h } = this._setup(cv); ctx.clearRect(0, 0, w, h);
     const vs = this._vStart(), ve = this._vEnd();
-    const visible = []; for (let i = 0; i < 6; i++) if (this.motorVisible[i]) visible.push(this.buf.a[i]);
+    const s = this._series();
+    const tl = this._el(this.charts.anglesTitle); if (tl) tl.textContent = s.title;
+    const visible = []; for (let i = 0; i < 6; i++) if (this.motorVisible[i]) visible.push(s.value[i]);
     const r = this._stableRange('angles', visible, vs, ve);
     this._grid(ctx, w, h, r.min, r.max, ve - vs);
     this._marks(ctx, w, h, vs, ve);
     for (let i = 0; i < 6; i++) {
       if (!this.motorVisible[i]) continue;
-      if (this.buf.tgt[i].some(v => v != null)) {
+      if (s.target[i].some(v => v != null)) {
         ctx.setLineDash([3, 3]); ctx.globalAlpha = 0.3;
-        this._trace(ctx, this.buf.tgt[i], w, h, r.min, r.max, this.COLORS[i], vs, ve, 1);
+        this._trace(ctx, s.target[i], w, h, r.min, r.max, this.COLORS[i], vs, ve, 1);
         ctx.setLineDash([]); ctx.globalAlpha = 1;
       }
-      this._trace(ctx, this.buf.a[i], w, h, r.min, r.max, this.COLORS[i], vs, ve, 1.5);
+      this._trace(ctx, s.value[i], w, h, r.min, r.max, this.COLORS[i], vs, ve, 1.5);
     }
-    const idx = Math.min(ve - 1, this.buf.a[0].length - 1), vals = [];
-    for (let i = 0; i < 6; i++) if (this.motorVisible[i] && idx >= 0 && idx < this.buf.a[i].length) vals.push(`${this.NAMES[i]}:${this.buf.a[i][idx].toFixed(1)}°`);
+    const idx = Math.min(ve - 1, s.value[0].length - 1), vals = [];
+    for (let i = 0; i < 6; i++) if (this.motorVisible[i] && idx >= 0 && idx < s.value[i].length && s.value[i][idx] != null) vals.push(`${s.names[i]}:${s.value[i][idx].toFixed(1)}${s.units[i]}`);
     const l = this._el(this.charts.anglesLabel); if (l) l.textContent = vals.join('  ');
   }
   _drawErrors() {
     const cv = this._el(this.charts.errors); if (!cv) return;
     const { ctx, w, h } = this._setup(cv); ctx.clearRect(0, 0, w, h);
+    const s = this._series();
+    const tl = this._el(this.charts.errorsTitle); if (tl) tl.textContent = s.errTitle;
     const vs = this._vStart(), ve = this._vEnd(), errors = [];
     for (let i = 0; i < 6; i++) {
       if (!this.motorVisible[i]) continue;
       const err = [];
-      for (let j = vs; j < ve && j < this.buf.a[i].length; j++) err.push(this.buf.tgt[i][j] != null ? this.buf.tgt[i][j] - this.buf.a[i][j] : null);
+      for (let j = vs; j < ve && j < s.value[i].length; j++) err.push(s.target[i][j] != null && s.value[i][j] != null ? s.target[i][j] - s.value[i][j] : null);
       errors.push({ idx: i, data: err });
     }
     const r = this._stableRange('errors', errors.map(e => e.data), 0, errors[0] ? errors[0].data.length : 0);
@@ -220,7 +264,7 @@ class ScopeCore {
     for (const e of errors) this._trace(ctx, e.data, w, h, r.min, r.max, this.COLORS[e.idx], 0, e.data.length, 1.5);
     let rms = 0, cnt = 0;
     for (const e of errors) { const last = e.data[e.data.length - 1]; if (last != null) { rms += last * last; cnt++; } }
-    const l = this._el(this.charts.errorsLabel); if (l) l.textContent = `RMS: ${(cnt ? Math.sqrt(rms / cnt) : 0).toFixed(2)}°`;
+    const l = this._el(this.charts.errorsLabel); if (l) l.textContent = `RMS: ${(cnt ? Math.sqrt(rms / cnt) : 0).toFixed(2)}${this.displayMode === 'pose' ? '' : '°'}`;
   }
   _drawGain() {
     const cv = this._el(this.charts.gain); if (!cv) return;
@@ -250,10 +294,16 @@ class ScopeCore {
   _drawPhase() {
     const cv = this._el(this.charts.phase); if (!cv) return;
     const { ctx, w, h } = this._setup(cv); ctx.clearRect(0, 0, w, h);
-    const mi = this.selectedMotor, aArr = this.buf.a[mi], vArr = this.buf.vel[mi], tArr = this.buf.tgt[mi];
+    const s = this._series();
+    const mi = this.selectedMotor, aArr = s.value[mi], vArr = s.vel[mi], tArr = s.target[mi];
     const vs = this._vStart(), ve = this._vEnd(); if (ve - vs < 2) return;
     const xs = [], ys = [], i0 = Math.max(0, vs);   // i0：跳過未滿時的負 index
-    for (let i = i0; i < ve && i < aArr.length; i++) { xs.push(tArr[i] != null ? tArr[i] - aArr[i] : aArr[i] - (aArr[i0] || 90)); ys.push(vArr[i] || 0); }
+    const base = aArr[i0] ?? 0;
+    for (let i = i0; i < ve && i < aArr.length; i++) {
+      if (aArr[i] == null) continue;
+      xs.push(tArr[i] != null ? tArr[i] - aArr[i] : aArr[i] - base);
+      ys.push(vArr[i] || 0);
+    }
     let xMax = 0.5, yMax = 10;
     for (let i = 0; i < xs.length; i++) { xMax = Math.max(xMax, Math.abs(xs[i])); yMax = Math.max(yMax, Math.abs(ys[i])); }
     xMax *= 1.2; yMax *= 1.2;
@@ -262,8 +312,8 @@ class ScopeCore {
     ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = '#555'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
-    ctx.fillText('err(°)', cx, h - 2);
-    ctx.save(); ctx.translate(12, cy); ctx.rotate(-Math.PI / 2); ctx.fillText('vel(°/s)', 0, 0); ctx.restore();
+    ctx.fillText(s.phaseX, cx, h - 2);
+    ctx.save(); ctx.translate(12, cy); ctx.rotate(-Math.PI / 2); ctx.fillText(s.phaseY, 0, 0); ctx.restore();
     const count = xs.length;
     for (let i = 1; i < count; i++) {
       ctx.strokeStyle = this.COLORS[mi]; ctx.globalAlpha = 0.1 + 0.9 * (i / count); ctx.lineWidth = 1.5;
@@ -271,7 +321,7 @@ class ScopeCore {
     }
     ctx.globalAlpha = 1;
     if (count > 0) { ctx.fillStyle = this.COLORS[mi]; ctx.beginPath(); ctx.arc(cx + (xs[count - 1] / xMax) * (w / 2), cy - (ys[count - 1] / yMax) * (h / 2), 4, 0, Math.PI * 2); ctx.fill(); }
-    const l = this._el(this.charts.phaseLabel); if (l) l.textContent = `${this.NAMES[mi]}  spiral out=unstable`;
+    const l = this._el(this.charts.phaseLabel); if (l) l.textContent = `${s.names[mi]}  spiral out=unstable`;
   }
 
   _render() {
@@ -297,7 +347,10 @@ class ScopeCore {
     thumb.style.left = Math.max(0, ((total - this.viewOffset - this.timeWindow) / (total - this.timeWindow)) * (trackW - thumbW)) + 'px';
   }
   clear() {
-    for (let i = 0; i < 6; i++) { this.buf.a[i].length = 0; this.buf.tgt[i].length = 0; this.buf.adj[i].length = 0; this.buf.vel[i].length = 0; this.buf.herr[i].length = 0; }
+    for (let i = 0; i < 6; i++) {
+      this.buf.a[i].length = 0; this.buf.tgt[i].length = 0; this.buf.adj[i].length = 0; this.buf.vel[i].length = 0; this.buf.herr[i].length = 0;
+      this.buf.pose[i].length = 0; this.buf.poseTgt[i].length = 0; this.buf.poseVel[i].length = 0;
+    }
     this.buf.g.length = 0; this.buf.kinetic.length = 0; this.buf.ts.length = 0; this.events.length = 0; this.sampleCount = 0; this.viewOffset = 0; this._yrange = {};
   }
   togglePause(v) {
@@ -308,13 +361,15 @@ class ScopeCore {
   }
   exportCSV() {
     const n = this.buf.a[0].length; if (n === 0) return;
-    let csv = 'sample,a1,a2,a3,a4,a5,a6,tgt1,tgt2,tgt3,tgt4,tgt5,tgt6,herr1,herr2,herr3,herr4,herr5,herr6,v1,v2,v3,v4,v5,v6,gain,kinetic\n';
+    let csv = 'sample,a1,a2,a3,a4,a5,a6,tgt1,tgt2,tgt3,tgt4,tgt5,tgt6,herr1,herr2,herr3,herr4,herr5,herr6,v1,v2,v3,v4,v5,v6,pose_x,pose_y,pose_z_off,pose_roll,pose_pitch,pose_yaw,pose_tgt_x,pose_tgt_y,pose_tgt_z_off,pose_tgt_roll,pose_tgt_pitch,pose_tgt_yaw,gain,kinetic\n';
     for (let j = 0; j < n; j++) {
       const row = [j];
       for (let i = 0; i < 6; i++) row.push(this.buf.a[i][j]?.toFixed(3) ?? '');
       for (let i = 0; i < 6; i++) row.push(this.buf.tgt[i][j]?.toFixed(3) ?? '');
       for (let i = 0; i < 6; i++) row.push(this.buf.herr[i][j]?.toFixed(3) ?? '');
       for (let i = 0; i < 6; i++) row.push(this.buf.vel[i][j]?.toFixed(3) ?? '');
+      for (let i = 0; i < 6; i++) row.push(this.buf.pose[i][j]?.toFixed(3) ?? '');
+      for (let i = 0; i < 6; i++) row.push(this.buf.poseTgt[i][j]?.toFixed(3) ?? '');
       row.push(this.buf.g[j]?.toFixed(4) ?? ''); row.push(this.buf.kinetic[j]?.toFixed(4) ?? '');
       csv += row.join(',') + '\n';
     }
@@ -325,19 +380,8 @@ class ScopeCore {
   }
 
   _initUI() {
-    // 圖例
-    const legend = this._el(this.ui.legend);
-    if (legend) {
-      legend.innerHTML = '';
-      for (let i = 0; i < 6; i++) {
-        const el = document.createElement('div');
-        el.className = 'leg-item';
-        el.innerHTML = `<div class="leg-dot" style="background:${this.COLORS[i]}"></div><span>${this.NAMES[i]}</span>`;
-        el.addEventListener('click', () => { this.motorVisible[i] = !this.motorVisible[i]; el.classList.toggle('hidden', !this.motorVisible[i]); });
-        el.addEventListener('dblclick', (e) => { e.preventDefault(); this.selectedMotor = i; });
-        legend.appendChild(el);
-      }
-    }
+    this._updateLegend();
+    document.querySelectorAll('[data-scope-mode]').forEach(btn => btn.addEventListener('click', () => this.setDisplayMode(btn.dataset.scopeMode)));
     // 時窗
     document.querySelectorAll('[data-tw]').forEach(btn => btn.addEventListener('click', () => {
       document.querySelectorAll('[data-tw]').forEach(b => b.classList.remove('active')); btn.classList.add('active'); this.timeWindow = parseInt(btn.dataset.tw);
@@ -368,6 +412,19 @@ class ScopeCore {
       if (e.key === 'End') { this.viewOffset = 0; e.preventDefault(); }
     });
     this._initDragPan(); this._initScrubberDrag();
+  }
+  _updateLegend() {
+    const legend = this._el(this.ui.legend); if (!legend) return;
+    const names = this._series().names;
+    legend.innerHTML = '';
+    for (let i = 0; i < 6; i++) {
+      const el = document.createElement('div');
+      el.className = 'leg-item' + (this.motorVisible[i] ? '' : ' hidden');
+      el.innerHTML = `<div class="leg-dot" style="background:${this.COLORS[i]}"></div><span>${names[i]}</span>`;
+      el.addEventListener('click', () => { this.motorVisible[i] = !this.motorVisible[i]; el.classList.toggle('hidden', !this.motorVisible[i]); });
+      el.addEventListener('dblclick', (e) => { e.preventDefault(); this.selectedMotor = i; });
+      legend.appendChild(el);
+    }
   }
   _initDragPan() {
     const chartsEl = this._el(this.ui.charts); if (!chartsEl) return;

@@ -165,3 +165,35 @@ enable（Task-space PD，target=當前姿態不暴衝）→ 注入 z +4mm 階躍
 **TWAI 改裝（若做）**：拔掉整塊 MCP2515，改用 **3.3V 收發器 SN65HVD230**（勿用 5V TJA1050，會燒 ESP32 RX）：
 GPIO21→CTX、GPIO22→CRX、3.3V→VCC、GND→GND；收發器 CANH/CANL 接原匯流排。CAN 線、馬達、終端電阻全不動。
 邏輯電(3.3V) 與 馬達動力電(12-24V) 分離、共地。量 CANH-CANL 應 ~60Ω（兩顆 120Ω 並聯）。
+
+## 2026-06-27 — TWAI 到貨前準備：可觀測性與頻寬預算
+
+背景更新：已下單 SN65HVD230 類 3.3V CAN transceiver，目標從「讓 MCP2515 勉強可用」轉為
+「ESP32 TWAI + 可能 1M bitrate，挑戰 200Hz，300Hz 作為 stretch goal」。
+
+### 新增工具
+
+- `sysid/can_budget.js`：用控制頻率、encoder 上報頻率、ACK 開關、bitrate 估算 CAN frame/s 與 bus load。
+  之後所有 200-300Hz 設計先跑預算，不憑感覺。
+- `sysid/can_benchmark.js`：HOLD/CAN 條件矩陣 benchmark 腳本。預設 dry-run，需 `--live` 才送命令；
+  使用現有 `/api/rec/start` JSONL 記錄格式，輸出 `ef/tx/ovr/bus.rx/lhz/per/hmax` 摘要。
+- `docs/can-upgrade-plan.md`：MCP2515→TWAI、500K→1M 的分階段計劃與驗證判準。
+
+### 修正 6/25 C00 結論的適用範圍
+
+6/25 在舊條件下觀察到「關 F5 回覆幾乎沒降 TEC」。6/26-27 在 core0 drain + 最新 telemetry 下，
+HOLD 監控看到：
+
+- `C 1 0`, `L 10`：`ovr_sum=29/30`，`tx` 最高約 219。
+- `C 0 0`, `L 10`：`ovr_sum=9/30`，有改善但不根治。
+- `C 0 0`, `L 20`：`ovr_sum=4/20`，目前 MCP2515 HOLD 下較穩。
+
+因此更新判斷：**F5/命令回覆不是唯一元凶，但在 core0 drain 後確實是可量測壓力來源之一**。
+主因仍是 MCP2515 2-buffer + SPI 架構對高頻 auto-return/F5 流量太脆。
+
+### 目前決策
+
+- 等待 TWAI transceiver 到貨期間，不再重度投資 MCP2515 修補。
+- 短期 HOLD 實驗優先使用 `C 0 0` + 較保守 loop，例如 `L 20`。
+- 到貨後先做 TWAI 500K，確認上層行為一致，再做 1M migration。
+- 1M 只解 bus bandwidth；TWAI 解 host RX queue/latency。兩者正交，200-300Hz 需要一起評估。

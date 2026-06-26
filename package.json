@@ -3,7 +3,15 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "upload": "curl -s localhost:3000/api/release && sleep 1 && ~/.platformio/penv/bin/pio run -t upload"
+    "upload": "curl -s localhost:3000/api/release && sleep 1 && ~/.platformio/penv/bin/pio run -t upload",
+    "can:budget": "node sysid/can_budget.js",
+    "can:benchmark": "node sysid/can_benchmark.js",
+    "can:bitrate-frames": "node sysid/can_bitrate_frames.js",
+    "health": "node sysid/health_check.js",
+    "safe:baseline": "node sysid/safe_baseline.js",
+    "experiment:manifest": "node sysid/experiment_manifest.js",
+    "telemetry:summary": "node sysid/telemetry_summary.js",
+    "motion:profile": "node sysid/motion_profile.js"
   },
   "dependencies": {
     "serialport": "^12.0.0",

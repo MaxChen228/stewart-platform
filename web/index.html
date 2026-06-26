@@ -239,6 +239,223 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* 姿態操作內嵌 LIVE：每軸同時看目標、實際、誤差 */
+.pose-live {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--borderL);
+}
+.pose-live-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.pose-live-head .dev-label { margin: 0; }
+.pose-live-head .hint {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--sub);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.pose-axis-row {
+  display: grid;
+  grid-template-columns: 46px 1fr 60px;
+  gap: 7px;
+  align-items: center;
+}
+.pose-axis-row .axis-name {
+  color: var(--ink);
+  white-space: nowrap;
+}
+.pose-axis-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pose-axis-value .target-v {
+  display: block;
+  color: var(--ink);
+  line-height: 1.15;
+}
+.pose-axis-value .actual-v {
+  display: block;
+  color: var(--contra);
+  font-size: 9px;
+  line-height: 1.15;
+}
+.pose-axis-value .range-v {
+  display: block;
+  color: var(--sub);
+  font-size: 8px;
+  line-height: 1.08;
+  white-space: nowrap;
+}
+.pose-slider-wrap {
+  --actual-pct: 50%;
+  --err-left: 50%;
+  --err-width: 0%;
+  --err-color: var(--sub);
+  position: relative;
+  height: 25px;
+  display: flex;
+  align-items: center;
+}
+.pose-slider-wrap::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    rgba(42,37,32,0.08) 0%,
+    rgba(42,37,32,0.08) calc(var(--actual-pct) - 1.5%),
+    rgba(230,179,0,0.45) calc(var(--actual-pct) - 1.5%),
+    rgba(230,179,0,0.45) calc(var(--actual-pct) + 1.5%),
+    rgba(42,37,32,0.08) calc(var(--actual-pct) + 1.5%),
+    rgba(42,37,32,0.08) 100%);
+  box-shadow: inset 0 0 0 1px rgba(42,37,32,0.12);
+  pointer-events: none;
+}
+.pose-slider-wrap .reach-bands {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pose-slider-wrap .reach-band {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(22,119,242,0.18);
+  box-shadow: inset 0 0 0 1px rgba(22,119,242,0.20);
+}
+.pose-slider-wrap.is-tight .reach-band {
+  background: rgba(230,179,0,0.24);
+  box-shadow: inset 0 0 0 1px rgba(230,179,0,0.28);
+}
+.pose-slider-wrap.is-outside .reach-band {
+  background: rgba(192,57,43,0.18);
+  box-shadow: inset 0 0 0 1px rgba(192,57,43,0.24);
+}
+.pose-slider-wrap::after {
+  content: "";
+  position: absolute;
+  left: var(--err-left);
+  width: var(--err-width);
+  bottom: 1px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--err-color);
+  opacity: 0.86;
+  pointer-events: none;
+}
+.pose-slider-wrap input[type="range"] {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 25px;
+  margin: 0;
+}
+.pose-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+  height: 10px;
+  background: transparent;
+  border: 0;
+}
+.pose-slider-wrap input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -4px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: #1677f2;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+}
+.pose-slider-wrap input[type="range"]::-moz-range-track {
+  height: 10px;
+  background: transparent;
+  border: 0;
+}
+.pose-slider-wrap input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: #1677f2;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+}
+.pose-slider-wrap .actual-pin {
+  position: absolute;
+  z-index: 2;
+  left: var(--actual-pct);
+  top: 3px;
+  width: 2px;
+  height: 18px;
+  transform: translateX(-1px);
+  border-radius: 2px;
+  background: var(--dual);
+  box-shadow: 0 0 0 2px rgba(230,179,0,0.20);
+  pointer-events: none;
+}
+.pose-live-summary {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--borderL);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--sub);
+}
+.pose-live-summary .bad { color: var(--dev); }
+.pose-live-summary .warn { color: var(--dual); }
+.pose-legend {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pose-legend span { white-space: nowrap; }
+.pose-legend .target { color: var(--contra); }
+.pose-legend .actual { color: var(--dual); }
+.motor-live-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  margin-top: 8px;
+}
+.live-motor-cell {
+  border: 1px solid var(--borderL);
+  border-radius: 3px;
+  padding: 4px 2px;
+  text-align: center;
+  font-family: var(--font-mono);
+  background: var(--bg);
+}
+.live-motor-cell .matrix-cell-label {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  margin: 0;
+}
+.live-motor-cell .matrix-cell-value {
+  font-size: 11px;
+  line-height: 1.2;
+}
+
 /* ===== Inset Panel ===== */
 .inset-panel {
   background: var(--bg);
@@ -288,6 +505,23 @@ body {
 .bus-legend { display: flex; gap: 10px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 9px; color: var(--sub); margin-bottom: 8px; }
 .bus-legend .it { display: flex; align-items: center; gap: 3px; }
 .bus-legend .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+/* 標準動作播放器 */
+.motion-panel { display: flex; flex-direction: column; gap: 8px; }
+.motion-loop-row { display: grid; grid-template-columns: 34px auto 1fr auto auto; gap: 4px; align-items: center; font-family: var(--font-mono); font-size: 11px; }
+.motion-loop-row button { padding: 2px 8px; font-size: 10px; line-height: 18px; }
+.motion-loop-row input { width: 100%; font-family: inherit; font-size: 11px; padding: 2px 4px; border: 1px solid var(--borderBase); border-radius: 2px; text-align: center; }
+.motion-timeline { border: 1px solid var(--borderL); background: var(--bg); border-radius: 4px; padding: 8px 9px 7px; font-family: var(--font-mono); }
+.motion-time-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--sub); font-size: 10px; }
+.motion-time-top strong { color: var(--ink); font-weight: 600; letter-spacing: 0.04em; }
+.motion-track { position: relative; height: 10px; border-radius: 999px; background: #e9e4da; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04); }
+.motion-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: linear-gradient(90deg, var(--contra), var(--accent)); transition: width 0.08s linear; }
+.motion-cursor { position: absolute; top: -3px; left: 0%; width: 2px; height: 16px; border-radius: 2px; background: var(--ink); transform: translateX(-1px); transition: left 0.08s linear; }
+.motion-home-dot { position: absolute; top: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--surface); border: 1px solid var(--inkLight); z-index: 2; }
+.motion-home-dot.start { left: 2px; }
+.motion-home-dot.end { right: 2px; }
+.motion-time-bottom { display: flex; justify-content: space-between; margin-top: 5px; color: var(--sub); font-size: 9px; letter-spacing: 0; }
+.motion-time-bottom span:nth-child(2) { color: var(--contra); }
 
 /* ===== Canvas Zone ===== */
 .canvas-zone {
@@ -397,12 +631,12 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <div class="ui-card-title">姿態操作</div>
       <div class="dev-label" style="margin-bottom:6px">6-DOF 相對中位偏移 · 綠色 ghost = 目標</div>
       <div style="display:flex;flex-direction:column;gap:5px;font-family:var(--font-mono);font-size:11px">
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Heave</span><input type="range" id="ps-z" min="-10" max="105" value="0" step="1"><span id="ps-z-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Surge</span><input type="range" id="ps-x" min="-110" max="110" value="0" step="1"><span id="ps-x-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Sway</span><input type="range" id="ps-y" min="-100" max="140" value="0" step="1"><span id="ps-y-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Roll</span><input type="range" id="ps-r" min="-20" max="20" value="0" step="0.5"><span id="ps-r-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Pitch</span><input type="range" id="ps-p" min="-20" max="20" value="0" step="0.5"><span id="ps-p-v" style="text-align:right">0</span></div>
-        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Yaw</span><input type="range" id="ps-w" min="-70" max="70" value="0" step="1"><span id="ps-w-v" style="text-align:right">0</span></div>
+        <div class="pose-axis-row" data-pose-axis="2"><span class="axis-name">Heave</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-z" min="-10" max="105" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-z-v">0</span><span class="actual-v" id="ps-z-a">—</span><span class="range-v" id="ps-z-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="0"><span class="axis-name">Surge</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-x" min="-110" max="110" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-x-v">0</span><span class="actual-v" id="ps-x-a">—</span><span class="range-v" id="ps-x-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="1"><span class="axis-name">Sway</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-y" min="-100" max="140" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-y-v">0</span><span class="actual-v" id="ps-y-a">—</span><span class="range-v" id="ps-y-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="3"><span class="axis-name">Roll</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-r" min="-20" max="20" value="0" step="0.5"></span><span class="pose-axis-value"><span class="target-v" id="ps-r-v">0</span><span class="actual-v" id="ps-r-a">—</span><span class="range-v" id="ps-r-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="4"><span class="axis-name">Pitch</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-p" min="-20" max="20" value="0" step="0.5"></span><span class="pose-axis-value"><span class="target-v" id="ps-p-v">0</span><span class="actual-v" id="ps-p-a">—</span><span class="range-v" id="ps-p-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="5"><span class="axis-name">Yaw</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-w" min="-70" max="70" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-w-v">0</span><span class="actual-v" id="ps-w-a">—</span><span class="range-v" id="ps-w-range">—</span></span></div>
       </div>
       <div style="display:grid;grid-template-columns:34px 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
         <span title="移動時長 ms">ms</span><input type="number" id="ps-ms" value="1500" min="200" max="5000" step="100" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
@@ -413,6 +647,24 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
         <button class="chip zbtn" onclick="poseSetHome()" disabled style="flex:1" title="把當前目標姿態存為 Home，之後 HOME 回到此姿態（存 localStorage）">⌂ 存Home</button>
       </div>
+      <div class="pose-live-summary">
+        <div class="pose-legend"><span class="target">藍底=可達</span><span class="target">藍色 thumb=目標</span><span class="actual">螢光線=實際</span><span>底線=誤差</span></div>
+        <span id="pose-error-summary">err —</span>
+      </div>
+      <div class="pose-live">
+        <div class="pose-live-head" style="margin:9px 0 5px">
+          <div class="dev-label">Motor hold error</div>
+          <span class="hint">act − hold · °</span>
+        </div>
+        <div id="hold-error" class="motor-live-strip">
+          <div class="live-motor-cell" id="he-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
+          <div class="live-motor-cell" id="he-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
+          <div class="live-motor-cell" id="he-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
+          <div class="live-motor-cell" id="he-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
+          <div class="live-motor-cell" id="he-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
+          <div class="live-motor-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
+        </div>
+      </div>
       <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
     </div>
 
@@ -420,24 +672,42 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     <div class="ui-card">
       <div class="ui-card-title">標準動作</div>
       <div class="dev-label" style="margin-bottom:6px">host 串流 · 速度受限跟隨（拖快不硬撲）· 需先 HOLD</div>
-      <select id="motion-sel" onchange="onMotionSel()" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 4px;border:1px solid var(--borderBase);border-radius:2px;background:var(--bgBase);color:var(--fg)"></select>
-      <div id="motion-params" style="display:flex;flex-direction:column;gap:5px;margin-top:8px"></div>
-      <div style="display:grid;grid-template-columns:34px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
-        <span title="跑幾圈後自動回中位（0=無限循環）">圈</span>
-        <input type="number" id="motion-loops" value="0" min="0" max="999" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      <div class="motion-panel">
+        <select id="motion-sel" onchange="onMotionSel()" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 4px;border:1px solid var(--borderBase);border-radius:2px;background:var(--bgBase);color:var(--fg)"></select>
+        <div id="motion-params" style="display:flex;flex-direction:column;gap:5px"></div>
+        <div class="motion-loop-row">
+          <span title="跑幾圈後自動回 home（0=無限循環）">圈</span>
+          <button class="chip" onclick="motionSetLoops(0)" title="無限循環">∞</button>
+          <input type="number" id="motion-loops" value="0" min="0" max="999" step="1" oninput="motionRefreshTimeline()">
+          <button class="chip" onclick="motionAdjustLoops(-1)" title="少一圈">−</button>
+          <button class="chip" onclick="motionAdjustLoops(1)" title="多一圈">＋</button>
+        </div>
+        <div class="motion-timeline" aria-label="motion timeline">
+          <div class="motion-time-top">
+            <strong id="motion-clock">00.0 / 00.0s</strong>
+            <span id="motion-loop-label">∞ loop</span>
+          </div>
+          <div class="motion-track">
+            <div class="motion-fill" id="motion-fill"></div>
+            <div class="motion-cursor" id="motion-cursor"></div>
+            <i class="motion-home-dot start" title="home"></i>
+            <i class="motion-home-dot end" title="home"></i>
+          </div>
+          <div class="motion-time-bottom"><span>home</span><span id="motion-phase-label">ready</span><span>home</span></div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="chip" id="motion-preview" onclick="motionPreview()" style="flex:1" title="只動畫綠色 ghost 看形狀，不驅動平台、不需 HOLD/連線">👁 預覽</button>
+          <button class="chip zbtn" id="motion-play" onclick="motionToggle()" disabled style="flex:2;font-weight:600">▶ 播放</button>
+          <button class="chip" onclick="motionStopBtn()" style="flex:1">■ 停</button>
+        </div>
+        <div style="display:grid;grid-template-columns:38px 1fr 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px" title="跟隨速度上限 = 所有動作的硬體安全閥">
+          <span>vmax</span>
+          <input type="number" id="vf-t" value="60" min="1" max="500" step="5" title="平移 mm/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+          <input type="number" id="vf-r" value="45" min="1" max="360" step="5" title="旋轉 °/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+          <button class="chip zbtn" onclick="applyVF()" disabled style="padding:2px 8px;font-size:11px">套用</button>
+        </div>
+        <div id="motion-status" style="color:var(--sub);font-size:10px;min-height:12px"></div>
       </div>
-      <div style="display:flex;gap:6px;margin-top:8px">
-        <button class="chip" id="motion-preview" onclick="motionPreview()" style="flex:1" title="只動畫綠色 ghost 看形狀，不驅動平台、不需 HOLD/連線">👁 預覽</button>
-        <button class="chip zbtn" id="motion-play" onclick="motionToggle()" disabled style="flex:2;font-weight:600">▶ 播放</button>
-        <button class="chip" onclick="motionStopBtn()" style="flex:1">■ 停</button>
-      </div>
-      <div style="display:grid;grid-template-columns:38px 1fr 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px" title="跟隨速度上限 = 所有動作的硬體安全閥">
-        <span>vmax</span>
-        <input type="number" id="vf-t" value="60" min="1" max="500" step="5" title="平移 mm/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <input type="number" id="vf-r" value="45" min="1" max="360" step="5" title="旋轉 °/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <button class="chip zbtn" onclick="applyVF()" disabled style="padding:2px 8px;font-size:11px">套用</button>
-      </div>
-      <div id="motion-status" style="color:var(--sub);font-size:10px;margin-top:6px;min-height:12px"></div>
     </div>
 
     <!-- 2. 繞擾動控制（U 單軸 / W 模態 / battery 序列；client 看門狗，韌體 U/W 自限保底）-->
@@ -499,7 +769,11 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <span>Kd</span><input type="number" id="m-kd" value="0" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Kv</span><input type="number" id="m-kv" value="0" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
-      <button class="chip zbtn" style="width:100%" onclick="updateMotorPID()" disabled>Apply PID</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px">
+        <button class="chip zbtn" onclick="updateMotorPID()" disabled>試套用</button>
+        <button class="chip zbtn" onclick="saveMotorPID()" disabled>保存</button>
+        <button class="chip zbtn" onclick="resetMotorPID()" disabled title="清除保存值，回到韌體預設">預設</button>
+      </div>
       <div id="tune-pid-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:6px 0 0 0;min-height:14px"></div>
     </div>
 
@@ -527,6 +801,10 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <div style="display:flex;gap:3px">
           <button data-tw="100">2s</button><button data-tw="250" class="active">5s</button><button data-tw="500">10s</button><button data-tw="1500">30s</button>
         </div>
+        <div style="display:flex;gap:3px">
+          <button data-scope-mode="motor" class="active" title="六顆馬達角度">Motor</button>
+          <button data-scope-mode="pose" title="板子 6DoF：X/Y/Z offset/Roll/Pitch/Yaw">6DoF</button>
+        </div>
         <div id="scope-legend"></div>
         <span class="spacer"></span>
         <span id="scope-viewpos" class="dim"></span>
@@ -537,7 +815,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <div id="charts">
         <div class="chart-row" style="flex:2">
           <div class="chart-wrap">
-            <div class="chart-label">Angles / hold (°) <span class="val" id="lbl-angles"></span></div>
+            <div class="chart-label"><span id="scope-title-main">Angles / hold (°)</span> <span class="val" id="lbl-angles"></span></div>
             <canvas class="trace" id="c-angles"></canvas>
           </div>
           <div class="chart-wrap phase">
@@ -547,7 +825,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         </div>
         <div class="chart-row" style="flex:1.4">
           <div class="chart-wrap">
-            <div class="chart-label">Hold error · hold−act (°) <span class="val" id="lbl-errors"></span></div>
+            <div class="chart-label"><span id="scope-title-error">Hold error · hold−act (°)</span> <span class="val" id="lbl-errors"></span></div>
             <canvas class="trace" id="c-errors"></canvas>
           </div>
         </div>
@@ -587,28 +865,6 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       </div>
       <div id="can-stats" style="display:grid;grid-template-columns:repeat(6,1fr);gap:2px;text-align:center;color:var(--sub);font-size:10px;margin-top:2px;font-family:var(--font-mono)">
         <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
-      </div>
-    </div>
-
-    <div class="ui-card">
-      <div class="ui-card-title">Live</div>
-      <div class="dev-label" style="margin-bottom:6px">Hold error (act − hold, °)</div>
-      <div id="hold-error" class="matrix-grid cols-3" style="margin-bottom:12px">
-        <div class="matrix-cell" id="he-0"><div class="matrix-cell-label">M1</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-1"><div class="matrix-cell-label">M2</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-2"><div class="matrix-cell-label">M3</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-3"><div class="matrix-cell-label">M4</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-4"><div class="matrix-cell-label">M5</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
-      </div>
-      <div class="dev-label" style="margin-bottom:6px">Platform Pose (FK)</div>
-      <div id="pose-display" class="matrix-grid cols-3">
-        <div class="matrix-cell" id="pose-x"><div class="matrix-cell-label">X</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-y"><div class="matrix-cell-label">Y</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-z"><div class="matrix-cell-label">Z</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-r"><div class="matrix-cell-label">Rol</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-p"><div class="matrix-cell-label">Pit</div><div class="matrix-cell-value">—</div></div>
-        <div class="matrix-cell" id="pose-w"><div class="matrix-cell-label">Yaw</div><div class="matrix-cell-value">—</div></div>
       </div>
     </div>
 
@@ -963,16 +1219,177 @@ function updateGhost() {
 // ===== 姿態操作（滑桿 → ghost 目標預覽 → 絕對 pose P 指令）=====
 // 送絕對 pose（中位+滑桿偏移），由韌體 IK 解成有效角度→死咬；前端只用 Kin.ik 做可達預檢，不算馬達角度。
 const POSE_AXES = [['ps-x',0],['ps-y',1],['ps-z',2],['ps-r',3],['ps-p',4],['ps-w',5]];
+const POSE_LIVE = [
+  ['x', 0, 1, 4], ['y', 1, 1, 4], ['z', 2, 1, 4],
+  ['r', 3, 1, 1.5], ['p', 4, 1, 1.5], ['w', 5, 1, 3],
+];
 function poseReadOffset() {
   const o = [0,0,0,0,0,0];
   for (const [id, idx] of POSE_AXES) o[idx] = parseFloat(document.getElementById(id).value) || 0;
   return o;   // [x,y,z,roll,pitch,yaw] 相對中位偏移
+}
+function poseToOffset(pose) {
+  if (!Array.isArray(pose)) return null;
+  return [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
+}
+function poseFromOffset(off) {
+  return [off[0], off[1], NEUTRAL_Z + off[2], off[3], off[4], off[5]];
+}
+function pctIn(el, v) {
+  const mn = parseFloat(el.min), mx = parseFloat(el.max);
+  if (!(mx > mn)) return 50;
+  return Math.max(0, Math.min(100, ((v - mn) / (mx - mn)) * 100));
+}
+function liveFmt(v, digits = 1, signed = false) {
+  if (!Number.isFinite(v)) return '—';
+  const s = v.toFixed(digits);
+  return signed && v >= 0 ? '+' + s : s;
+}
+function inputDigits(input) {
+  const step = parseFloat(input.step);
+  return Number.isFinite(step) && step < 1 ? 1 : 0;
+}
+function targetInIntervals(v, intervals) {
+  const eps = 1e-4;
+  return intervals.some(([a, b]) => v >= a - eps && v <= b + eps);
+}
+function nearestIntervalMargin(v, intervals) {
+  let best = Infinity;
+  for (const [a, b] of intervals) {
+    if (v >= a && v <= b) best = Math.min(best, v - a, b - v);
+    else best = Math.min(best, Math.abs(v - a), Math.abs(v - b));
+  }
+  return best;
+}
+function ikValidOffset(off) {
+  const r = window.Kin && window.Kin.ik(poseFromOffset(off));
+  return !!(r && r.valid);
+}
+function refineReachBoundary(base, idx, a, b, validA) {
+  let lo = a, hi = b;
+  for (let k = 0; k < 9; k++) {
+    const mid = (lo + hi) / 2;
+    const test = base.slice(); test[idx] = mid;
+    if (ikValidOffset(test) === validA) lo = mid;
+    else hi = mid;
+  }
+  return validA ? lo : hi;
+}
+function scanAxisReach(base, idx, input) {
+  const mn = parseFloat(input.min), mx = parseFloat(input.max);
+  if (!(mx > mn)) return [];
+  const samples = idx < 3 ? 72 : 80;
+  const intervals = [];
+  let prevV = mn;
+  let probe = base.slice(); probe[idx] = prevV;
+  let prevOk = ikValidOffset(probe);
+  let start = prevOk ? mn : null;
+  for (let i = 1; i <= samples; i++) {
+    const v = mn + (mx - mn) * i / samples;
+    probe = base.slice(); probe[idx] = v;
+    const ok = ikValidOffset(probe);
+    if (ok !== prevOk) {
+      const edge = refineReachBoundary(base, idx, prevV, v, prevOk);
+      if (ok) start = edge;
+      else if (start != null) { intervals.push([start, edge]); start = null; }
+    }
+    prevV = v;
+    prevOk = ok;
+  }
+  if (prevOk && start != null) intervals.push([start, mx]);
+  return intervals.filter(([a, b]) => b - a > (mx - mn) * 0.002);
+}
+function renderReachBands(input, intervals) {
+  const wrap = input.closest('.pose-slider-wrap');
+  if (!wrap) return;
+  const bands = wrap.querySelector('.reach-bands');
+  const mn = parseFloat(input.min), mx = parseFloat(input.max), span = mx - mn;
+  if (bands) {
+    bands.innerHTML = intervals.map(([a, b]) => {
+      const left = Math.max(0, Math.min(100, ((a - mn) / span) * 100));
+      const width = Math.max(0, Math.min(100 - left, ((b - a) / span) * 100));
+      return `<span class="reach-band" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%"></span>`;
+    }).join('');
+  }
+  const v = parseFloat(input.value) || 0;
+  const inside = targetInIntervals(v, intervals);
+  const margin = nearestIntervalMargin(v, intervals);
+  const tight = inside && margin < Math.max(parseFloat(input.step) || 1, span * 0.04);
+  wrap.classList.toggle('is-outside', !inside);
+  wrap.classList.toggle('is-tight', tight);
+  const rangeEl = document.getElementById(input.id + '-range');
+  if (rangeEl) {
+    const digits = inputDigits(input);
+    if (!intervals.length) rangeEl.textContent = '無';
+    else if (intervals.length === 1) rangeEl.textContent = `${liveFmt(intervals[0][0], digits)}..${liveFmt(intervals[0][1], digits)}`;
+    else rangeEl.textContent = `${intervals.length}段`;
+    rangeEl.style.color = !inside ? 'var(--dev)' : tight ? 'var(--dual)' : 'var(--sub)';
+  }
+}
+let workspaceScanRAF = 0;
+let workspaceLast = null;
+function updatePoseWorkspaceNow(base = poseReadOffset()) {
+  workspaceLast = base.slice();
+  for (const [id, idx] of POSE_AXES) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    renderReachBands(input, scanAxisReach(base, idx, input));
+  }
+}
+function schedulePoseWorkspaceScan(base = poseReadOffset()) {
+  workspaceLast = base.slice();
+  if (workspaceScanRAF) return;
+  workspaceScanRAF = requestAnimationFrame(() => {
+    workspaceScanRAF = 0;
+    updatePoseWorkspaceNow(workspaceLast || poseReadOffset());
+  });
+}
+function setPoseSliderTargetFromPose(pose) {
+  const off = poseToOffset(pose); if (!off) return;
+  for (const [id, idx] of POSE_AXES) {
+    const el = document.getElementById(id);
+    const val = off[idx];
+    if (el && Number.isFinite(val)) {
+      const clamped = Math.max(+el.min, Math.min(+el.max, val));
+      el.value = clamped;
+    }
+    const v = document.getElementById(id + '-v');
+    if (v) v.textContent = liveFmt(val, 1, false);
+  }
+  schedulePoseWorkspaceScan(off);
+}
+function setPoseErrorLive(actual) {
+  const act = poseToOffset(actual), tgt = poseToOffset(ghostTarget);
+  if (!act || !tgt) return;
+  let sum = 0, worst = 0;
+  for (const [key, idx, warn, bad] of POSE_LIVE) {
+    const input = document.getElementById('ps-' + key);
+    const wrap = input && input.closest('.pose-slider-wrap');
+    const actualEl = document.getElementById('ps-' + key + '-a');
+    const err = tgt[idx] - act[idx], ae = Math.abs(err);
+    sum += err * err; worst = Math.max(worst, ae / bad);
+    if (actualEl) actualEl.textContent = liveFmt(act[idx], 1, false);
+    if (wrap && input) {
+      const ap = pctIn(input, act[idx]), tp = pctIn(input, tgt[idx]);
+      wrap.style.setProperty('--actual-pct', ap.toFixed(2) + '%');
+      wrap.style.setProperty('--err-left', Math.min(ap, tp).toFixed(2) + '%');
+      wrap.style.setProperty('--err-width', Math.abs(tp - ap).toFixed(2) + '%');
+      wrap.style.setProperty('--err-color', ae > bad ? 'var(--dev)' : ae > warn ? 'var(--dual)' : 'var(--sub)');
+    }
+  }
+  const rms = Math.sqrt(sum / 6);
+  const s = document.getElementById('pose-error-summary');
+  if (s) {
+    s.textContent = `err RMS ${rms.toFixed(1)}`;
+    s.className = worst > 1 ? 'bad' : worst > 0.45 ? 'warn' : '';
+  }
 }
 let poseReachable = true;
 function poseUpdateGhost() {
   const o = poseReadOffset();
   ghostTarget = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];   // 絕對 pose（z 疊中位）
   for (const [id, idx] of POSE_AXES) document.getElementById(id+'-v').textContent = o[idx].toFixed(1);
+  schedulePoseWorkspaceScan(o);
   // 6D 工作空間非立方：各 DOF 耦合 → 即時 ik valid 判斷此「組合」是否真可達（滑桿單軸範圍只是上界）
   // 注意用 window.Kin.ik（回 {angles,valid}）；index 內建 ik() 只回裸 angles 陣列、無 valid
   poseReachable = window.Kin.ik(ghostTarget).valid;
@@ -1076,6 +1493,8 @@ function followReset() { followActive = false; _pfPending = null; if (_pfTrailTi
 // → 所有動作以 home 為原點（home 預設中位，可用「存 Home」改）。參數可即時調（每 tick 重讀）。
 const TAU = Math.PI * 2;
 const ss = (x) => { x = Math.max(0, Math.min(1, x)); return x*x*(3-2*x); };   // smoothstep 0..1
+// 每個 motion 的一圈都必須從 home 出發、回到 home；對任意 delta 套 Hann envelope 可保證端點為 0。
+const cycleEnvelope = (t, per) => (per > 0) ? Math.sin(Math.PI * ((t % per) / per)) ** 2 : 1;
 const MOTIONS = [
   { id:'helix', label:'螺旋升降', per:(p)=>p.T,
     params:[{k:'r',l:'半徑',min:0,max:40,def:15,step:1,u:'mm'},{k:'zlo',l:'低點',min:-15,max:0,def:-8,step:1,u:'mm'},
@@ -1098,9 +1517,9 @@ const MOTIONS = [
     params:[{k:'A',l:'傾角',min:0,max:12,def:6,step:0.5,u:'°'},{k:'T',l:'週期',min:1,max:12,def:4,step:0.5,u:'s'},
             {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
     fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t; return [0,0,0, p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
-  { id:'idle', label:'漂浮 idle', per:()=>0,    // 無自然週期 → 僅無限循環
+  { id:'idle', label:'漂浮 idle', per:(p)=>p.T,
     params:[{k:'tr',l:'平移範圍',min:0,max:20,def:8,step:1,u:'mm'},{k:'rr',l:'旋轉範圍',min:0,max:12,def:4,step:0.5,u:'°'},
-            {k:'spd',l:'速度',min:0.2,max:3,def:1,step:0.1,u:'×'}],
+            {k:'spd',l:'速度',min:0.2,max:3,def:1,step:0.1,u:'×'},{k:'T',l:'週期',min:4,max:60,def:16,step:1,u:'s'}],
     fn:(t,p)=>{ const s=p.spd, d=(f1,f2,ph)=>0.5*Math.sin(s*f1*t)+0.5*Math.sin(s*f2*t+ph);   // 互質頻率和=平滑準隨機
       return [p.tr*d(0.17,0.31,1.3), p.tr*d(0.13,0.27,2.1), p.tr*0.6*d(0.11,0.23,0.7),
               p.rr*d(0.19,0.29,0.4), p.rr*d(0.23,0.37,1.9), p.rr*d(0.15,0.33,2.7)]; } },
@@ -1121,9 +1540,45 @@ const MOTIONS = [
 
 const MOTION_HZ = 30;
 let platHolding = false, pendingPlay = false;
-let motion = { def:null, t0:0, raf:null, mLast:0, preview:false, maxLoops:0 };
+let motion = { def:null, t0:0, raf:null, mLast:0, preview:false, maxLoops:0, cycle:0 };
 function motionParamBox(){ return document.getElementById('motion-params'); }
 function selectedMotion(){ return MOTIONS.find(m => m.id === document.getElementById('motion-sel').value); }
+function motionReadLoops(){
+  const el = document.getElementById('motion-loops');
+  return Math.max(0, Math.min(999, parseInt(el && el.value, 10) || 0));
+}
+function fmtSec(s){
+  if (!Number.isFinite(s)) return '00.0';
+  return s < 100 ? s.toFixed(1).padStart(4, '0') : Math.round(s).toString();
+}
+function motionPeriod(params = readMotionParams(), def = selectedMotion()){
+  if (!def) return 0;
+  const per = def.per(params);
+  return Number.isFinite(per) && per > 0 ? per : 0;
+}
+function motionSetTimeline(frac, tInCycle, per, loopNow, loops, phase){
+  frac = Math.max(0, Math.min(1, frac || 0));
+  const fill = document.getElementById('motion-fill'), cur = document.getElementById('motion-cursor');
+  const clock = document.getElementById('motion-clock'), loop = document.getElementById('motion-loop-label'), ph = document.getElementById('motion-phase-label');
+  if (fill) fill.style.width = (frac * 100).toFixed(2) + '%';
+  if (cur) cur.style.left = (frac * 100).toFixed(2) + '%';
+  if (clock) clock.textContent = `${fmtSec(tInCycle)} / ${fmtSec(per)}s`;
+  if (loop) loop.textContent = loops > 0 ? `loop ${loopNow}/${loops}` : `loop ${loopNow} / ∞`;
+  if (ph) ph.textContent = phase || (frac < 0.04 || frac > 0.96 ? 'home' : `${Math.round(frac * 100)}%`);
+}
+function motionRefreshTimeline(){
+  const per = motionPeriod();
+  const loops = motion.def ? motion.maxLoops : motionReadLoops();
+  motionSetTimeline(0, 0, per, motion.def ? motion.cycle + 1 : 1, loops, motion.def ? 'home' : 'ready');
+}
+window.motionSetLoops = function(v){
+  const el = document.getElementById('motion-loops'); if (!el) return;
+  el.value = Math.max(0, Math.min(999, parseInt(v, 10) || 0));
+  if (motion.def) motion.maxLoops = motionReadLoops();
+  motionRefreshTimeline();
+};
+window.motionAdjustLoops = function(delta){ motionSetLoops(motionReadLoops() + delta); };
+window.motionRefreshTimeline = motionRefreshTimeline;
 function renderMotionParams(){
   const def = selectedMotion(), box = motionParamBox(); box.innerHTML = '';
   if (!def) return;
@@ -1134,16 +1589,17 @@ function renderMotionParams(){
       `<input type="range" data-k="${pr.k}" min="${pr.min}" max="${pr.max}" value="${pr.def}" step="${pr.step}">` +
       `<span class="mp-v" style="text-align:right">${pr.def}${pr.u}</span>`;
     const inp = row.querySelector('input'), vv = row.querySelector('.mp-v');
-    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; });
+    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; motionRefreshTimeline(); });
     box.appendChild(row);
   });
+  motionRefreshTimeline();
 }
 function readMotionParams(){ const o = {}; motionParamBox().querySelectorAll('input').forEach(i => o[i.dataset.k] = parseFloat(i.value)); return o; }
 function updateMotionUI(){
   const running = !!motion.def;
   const b = document.getElementById('motion-play'), pv = document.getElementById('motion-preview');
-  if (b)  { const real = running && !motion.preview; b.textContent = real ? '⏸ 運行中' : '▶ 播放'; b.style.background = real ? 'var(--contra)' : ''; b.style.color = real ? '#fff' : ''; }
-  if (pv) { const prev = running &&  motion.preview; pv.textContent = prev ? '⏸ 預覽中' : '👁 預覽'; pv.style.background = prev ? '#7c5cff' : ''; pv.style.color = prev ? '#fff' : ''; }
+  if (b)  { const real = running && !motion.preview; b.textContent = real ? '● 運行中' : '▶ 播放'; b.style.background = real ? 'var(--contra)' : ''; b.style.color = real ? '#fff' : ''; }
+  if (pv) { const prev = running &&  motion.preview; pv.textContent = prev ? '◆ 預覽中' : '👁 預覽'; pv.style.background = prev ? '#7c5cff' : ''; pv.style.color = prev ? '#fff' : ''; }
 }
 function motionTick(now){
   // 實跑需 followActive（PF 串流）；預覽純前端 ghost，不需 follow、不送 PF。
@@ -1154,22 +1610,33 @@ function motionTick(now){
   const t = (now - motion.t0) / 1000, p = readMotionParams();        // 即時重讀參數 → 邊跑邊調
   const per = motion.def.per(p);
   if (motion.maxLoops > 0 && per > 0 && t >= motion.maxLoops * per) { motionStop(); return; }   // N 圈後回 home
-  const d = motion.def.fn(t, p);
+  const cyc = per > 0 ? Math.floor(t / per) : 0;
+  const boundaryHome = per > 0 && cyc !== motion.cycle;
+  motion.cycle = cyc;
+  const tCycle = per > 0 ? (boundaryHome ? 0 : t % per) : t;
+  const frac = per > 0 ? tCycle / per : 0;
+  const env = boundaryHome ? 0 : cycleEnvelope(t, per);
+  const d = motion.def.fn(t, p).map(v => v * env);
   const pose = homePose.map((h, i) => h + d[i]);                      // 以 home 為原點合成絕對 pose
   const ok = window.Kin.ik(pose).valid;
   ghostMat.color.setHex(ok ? 0x27AE60 : 0xC0392B);
   ghostPlatMesh.material.color.setHex(ok ? 0x27AE60 : 0xC0392B);
-  ghostTarget = pose; updateGhost();
+  ghostTarget = pose; setPoseSliderTargetFromPose(ghostTarget); updateGhost();
   if (!motion.preview && ok) streamPF(pose);                          // 預覽不送 PF；超工作空間瞬時 sample 跳過（韌體 hold-last）
+  motionSetTimeline(frac, tCycle, per, motion.cycle + 1, motion.maxLoops, boundaryHome ? 'home' : (ok ? `${Math.round(frac * 100)}%` : 'limit'));
 }
 function _motionStart(preview){
   pendingPlay = false;
   motion.preview = !!preview;
   motion.def = selectedMotion();
   motion.t0 = performance.now(); motion.mLast = 0;
-  motion.maxLoops = parseInt(document.getElementById('motion-loops').value) || 0;
+  motion.maxLoops = motionReadLoops();
+  motion.cycle = 0;
+  ghostTarget = homePose.slice(); setPoseSliderTargetFromPose(ghostTarget); updateGhost();
+  if (!motion.preview && followActive) streamPF(homePose.slice());
   if (!motion.raf) motion.raf = requestAnimationFrame(motionTick);
   updateMotionUI();
+  motionRefreshTimeline();
   const lbl = motion.preview ? '👁 預覽' : '▶';
   document.getElementById('motion-status').textContent = `${lbl} ${motion.def.label}${motion.maxLoops>0?` ×${motion.maxLoops}`:' 循環'} · 以 home 為原點`;
 }
@@ -1192,15 +1659,16 @@ function motionStop(){
   if (motion.raf) cancelAnimationFrame(motion.raf);
   motion.raf = null; motion.def = null; motion.preview = false; pendingPlay = false;
   if (wasReal && followActive) streamPF(homePose.slice());    // 實跑停 → ease 回 home
-  ghostTarget = homePose.slice(); ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
+  ghostTarget = homePose.slice(); setPoseSliderTargetFromPose(ghostTarget); ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
   updateMotionUI();
+  motionRefreshTimeline();
 }
 window.motionStopBtn = function(){ const st = document.getElementById('motion-status'); st.textContent = '■ 已停'; st.style.color = 'var(--sub)'; motionStop(); };
 window.applyVF = function(){
   const vt = parseFloat(document.getElementById('vf-t').value) || 60, vr = parseFloat(document.getElementById('vf-r').value) || 45;
   window.sendCmd(`VF ${vt} ${vr}`);
 };
-window.onMotionSel = function(){ motionStop(); renderMotionParams(); };
+window.onMotionSel = function(){ motionStop(); renderMotionParams(); motionRefreshTimeline(); };
 // 填充動作選單（單一真相源 = MOTIONS）+ 首次參數渲染
 (function initMotions(){
   const sel = document.getElementById('motion-sel');
@@ -1232,14 +1700,7 @@ function updateViz(motorAngles) {
   }
   updatePlatform(Q);
 
-  const poseFields = [
-    ['pose-x', x], ['pose-y', y], ['pose-z', z],
-    ['pose-r', roll], ['pose-p', pitch], ['pose-w', yaw]
-  ];
-  for(const [id, val] of poseFields) {
-    const cell = document.querySelector(`#${id} .matrix-cell-value`);
-    if(cell) cell.textContent = val.toFixed(1);
-  }
+  setPoseErrorLive(pose);
 
   document.getElementById('fk-debug').textContent = fkStatus;
   document.getElementById('fk-debug').style.color =
@@ -1323,6 +1784,11 @@ function connectWS() {
 
       // 傳輸鏈狀態（server↔ESP32）：非遙測，獨立路由更新 badge
       if (data.evt === 'transport') { updateTransportBadge(data); return; }
+      if (data.evt === 'cmd_dropped') {
+        logEv(`未送出 ${data.c} · ${data.reason}`, 'bad');
+        btnResolve('fail');
+        return;
+      }
 
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
@@ -1362,6 +1828,11 @@ function connectWS() {
             cell.textContent = (e >= 0 ? '+' : '') + e.toFixed(2);
             const a = Math.abs(e);
             cell.style.color = a > 2 ? 'var(--dev)' : a > 0.5 ? 'var(--contra)' : '';
+            const box = document.getElementById(`he-${i}`);
+            if (box) {
+              box.style.borderColor = a > 2 ? 'var(--dev)' : a > 0.5 ? 'var(--contra)' : 'var(--borderL)';
+              box.style.background = a > 2 ? 'rgba(192,57,43,0.05)' : '';
+            }
           }
         }
       }
@@ -1400,7 +1871,7 @@ function connectWS() {
         const targetMap = {
           current: { el: 'tune-current-status', label: `${data.mA}mA` },
           motion:  { el: 'tune-motion-status',  label: `spd=${data.speed} acc=${data.acc}` },
-          pid:     { el: 'tune-pid-status',     label: `Kp=${data.kp} Ki=${data.ki} Kd=${data.kd} Kv=${data.kv}` },
+          pid:     { el: 'tune-pid-status',     label: `Kp=${data.kp} Ki=${data.ki} Kd=${data.kd} Kv=${data.kv}${data.saved ? ' · 已保存' : ''}${data.reset ? ' · 已回預設' : ''}` },
         };
         const t = targetMap[data.tune];
         if (t) {
@@ -1413,7 +1884,7 @@ function connectWS() {
           const tag = data.local ? '(local)' : (allOk ? 'OK' : `FAIL ${6-okCnt}/6`);
           el.innerHTML = `<span style="color:${allOk?'var(--contra)':'var(--dev)'}">[${ts}] ${t.label} → ${tag}</span> ${marks}`;
           // 直接綁對應 Apply 按鈕，避免依賴 pendingBtn 順序
-          const tbtn = btnForTune(data.tune);
+          const tbtn = (data.tune === 'pid' && pendingBtn) ? pendingBtn : btnForTune(data.tune);
           if (tbtn === pendingBtn) btnResolve(null); // 清 pending timer
           btnSetState(tbtn, allOk ? 'ok' : 'fail');
         }
@@ -1473,6 +1944,10 @@ window.sendCmd = function(cmd) {
     }, 3000);
   }
   if (ws && ws.readyState === 1) ws.send(cmd);
+  else {
+    logEv(`未送出 ${cmd} · browser websocket disconnected`, 'bad');
+    btnResolve('fail');
+  }
 };
 
 // Apply 按鈕 → 直接綁 tune type，避免被中間其他 status 搶走 resolve
@@ -1585,6 +2060,18 @@ window.updateMotorPID = function() {
   sendCmd(`K ${kp} ${ki} ${kd} ${kv}`);
 };
 
+window.saveMotorPID = function() {
+  const kp = document.getElementById('m-kp').value;
+  const ki = document.getElementById('m-ki').value;
+  const kd = document.getElementById('m-kd').value;
+  const kv = document.getElementById('m-kv').value;
+  sendCmd(`KS ${kp} ${ki} ${kd} ${kv}`);
+};
+
+window.resetMotorPID = function() {
+  sendCmd('KRESET');
+};
+
 window.updateWorkingCurrent = function() {
   const mA = document.getElementById('work-current').value;
   sendCmd(`J ${mA}`);
@@ -1638,9 +2125,12 @@ const HOST = `${location.hostname}:${location.port || 3000}`;
 const scope = new ScopeCore({
   autostart: false,
   charts: { angles:'c-angles', anglesLabel:'lbl-angles', phase:'c-phase', phaseLabel:'lbl-phase',
-            errors:'c-errors', errorsLabel:'lbl-errors', gain:'c-gain', gainLabel:'lbl-gain' },
+            errors:'c-errors', errorsLabel:'lbl-errors', gain:'c-gain', gainLabel:'lbl-gain',
+            anglesTitle:'scope-title-main', errorsTitle:'scope-title-error' },
   ui: { legend:'scope-legend', stats:'scope-stats', viewPos:'scope-viewpos',
         pauseBtn:'scope-pause', csvBtn:'scope-csv', charts:'charts' },
+  poseFromAngles: solveFK,
+  poseNeutralZ: NEUTRAL_Z,
 });
 scope.start({ connect: false });   // 不開自有 WS，靠宿主 ingest 餵資料
 window.scope = scope;
@@ -1654,6 +2144,7 @@ function logEv(msg, kind='') {
   el.prepend(line); while (el.children.length > 60) el.removeChild(el.lastChild);
 }
 scope.on('cmd', d => logEv('→ ' + d.c, 'cmd'));
+scope.on('status', d => { if (d.wifi) logEv(`WiFi ${d.wifi.connected?'up':'down'} ${d.wifi.ip||''} drop:${d.wifi.tcp?.out_drop??0}/${d.wifi.tcp?.in_drop??0}`, d.wifi.connected?'':'bad'); });
 scope.on('status', d => { if (d.status||d.tune||d.error) logEv(JSON.stringify(d).slice(0,72), d.error?'bad':''); });
 
 // CAN / 迴圈匯流排健康（聚合）
@@ -1709,12 +2200,18 @@ function updateBusLoad(d) {
 scope.on('telemetry', d => { if (Array.isArray(d.a)) updateBusLoad(d); });
 
 // CAN 健康簡易時間圖表：3 帶 sparkline（ok 0-6 固定 / 迴圈Hz / 讀µs 自動），EFLG≠0 或 ok<6 畫紅標
-const canBuf = { ok:[], hz:[], us:[], ef:[] }, CAN_N = 400;
+const canBuf = { ts:[], ok:[], hz:[], us:[], ef:[] }, CAN_BUF_MAX = 8000;
 scope.on('telemetry', d => {
   if (!Array.isArray(d.a)) return;
+  const now = performance.now();
+  canBuf.ts.push(now);
   canBuf.ok.push(d.ok ?? null); canBuf.hz.push(d.lhz ?? null);
   canBuf.us.push(d.cus ?? null); canBuf.ef.push(d.ef ?? 0);
-  for (const k in canBuf) if (canBuf[k].length > CAN_N) canBuf[k].shift();
+  // 時間制修剪（與 per-motor canTs 一致，保最大窗）+ 硬上限 backstop
+  const keep = now - CAN_WIN_OPTS[CAN_WIN_OPTS.length - 1];
+  let cut = 0; while (cut < canBuf.ts.length && canBuf.ts[cut] < keep) cut++;
+  if (canBuf.ts.length - cut > CAN_BUF_MAX) cut = canBuf.ts.length - CAN_BUF_MAX;
+  if (cut > 0) for (const k in canBuf) canBuf[k].splice(0, cut);
 });
 const canSpark = $o('can-spark'), csx = canSpark && canSpark.getContext('2d');
 const CAN_BANDS = [
@@ -1726,21 +2223,24 @@ function drawCanSpark() {
   if (!canSpark) return;
   const dpr = devicePixelRatio||1, W = canSpark.width = canSpark.clientWidth*dpr, H = canSpark.height = 78*dpr;
   csx.clearRect(0,0,W,H);
-  const n = canBuf.ok.length; if (n < 2) return;
+  const n = canBuf.ok.length;
+  // 時間制橫軸：只畫當前窗 [start, n) 內樣本，x 依實際時間比例（右錨定 newest≈now）
+  const now = performance.now(), cutoff = now - canWindowMs;
+  let start = 0; while (start < canBuf.ts.length && canBuf.ts[start] < cutoff) start++;
+  if (n - start < 2) return;
   const bh = H/3;
+  const xOf = i => W - (now - canBuf.ts[i]) / canWindowMs * W;
   CAN_BANDS.forEach((b, bi) => {
     const y0 = bi*bh, arr = canBuf[b.key];
     let mn = b.min, mx = b.max;
-    if (b.auto) { mn=Infinity; mx=-Infinity; for(const v of arr) if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; }
+    if (b.auto) { mn=Infinity; mx=-Infinity; for(let i=start;i<n;i++){ const v=arr[i]; if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; } }
       if(mn===Infinity){mn=0;mx=1;} const pad=(mx-mn)*0.15||1; mn-=pad; mx+=pad; }
     const rng = mx-mn || 1;
     csx.strokeStyle='#1a1a1a'; csx.lineWidth=1; csx.beginPath(); csx.moveTo(0,y0+bh-0.5); csx.lineTo(W,y0+bh-0.5); csx.stroke();
-    // 固定 CAN_N 比例、右錨定（newest 在右、每樣本固定像素）→ 未滿時從右流入、不壓縮
-    const xOf = i => W - (n-1-i) * (W/(CAN_N-1));
-    if (b.key==='ok') for(let i=0;i<n;i++){ if((canBuf.ef[i]||0)!==0 || (arr[i]??6)<6){ const x=xOf(i);
+    if (b.key==='ok') for(let i=start;i<n;i++){ if((canBuf.ef[i]||0)!==0 || (arr[i]??6)<6){ const x=xOf(i);
       csx.strokeStyle='rgba(192,57,43,0.35)'; csx.beginPath(); csx.moveTo(x,y0+2*dpr); csx.lineTo(x,y0+bh-2*dpr); csx.stroke(); } }
     csx.strokeStyle=b.color; csx.lineWidth=1.4*dpr; csx.beginPath(); let first=true;
-    for(let i=0;i<n;i++){ const v=arr[i]; if(v==null){first=true;continue;}
+    for(let i=start;i<n;i++){ const v=arr[i]; if(v==null){first=true;continue;}
       const x=xOf(i), y=y0+bh-3*dpr-((v-mn)/rng)*(bh-6*dpr); if(first){csx.moveTo(x,y);first=false;}else csx.lineTo(x,y); }
     csx.stroke();
     const last = arr[n-1];
@@ -1764,7 +2264,7 @@ scope.on('telemetry', d => {
 let pidSynced=false;
 const PID_FIELDS=['m-kp','m-ki','m-kd','m-kv'];
 const pidDirty=[false,false,false,false];
-PID_FIELDS.forEach((id,i)=>{ const el=$o(id); if(el) el.addEventListener('input',()=>{ pidDirty[i]=true; const s=$o('pid-sot'); if(s){ s.textContent='✎ 未套用（按 Apply PID）'; s.style.color='var(--dual)'; } }); });
+PID_FIELDS.forEach((id,i)=>{ const el=$o(id); if(el) el.addEventListener('input',()=>{ pidDirty[i]=true; const s=$o('pid-sot'); if(s){ s.textContent='✎ 未套用'; s.style.color='var(--dual)'; } }); });
 scope.on('telemetry', d => {
   if (!Array.isArray(d.pid)) return;
   let anyDirty=false;
@@ -1775,7 +2275,7 @@ scope.on('telemetry', d => {
     if (document.activeElement===el) return;                        // 正在編輯 → 別覆寫
     el.value = d.pid[i];                                            // 純顯示陳舊 → 反寫韌體真值
   });
-  const s=$o('pid-sot'); if(s && !anyDirty){ s.textContent='✓ 同步韌體真值'; s.style.color='var(--contra)'; pidSynced=true; }
+  const s=$o('pid-sot'); if(s && !anyDirty){ s.textContent=d.pids ? '✓ 已永久保存' : '○ 暫時值'; s.style.color=d.pids ? 'var(--contra)' : 'var(--sub)'; pidSynced=true; }
 });
 
 // FFT + σ（選定軸，herr 優先 fallback a）

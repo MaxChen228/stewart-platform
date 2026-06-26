@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Preferences.h>
 #include "servo42d.h"
 #include "kinematics.h"
 #include "encoder.h"
@@ -14,11 +15,12 @@ EncoderState enc;
 Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 
 // ===== Auto-return（item 1）：馬達定時主動上報，ESP32 連續排空、控制環只取快照 =====
-// MCP2515 只有 2 RX buffer，6 顆 streaming 必須「高頻連續排空」才不溢位——靠 loop()
-// 本身快速空轉（20ms gate 只節流控制，不節流 loop 迭代）達成，無需 ISR/task。
-// 預設關閉：行為與輪詢版完全相同，燒錄安全。需馬達上電後 A1 啟用才生效。
+// MCP2515 只有 2 RX buffer，6 顆 streaming 必須高頻排空；core0 canRxTask 專職接收，
+// core1 控制環只在 CAN mutex 下取 latestRaw 快照，避免 int64 tear 與 SPI 競態。
+// 預設開啟：行為仍可用 A0 切回輪詢版。
 int64_t latestRaw[NUM_MOTORS];
-bool autoReturnMode = false;
+volatile bool autoReturnMode = false;
+volatile bool canRxPaused = false;
 uint16_t arPeriodMs = 10;             // 馬達主動上報週期，可調（AR 指令）；預設 100Hz（10ms）對齊控制迴圈
 
 // ===== 可調速率（item 2 of 本輪）=====
@@ -34,6 +36,18 @@ uint8_t  posAcc   = 100;
 uint16_t busTxF5  = 0;   // F5 指令幀（DLC 8）
 uint16_t busTxQ   = 0;   // 0x35 輪詢查詢幀（DLC 2，每幀必有一筆 DLC 8 回覆在線上）
 uint16_t busRxEnc = 0;   // auto-return 實收 0x35 廣播幀（DLC 8）
+// [Phase0 診斷] 量完移除：EFLG RX overflow(0xC0) 出現的遙測窗次數 + 最近一次 6×F5 burst µs
+uint16_t busOvr   = 0;
+uint32_t f5us     = 0;
+uint32_t f5usMax  = 0;
+
+// ===== Telemetry v2 window counters =====
+uint32_t ctlIkFailWin = 0;
+uint32_t ctlFkFailWin = 0;
+uint32_t ctlCoordLimitWin = 0;
+int32_t  ctlCoordMaxAbs = 0;
+
+TaskHandle_t canRxTaskHandle = nullptr;
 
 // ===== HOLD 模式 =====
 // 純 passthrough：snapshot 當前 enc.angles，每 cycle 直送 F5，跳過 PD/IK/平滑
@@ -90,12 +104,91 @@ static void followStep(float dt) {
 
 // 開機預設 vFOC PID：純P工作點 [1024,0,0,0]（2026-06-26 定案）。
 // Ki=0 滅自持極限環根因（積分撞死區）；maxKp 補剛性；F5 posSpeed 提供阻尼；
-// Kd=0 因離散微分=高頻放大器→嘯叫，Kv=0 不需。runtime K 指令仍可覆蓋微調。
-// 不靠馬達 EEPROM，版本控制在韌體。詳見記憶 project_pid_working_point。
+// Kd=0 因離散微分=高頻放大器→嘯叫，Kv=0 不需。
+// 不靠馬達 EEPROM：ESP32 開機把「已保存 PID」下發到六顆馬達；若 NVS 無保存值才用 BOOT。
+// K = 暫時套用；KS = 明確保存；KRESET = 清保存值並回 BOOT。詳見記憶 project_pid_working_point。
 constexpr uint16_t BOOT_KP = 1024, BOOT_KI = 0, BOOT_KD = 0, BOOT_KV = 0;
 
-// 當前 vFOC PID（單一真相源）：開機=BOOT 值，收 K 指令更新，telemetry 上報 → 前端滑桿反映真值不寫死
+// 當前 vFOC PID（單一真相源）：開機=NVS 已保存值或 BOOT，收 K 指令更新，telemetry 上報 → 前端反映真值不寫死
 uint16_t curKp = BOOT_KP, curKi = BOOT_KI, curKd = BOOT_KD, curKv = BOOT_KV;
+uint16_t savedKp = BOOT_KP, savedKi = BOOT_KI, savedKd = BOOT_KD, savedKv = BOOT_KV;
+bool nvsPidPresent = false;
+bool pidSaved = false;
+
+struct VFOCPidNVS {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t kp, ki, kd, kv;
+};
+
+constexpr uint32_t VFOC_PID_MAGIC = 0x56464350; // "VFCP"
+constexpr uint16_t VFOC_PID_VERSION = 1;
+
+static bool validPidValue(uint16_t v) {
+    return v <= 1024;
+}
+
+static bool validPidConfig(const VFOCPidNVS& cfg) {
+    return cfg.magic == VFOC_PID_MAGIC &&
+           cfg.version == VFOC_PID_VERSION &&
+           validPidValue(cfg.kp) && validPidValue(cfg.ki) &&
+           validPidValue(cfg.kd) && validPidValue(cfg.kv);
+}
+
+static bool loadVFOCPidFromNVS() {
+    Preferences prefs;
+    VFOCPidNVS cfg;
+    prefs.begin("stewart", true);
+    size_t len = prefs.getBytes("vfocPidV1", &cfg, sizeof(cfg));
+    prefs.end();
+    if (len != sizeof(cfg) || !validPidConfig(cfg)) return false;
+    curKp = cfg.kp; curKi = cfg.ki; curKd = cfg.kd; curKv = cfg.kv;
+    savedKp = cfg.kp; savedKi = cfg.ki; savedKd = cfg.kd; savedKv = cfg.kv;
+    nvsPidPresent = true;
+    return true;
+}
+
+static bool currentPidMatchesSaved() {
+    return nvsPidPresent &&
+           curKp == savedKp && curKi == savedKi &&
+           curKd == savedKd && curKv == savedKv;
+}
+
+static bool saveVFOCPidToNVS() {
+    VFOCPidNVS cfg = {VFOC_PID_MAGIC, VFOC_PID_VERSION, curKp, curKi, curKd, curKv};
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    size_t written = prefs.putBytes("vfocPidV1", &cfg, sizeof(cfg));
+    prefs.end();
+    if (written != sizeof(cfg)) return false;
+    savedKp = curKp; savedKi = curKi; savedKd = curKd; savedKv = curKv;
+    nvsPidPresent = true;
+    return true;
+}
+
+static void clearVFOCPidNVS() {
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    prefs.remove("vfocPidV1");
+    prefs.end();
+    nvsPidPresent = false;
+}
+
+static bool applyVFOCPid(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int okMask[NUM_MOTORS], int& okCnt) {
+    okCnt = 0;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        bool a = servos.setVFOC_KpKi(MOTOR_ADDR[i], kp, ki);
+        delay(8);
+        servos.flushReceiveBuffer();
+        bool b = servos.setVFOC_KdKv(MOTOR_ADDR[i], kd, kv);
+        delay(8);
+        servos.flushReceiveBuffer();
+        okMask[i] = (a && b) ? 1 : 0;
+        if (okMask[i]) okCnt++;
+    }
+    curKp = kp; curKi = ki; curKd = kd; curKv = kv;
+    return okCnt == NUM_MOTORS;
+}
 
 // ===== 控制模式 =====
 // 0 = joint-space（舊版自適應追蹤）
@@ -131,6 +224,15 @@ void posStop() {
 }
 
 void posDisable() {
+    posEnabled = false;
+    holdMode = false;
+    followMode = false;
+    servos.stopAllPosition(5);
+    delay(50);
+    servos.disableAll();
+}
+
+static void otaSafetyStop() {
     posEnabled = false;
     holdMode = false;
     followMode = false;
@@ -184,10 +286,26 @@ static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
     sm.yaw  += alpha * (tgt.yaw  - sm.yaw);
 }
 
+void canRxTask(void*) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+        if (autoReturnMode && !canRxPaused) {
+            servos.drainInto(latestRaw);
+        }
+    }
+}
+
+void startCanRxTask() {
+    if (canRxTaskHandle) return;
+    xTaskCreatePinnedToCore(canRxTask, "canRx", 4096, nullptr, 3, &canRxTaskHandle, 0);
+}
+
 void setup() {
-    Serial.begin(115200);
+    Serial.setTxBufferSize(1024);   // 大 TX ring buffer：遙測整幀瞬入緩衝、UART ISR 背景排空 → 不卡控制 loop
+    Serial.begin(460800);           // 460800：406B 幀 ≈9ms（≪30ms 週期，不飽和）；921600 此 CP2102 訊號完整性不穩→改用此
     while (!Serial) delay(10);
     delay(200); // 給 FreeRTOS / SPI mutex 完全初始化的時間，避免 paramLock NULL
+    netSetOtaStartCallback(otaSafetyStop);
 
     // 明確 init SPI bus（VSPI 預設腳位 SCK=18 MISO=19 MOSI=23 SS=5）
     // 必須在任何 MCP_CAN SPI 操作前呼叫，確保 SPI 的 paramLock mutex 已建立
@@ -196,6 +314,7 @@ void setup() {
     delay(50);
 
     enc.init();
+    pidSaved = loadVFOCPidFromNVS();
 
     Out.printf("{\"status\":\"init\",\"calibrated\":%s}\n",
                   enc.zeroed ? "true" : "false");
@@ -224,17 +343,21 @@ void setup() {
         delay(10);
     }
 
-    // 開機持久化 vFOC PID：純P 工作點 [1024,0,0,0]（見上 BOOT_* 定義）。
-    // 重開機馬達回出廠值 → 每次開機重設成韌體版控的值，不靠馬達 EEPROM。
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        servos.setVFOC_KpKi(MOTOR_ADDR[i], BOOT_KP, BOOT_KI);
-        delay(10);
-        servos.setVFOC_KdKv(MOTOR_ADDR[i], BOOT_KD, BOOT_KV);
-        delay(10);
-    }
+    // 開機持久化 vFOC PID：馬達重開會回自己的預設，ESP32 每次開機下發本機保存值。
+    // 若 NVS 尚未保存，cur* 仍是 BOOT_* 純P工作點。
+    int pidOk[NUM_MOTORS] = {0}, pidOkCnt = 0;
+    applyVFOCPid(curKp, curKi, curKd, curKv, pidOk, pidOkCnt);
 
     delay(200);
     servos.flushReceiveBuffer();
+
+    // 預設啟用 auto-return（本輪改為主運行模式）：6 顆每 arPeriodMs(10ms=100Hz) 主動上報 0x35，
+    // ESP32 連續排空、控制環只取最新快照 → cus≈0、無輪詢 8ms backstop（runtime A0 可切回輪詢）。
+    for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
+    for (int i = 0; i < NUM_MOTORS; i++) { servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs); delay(5); }
+    autoReturnMode = true;
+    servos.flushReceiveBuffer();
+    startCanRxTask();
 
     // WiFi bring-up（P1）：載入 NVS 憑證，若已啟用則自動連線並印 IP。
     // 失敗不致命——USB Serial 仍是主路徑。WiFi 細節封裝在 net_transport。
@@ -251,7 +374,7 @@ void setup() {
 // 行為等價（跳過其餘分支）。
 void dispatch(const String& cmd, bool fromNet = false) {
     // WIFI/FS/HB 系列指令先攔截，命中即短路
-    if (netHandleCommand(cmd)) return;
+    if (netHandleCommand(cmd, fromNet, posEnabled)) return;
 
     // TCP 來源禁校正類（Z/Z0~Z5 寫 NVS 不可逆；校正須實體 home 姿態 = 本就手邊 USB 操作）
     if (fromNet && cmd.startsWith("Z")) {
@@ -276,7 +399,10 @@ void dispatch(const String& cmd, bool fromNet = false) {
         }
     } else if (cmd == "A1") {
         // 啟用 auto-return：6 顆每 arPeriodMs 主動上報 0x35 位置
-        for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
+        {
+            CanGuard _g(servos.can);
+            for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
+        }
         int okc = 0;
         for (int i = 0; i < NUM_MOTORS; i++) {
             if (servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs)) okc++;
@@ -505,25 +631,52 @@ void dispatch(const String& cmd, bool fromNet = false) {
             Out.printf("{\"status\":\"control mode\",\"mode\":%d,\"kp\":%.3f,\"kd\":%.3f}\n",
                 controlMode, tsController.Kp[0], tsController.Kd[0]);
         }
+    } else if (cmd == "KS" || cmd.startsWith("KS ")) {
+        int kp, ki, kd, kv;
+        int n = sscanf(cmd.c_str(), "KS %d %d %d %d", &kp, &ki, &kd, &kv);
+        if (n == 4) {
+            if (kp < 0 || kp > 1024 || ki < 0 || ki > 1024 || kd < 0 || kd > 1024 || kv < 0 || kv > 1024) {
+                Out.println("{\"error\":\"PID range 0-1024\"}");
+                return;
+            }
+            int okMask[NUM_MOTORS] = {0};
+            int okCnt = 0;
+            applyVFOCPid(kp, ki, kd, kv, okMask, okCnt);
+            pidSaved = (okCnt == NUM_MOTORS) && saveVFOCPidToNVS();
+            Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
+                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                pidSaved ? 1 : 0, curKp, curKi, curKd, curKv,
+                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+        } else {
+            pidSaved = saveVFOCPidToNVS();
+            Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
+                "\"ok\":[1,1,1,1,1,1],\"okCnt\":6,\"local\":1}\n",
+                pidSaved ? 1 : 0, curKp, curKi, curKd, curKv);
+        }
+    } else if (cmd == "KRESET") {
+        clearVFOCPidNVS();
+        pidSaved = false;
+        int okMask[NUM_MOTORS] = {0};
+        int okCnt = 0;
+        applyVFOCPid(BOOT_KP, BOOT_KI, BOOT_KD, BOOT_KV, okMask, okCnt);
+        Out.printf("{\"tune\":\"pid\",\"reset\":1,\"saved\":0,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
+            "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+            curKp, curKi, curKd, curKv,
+            okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
     } else if (cmd.startsWith("K ")) {
         int kp, ki, kd, kv;
         if (sscanf(cmd.c_str(), "K %d %d %d %d", &kp, &ki, &kd, &kv) == 4) {
+            if (kp < 0 || kp > 1024 || ki < 0 || ki > 1024 || kd < 0 || kd > 1024 || kv < 0 || kv > 1024) {
+                Out.println("{\"error\":\"PID range 0-1024\"}");
+                return;
+            }
             int okMask[NUM_MOTORS] = {0};
             int okCnt = 0;
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                bool a = servos.setVFOC_KpKi(MOTOR_ADDR[i], kp, ki);
-                delay(8);
-                servos.flushReceiveBuffer();
-                bool b = servos.setVFOC_KdKv(MOTOR_ADDR[i], kd, kv);
-                delay(8);
-                servos.flushReceiveBuffer();
-                okMask[i] = (a && b) ? 1 : 0;
-                if (okMask[i]) okCnt++;
-            }
-            curKp = kp; curKi = ki; curKd = kd; curKv = kv;   // 更新 SoT 當前 PID
-            Out.printf("{\"tune\":\"pid\",\"kp\":%d,\"ki\":%d,\"kd\":%d,\"kv\":%d,"
+            applyVFOCPid(kp, ki, kd, kv, okMask, okCnt);
+            pidSaved = currentPidMatchesSaved();
+            Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
                 "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
-                kp, ki, kd, kv,
+                pidSaved ? 1 : 0, curKp, curKi, curKd, curKv,
                 okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
         }
     } else if (cmd.startsWith("V ")) {
@@ -617,6 +770,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         // 深度診斷已完成（根因 = 某顆 motor firmware auto-broadcast bug，~78% reply rate）
         // 保留輕量化版供日後快速健診：只跑 listen + 6 顆 baseline
         bool savedPos = posEnabled, savedHold = holdMode;
+        canRxPaused = true;
         posEnabled = false; holdMode = false;
         delay(100);
         servos.flushReceiveBuffer();
@@ -748,6 +902,8 @@ void dispatch(const String& cmd, bool fromNet = false) {
                       idCnt2[1],idCnt2[2],idCnt2[3],idCnt2[4],idCnt2[5],idCnt2[6]);
         Out.println("{\"xdiag\":\"done\"}");
         posEnabled = savedPos; holdMode = savedHold;
+        servos.flushReceiveBuffer();
+        canRxPaused = false;
     }
 }
 
@@ -761,6 +917,7 @@ void handleSerial() {
 }
 
 void loop() {
+    netOtaHandle();
     handleSerial();
 
     // TCP 指令來源（P3）：非阻塞取 netTask 收到的指令 → 同一條 dispatch（標記 WiFi 為控制來源）
@@ -770,17 +927,22 @@ void loop() {
     // 斷線失效保護（P4）：以 WiFi 控制且 posEnabled 時，連線中斷即進安全態
     checkFailsafe();
 
-    // auto-return：每次 loop 迭代都排空（高頻），避免 streaming 幀塞爆 2-buffer
-    if (autoReturnMode) busRxEnc += servos.drainInto(latestRaw);   // 匯流排佔用：實收 0x35 廣播幀
-
     // 控制迴圈閘門（micros，週期可調）
     static uint32_t lastReadUs = 0;
     static uint32_t ctrlCycles = 0;
+    static uint32_t dtMinMs = UINT32_MAX;
+    static uint32_t dtMaxMs = 0;
+    static uint32_t dtSumMs = 0;
     uint32_t nowUs = micros();
     if (nowUs - lastReadUs < loopPeriodUs) return;
     uint32_t elapsed = (nowUs - lastReadUs) / 1000;  // ms
     lastReadUs = nowUs;
     ctrlCycles++;
+    if (elapsed < 1000) {  // ignore the first post-boot interval if lastReadUs was 0
+        if (elapsed < dtMinMs) dtMinMs = elapsed;
+        if (elapsed > dtMaxMs) dtMaxMs = elapsed;
+        dtSumMs += elapsed;
+    }
 
     // 真實取樣間隔（秒），餵控制器的時間導數/平滑項。clamp 到標稱的 [0.5×, 3×]：
     // 過短 → vel=noise/dt 把 D 項炸成高頻放大器；stall 後一個巨大 Δ 配正常 dt 會 spike。
@@ -791,11 +953,13 @@ void loop() {
     int ok = 0;
     uint32_t canReadUs = 0;
     if (autoReturnMode) {
-        // 連續排空已在 loop 頂端進行，這裡只取最新快照（感測延遲 ≈ 0）
-        busRxEnc += servos.drainInto(latestRaw);
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            raw[i] = latestRaw[i];
-            if (raw[i] != INT64_MIN) ok++;
+        // core0 canRxTask 連續排空；控制環只在同一把 CAN 鎖下取最新快照，避免 int64 tear。
+        {
+            CanGuard _g(servos.can);
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                raw[i] = latestRaw[i];
+                if (raw[i] != INT64_MIN) ok++;
+            }
         }
     } else {
         servos.flushReceiveBuffer();
@@ -841,6 +1005,7 @@ void loop() {
         } else if (controlMode == 1) {
             // ===== Task-space PD =====
             controlOk = tsController.update(enc.angles, targetPose, motorTargets, dt);
+            if (!controlOk) ctlFkFailWin++;
 
             // FK 連續失敗 5 次 → 自動降回 joint-space
             if (tsController.fkFailCount >= 5) {
@@ -862,6 +1027,7 @@ void loop() {
 
             IKResult target = inverse_kinematics(smoothedTarget);
             if (!target.valid) {
+                ctlIkFailWin++;
                 posStop();
                 Out.println("{\"error\":\"IK invalid, pos stopped\"}");
             } else {
@@ -899,18 +1065,24 @@ void loop() {
             // 故運動中也能注入；脈衝過期自動歸零。bumpUntilMs==0 表無擾動。
             bool bumpActive = (bumpUntilMs != 0 && millis() < bumpUntilMs);
             if (bumpUntilMs != 0 && !bumpActive) clearBump();   // 脈衝結束
+            uint32_t _f5t0 = micros();      // [Phase0] 量 6×F5 burst 是否卡 core1（預期 sub-ms）
             for (int i = 0; i < NUM_MOTORS; i++) {
                 float cmd = motorTargets[i] + (bumpActive ? bumpDeg[i] : 0.0f);
                 coords[i] = enc.angleToCoord(i, cmd, enableAngle[i]);
                 if (abs(coords[i]) > 8192) {
+                    ctlCoordLimitWin++;
                     posStop();
                     Out.println("{\"error\":\"coord out of range, pos stopped\"}");
                     controlOk = false;
                     break;
                 }
+                int32_t absCoord = abs(coords[i]);
+                if (absCoord > ctlCoordMaxAbs) ctlCoordMaxAbs = absCoord;
                 servos.setAbsoluteCoord(MOTOR_ADDR[i], posSpeed, posAcc, coords[i]);
                 busTxF5++;                 // 匯流排佔用：F5 指令幀（DLC 8）
             }
+            f5us = micros() - _f5t0;        // [Phase0]
+            if (f5us > f5usMax) f5usMax = f5us;
         }
     }
 
@@ -919,23 +1091,43 @@ void loop() {
     uint32_t nowMs = millis();
     if (nowMs - lastTeleMs < TELE_PERIOD_MS) return;
     uint32_t teleWin = nowMs - lastTeleMs;                    // 遙測窗長（匯流排佔用分母）
-    float lhz = ctrlCycles * 1000.0f / teleWin;               // 實測控制迴圈頻率
+    uint32_t teleCycles = ctrlCycles;
+    uint32_t teleDtMin = (dtMinMs == UINT32_MAX) ? 0 : dtMinMs;
+    uint32_t teleDtMax = dtMaxMs;
+    float teleDtAvg = teleCycles ? (float)dtSumMs / teleCycles : 0.0f;
+    float lhz = teleCycles * 1000.0f / teleWin;               // 實測控制迴圈頻率
     ctrlCycles = 0;
+    dtMinMs = UINT32_MAX;
+    dtMaxMs = 0;
+    dtSumMs = 0;
     lastTeleMs = nowMs;
+
+    uint16_t rxPerId[NUM_MOTORS];
+    uint8_t maxDrain = 0;
+    servos.snapshotAndResetRxStats(rxPerId, &maxDrain);
+    for (int i = 0; i < NUM_MOTORS; i++) busRxEnc += rxPerId[i];
 
     // JSON 輸出（ef=EFLG, tx=TEC, rx=REC, lhz=實測控制Hz, ar=上報週期/0=輪詢）
     uint8_t eflg = servos.can.getEFLG();
     uint8_t tec  = servos.can.getTEC();
     uint8_t rec  = servos.can.getREC();
-    if (eflg & 0xC0) servos.can.clearRXOverflow();  // 清 RX overflow 才能繼續看新事件
+    if (eflg & 0xC0) { busOvr++; servos.can.clearRXOverflow(); }  // [Phase0] 先計次再清
+    const char* ctlModeName = !posEnabled ? "off" : (holdMode ? "hold" : (controlMode == 1 ? "task_pd" : "joint"));
 
     Out.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
                   "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
-                  "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u},"
-                  "\"pid\":[%u,%u,%u,%u],\"fl\":%d",
+                  "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u,"
+                  "\"per\":[%u,%u,%u,%u,%u,%u],\"ovr\":%u,\"f5us\":%u,\"mxd\":%u},"
+                  "\"tim\":{\"cycles\":%u,\"dtMin\":%u,\"dtMax\":%u,\"dtAvg\":%.2f,"
+                  "\"teleMs\":%u,\"f5us\":%u,\"f5max\":%u,\"canReadUs\":%u},"
+                  "\"can\":{\"backend\":\"mcp2515\",\"bitrate\":500000,\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+                  "\"rxDrop\":%u,\"txFail\":%u,\"qDepth\":0,\"qMax\":0},"
+                  "\"ctl\":{\"mode\":\"%s\",\"ikFail\":%u,\"fkFail\":%u,\"coordLimit\":%u,\"coordMax\":%d,"
+                  "\"fkStreak\":%d,\"profile\":\"%s\"},"
+                  "\"pid\":[%u,%u,%u,%u],\"pids\":%d,\"fl\":%d",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
@@ -943,8 +1135,21 @@ void loop() {
         eflg, tec, rec,
         nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0,
         busTxF5, busTxQ, busRxEnc, teleWin,
-        curKp, curKi, curKd, curKv, followMode ? 1 : 0);
+        rxPerId[0], rxPerId[1], rxPerId[2],
+        rxPerId[3], rxPerId[4], rxPerId[5],
+        busOvr, f5us, maxDrain,
+        teleCycles, teleDtMin, teleDtMax, teleDtAvg,
+        teleWin, f5us, f5usMax, canReadUs,
+        eflg, tec, rec,
+        busOvr, 0,
+        ctlModeName, ctlIkFailWin, ctlFkFailWin, ctlCoordLimitWin, ctlCoordMaxAbs,
+        tsController.fkFailCount, followMode ? "follow" : (holdMoveMs > 0 ? "smoothstep" : "none"),
+        curKp, curKi, curKd, curKv, pidSaved ? 1 : 0, followMode ? 1 : 0);
     busTxF5 = busTxQ = busRxEnc = 0;   // 匯流排計數每窗歸零
+    busOvr = 0;                                                // [Phase0]
+    f5usMax = 0;
+    ctlIkFailWin = ctlFkFailWin = ctlCoordLimitWin = 0;
+    ctlCoordMaxAbs = 0;
 
     if (posEnabled && holdMode) {
         float herr[NUM_MOTORS];
