@@ -929,7 +929,7 @@ void loop() {
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
                   "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
                   "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u},"
-                  "\"pid\":[%u,%u,%u,%u]",
+                  "\"pid\":[%u,%u,%u,%u],\"fl\":%d",
         enc.angles[0], enc.angles[1], enc.angles[2],
         enc.angles[3], enc.angles[4], enc.angles[5],
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
@@ -937,7 +937,7 @@ void loop() {
         eflg, tec, rec,
         nowMs, elapsed, canReadUs, lhz, autoReturnMode ? arPeriodMs : 0,
         busTxF5, busTxQ, busRxEnc, teleWin,
-        curKp, curKi, curKd, curKv);
+        curKp, curKi, curKd, curKv, followMode ? 1 : 0);
     busTxF5 = busTxQ = busRxEnc = 0;   // 匯流排計數每窗歸零
 
     if (posEnabled && holdMode) {
