@@ -581,26 +581,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
-// ===== 幾何參數（與 C++ 一致）=====
-const BASE_RADIUS = 152, BASE_ANGLE = 18.92;
-const PLATFORM_RADIUS = 103, PLATFORM_ANGLE = 28.07;
-const LOWER_LEG = 65, UPPER_LEG = 165;
-const NEUTRAL_Z = 105;
+// ===== 幾何參數：純量從共用 kin.js 取（SoT，數字單一來源；THREE B/P 為渲染專用、本地建）=====
+const { BASE_RADIUS, PLATFORM_RADIUS, LOWER_LEG, UPPER_LEG, NEUTRAL_Z,
+        MOTOR_PLANE_ANGLE, BASE_ANGLES, PLATFORM_ANGLES } = window.Kin;
 const DEG = Math.PI / 180;
-// CW 排列：pair@210°(M1,M2左下), pair@90°(M3,M4上), pair@-30°(M5,M6右)
-// 奇數馬達在 +ANGLE/2 側，偶數在 -ANGLE/2 側
-const MOTOR_PLANE_ANGLE = [300, 120, 180, 0, 60, 240];
-
-const BASE_ANGLES = [
-  BASE_ANGLE/2+210, -BASE_ANGLE/2+210,
-  BASE_ANGLE/2+90, -BASE_ANGLE/2+90,
-  BASE_ANGLE/2-30, -BASE_ANGLE/2-30
-];
-const PLATFORM_ANGLES = [
-  PLATFORM_ANGLE/2+210, -PLATFORM_ANGLE/2+210,
-  PLATFORM_ANGLE/2+90, -PLATFORM_ANGLE/2+90,
-  PLATFORM_ANGLE/2-30, -PLATFORM_ANGLE/2-30
-];
+// CW 排列：pair@210°(M1,M2左下), pair@90°(M3,M4上), pair@-30°(M5,M6右)；奇數馬達在 +ANGLE/2 側
 
 const B = [], P = [];
 for (let i = 0; i < 6; i++) {
@@ -613,34 +598,8 @@ const hDist2 = (P[0].x-B[0].x)**2 + (P[0].y-B[0].y)**2;
 const Z_LEGS_UP = LOWER_LEG + Math.sqrt(UPPER_LEG*UPPER_LEG - hDist2);
 console.log('Z_LEGS_UP =', Z_LEGS_UP.toFixed(1));
 
-// ===== 逆向運動學 =====
-function ik(pose) {
-  const [x,y,z,roll,pitch,yaw] = pose;
-  const cr=Math.cos(roll*DEG), sr=Math.sin(roll*DEG);
-  const cp=Math.cos(pitch*DEG), sp=Math.sin(pitch*DEG);
-  const cy=Math.cos(yaw*DEG), sy=Math.sin(yaw*DEG);
-  const R = [
-    [cy*cp, cy*sp*sr-sy*cr, cy*sp*cr+sy*sr],
-    [sy*cp, sy*sp*sr+cy*cr, sy*sp*cr-cy*sr],
-    [-sp, cp*sr, cp*cr]
-  ];
-  const angles = [];
-  for (let i = 0; i < 6; i++) {
-    const px=P[i].x, py=P[i].y, pz=P[i].z;
-    const qx = R[0][0]*px + R[0][1]*py + R[0][2]*pz + x;
-    const qy = R[1][0]*px + R[1][1]*py + R[1][2]*pz + y;
-    const qz = R[2][0]*px + R[2][1]*py + R[2][2]*pz + z;
-    const dx=qx-B[i].x, dy=qy-B[i].y, dz=qz-B[i].z;
-    const L = dx*dx+dy*dy+dz*dz-(UPPER_LEG*UPPER_LEG-LOWER_LEG*LOWER_LEG);
-    const M = 2*LOWER_LEG*dz;
-    const th = MOTOR_PLANE_ANGLE[i]*DEG;
-    const N = 2*LOWER_LEG*(Math.cos(th)*dx + Math.sin(th)*dy);
-    const d = Math.sqrt(M*M+N*N);
-    const sa = Math.max(-1, Math.min(1, L/d));
-    angles.push((Math.asin(sa) - Math.atan2(N,M)) / DEG);
-  }
-  return angles;
-}
+// ===== 逆向運動學：委派共用 kin.js（消除重複邏輯；本地僅取裸 angles 供 render）=====
+const ik = (pose) => window.Kin.ik(pose).angles;
 
 // ===== 高斯消去 6×6 =====
 function gaussSolve(A, b) {

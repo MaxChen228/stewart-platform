@@ -67,7 +67,8 @@ function deltaAngle(pose0, dpose) {
   return { d: a1.angles.map((v, i) => v - a0.angles[i]), valid: a0.valid && a1.valid };
 }
 
-const _K = { ik, deltaAngle, NEUTRAL_Z, LOWER_LEG, UPPER_LEG, MOTOR_PLANE_ANGLE };
+const _K = { ik, deltaAngle, NEUTRAL_Z, LOWER_LEG, UPPER_LEG, MOTOR_PLANE_ANGLE,
+             BASE_RADIUS, PLATFORM_RADIUS, BASE_ANGLES, PLATFORM_ANGLES };   // 幾何原語：前端 render 取同源、免重列
 if (typeof module !== 'undefined' && module.exports) module.exports = _K;   // Node
 if (typeof window !== 'undefined') window.Kin = _K;                          // 瀏覽器 <script src>（SoT 共用）
 })();
