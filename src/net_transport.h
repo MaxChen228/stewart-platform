@@ -8,16 +8,27 @@
 // NVS namespace 用 "netcfg"，與 encoder 的 "stewart" 分離，避免撞 key。
 // 憑證以個別 key 存（putString/putBool），schema 演進時加欄位不會讓既有讀取失敗。
 
+// 失效保護策略（P4）。預設 HOLD-current：snapshot 當前實際角度保持，
+// 靠馬達內環保形、不靠會發散的 ESP32 外環，且非硬撐追逐中的 target。
+enum Failsafe : uint8_t { FS_HOLD_CURRENT = 0, FS_DISABLE = 1 };
+
 struct NetCfg {
-    String ssid;
-    String pass;
-    bool   enabled = false;   // WIFION/WIFIOFF；開機時據此決定是否自動連線
+    String   ssid;
+    String   pass;
+    bool     enabled     = false;   // WIFION/WIFIOFF；開機時據此決定是否自動連線
+    uint8_t  failsafe    = FS_HOLD_CURRENT;  // FS 指令；斷線安全態
+    uint32_t hbTimeoutMs = 0;       // HB 指令；心跳逾時(ms)，0=停用心跳檢查（僅靠 socket-close）
 
     void load();              // 從 NVS "netcfg" 讀；缺值用預設
     void save() const;        // 寫回 NVS "netcfg"
 };
 
 extern NetCfg netCfg;
+
+// ===== 連線狀態（P4，core0 netTask 維護，core1 checkFailsafe 讀）=====
+// 單字組對齊 → ESP32 上讀寫原子，免 mutex。
+extern volatile bool     netConnected;   // WiFi 已連 且 TCP client live
+extern volatile uint32_t lastNetRxMs;    // 最後一次從 socket 收到 byte 的時刻（心跳基準）
 
 // ===== DualPrint：輸出 fan-out（P2）=====
 // 繼承 Arduino Print，所有 print/printf/println/write 都 funnel 經 write()：

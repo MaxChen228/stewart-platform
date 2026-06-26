@@ -153,6 +153,8 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `WIFI ssid pass` | 設定 WiFi 憑證存 NVS（namespace netcfg；naive space-split，不支援含空格） |
 | `WIFION` / `WIFIOFF` | 啟用／停用 WiFi 並存 NVS；WIFION 即時連線回報 IP |
 | `WIFI?` | 查 WiFi 狀態（enabled/connected/ssid/ip/rssi/heap，不回 pass 明文） |
+| `FS 0`/`FS 1` | 斷線失效保護策略（0=HOLD-current 預設保形 / 1=斷電），存 NVS |
+| `HB ms` | 心跳逾時(ms)，0=停用心跳檢查（僅靠 socket-close 偵測），存 NVS |
 
 ## 位置控制 — 現狀
 

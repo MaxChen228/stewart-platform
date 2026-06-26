@@ -92,6 +92,38 @@ void posDisable() {
     servos.disableAll();
 }
 
+// ===== 失效保護（P4）=====
+// 只有「以 WiFi 為控制來源」時才 arm：TCP 下控制指令 →true，USB 下指令 →false。
+bool netIsControlSource = false;
+
+// HOLD-current：snapshot 當前實際角度保持。馬達已 enable（failsafe 僅在 posEnabled 觸發），
+// 故無需重新 enable/設零點；holdAngles=當前角度 → angleToCoord 命令「留在原地」，無跳變。
+static void enterHoldCurrent() {
+    for (int i = 0; i < NUM_MOTORS; i++) holdBase[i] = holdAngles[i] = enc.angles[i];
+    holdMoveMs = 0;        // 取消進行中的姿態移動
+    maxHoldErr = 0;
+    holdMode = true;       // 切 HOLD 直送，脫離會發散的 PD/joint 外環
+    // posEnabled 維持 true
+}
+
+// 斷線偵測 + 安全態切換（core1 執行；netTask 只設旗標、不碰馬達）。
+static void checkFailsafe() {
+    if (!netIsControlSource || !posEnabled) return;
+    bool linkLost = !netConnected ||
+        (netCfg.hbTimeoutMs > 0 && (millis() - lastNetRxMs > netCfg.hbTimeoutMs));
+    if (!linkLost) return;
+
+    netIsControlSource = false;   // 先解除，避免反覆觸發
+    if (netCfg.failsafe == FS_DISABLE) {
+        posDisable();
+        Out.println("{\"failsafe\":\"disable\"}");
+    } else {
+        enterHoldCurrent();
+        Out.printf("{\"failsafe\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]}\n",
+            holdAngles[0],holdAngles[1],holdAngles[2],holdAngles[3],holdAngles[4],holdAngles[5]);
+    }
+}
+
 static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
     float alpha = fminf(1.0f, dt / SMOOTH_TIME);
     sm.x    += alpha * (tgt.x    - sm.x);
@@ -166,9 +198,15 @@ void setup() {
 // 指令分派：source-agnostic。USB（handleSerial）與 TCP（loop 取 qIn）共用同一條，
 // 指令語意一致、ack 自動經 Out 鏡像回兩路。原本分支內的 return 改為從 dispatch 返回，
 // 行為等價（跳過其餘分支）。
-void dispatch(const String& cmd) {
-    // WIFI 系列指令先攔截，命中即短路
+void dispatch(const String& cmd, bool fromNet = false) {
+    // WIFI/FS/HB 系列指令先攔截，命中即短路
     if (netHandleCommand(cmd)) return;
+
+    // TCP 來源禁校正類（Z/Z0~Z5 寫 NVS 不可逆；校正須實體 home 姿態 = 本就手邊 USB 操作）
+    if (fromNet && cmd.startsWith("Z")) {
+        Out.println("{\"error\":\"Z* (calibration) is USB-only\"}");
+        return;
+    }
 
     if (cmd == "Z") {
         if (enc.zeroAll(servos)) {
@@ -795,15 +833,19 @@ void handleSerial() {
     if (!Serial.available()) return;
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    dispatch(cmd);
+    netIsControlSource = false;    // USB 操作員接手 → 解除 WiFi failsafe arm
+    dispatch(cmd, false);
 }
 
 void loop() {
     handleSerial();
 
-    // TCP 指令來源（P3）：非阻塞取 netTask 收到的指令 → 同一條 dispatch
+    // TCP 指令來源（P3）：非阻塞取 netTask 收到的指令 → 同一條 dispatch（標記 WiFi 為控制來源）
     String netCmd;
-    if (netNextCommand(netCmd)) dispatch(netCmd);
+    if (netNextCommand(netCmd)) { netIsControlSource = true; dispatch(netCmd, true); }
+
+    // 斷線失效保護（P4）：以 WiFi 控制且 posEnabled 時，連線中斷即進安全態
+    checkFailsafe();
 
     // auto-return：每次 loop 迭代都排空（高頻），避免 streaming 幀塞爆 2-buffer
     if (autoReturnMode) servos.drainInto(latestRaw);

@@ -17,15 +17,20 @@ struct NetCmd  { char s[128]; };       // 指令行最長 ~ "W f f f f f f ms" <
 static QueueHandle_t qOut = nullptr;   // loop(core1) → netTask(core0)，遙測，len=32 (~1s@33Hz)
 static QueueHandle_t qIn  = nullptr;   // netTask(core0) → loop(core1)，指令，len=16
 
+// 連線狀態（core0 寫、core1 讀；單字組原子）
+volatile bool     netConnected = false;
+volatile uint32_t lastNetRxMs  = 0;
+
 // ----- DualPrint：唯一 writer = core1（loop/setup），免 mutex -----
 DualPrint Out;
 
 void DualPrint::flushLine() {
     if (!qOut) { n = 0; return; }      // netInit 前（setup 早期）只走 Serial，不入隊
     OutLine ol;
-    size_t m = (n < sizeof(ol.s)) ? n : sizeof(ol.s) - 1;
+    size_t m = (n < sizeof(ol.s) - 1) ? n : sizeof(ol.s) - 2;  // 留 1 格給 '\n'
     memcpy(ol.s, line, m);
-    ol.s[m] = '\0';
+    ol.s[m]     = '\n';                // 一律補行尾：截斷的超長行（X-diag）才不會 TCP 黏幀
+    ol.s[m + 1] = '\0';
     n = 0;
     if (xQueueSend(qOut, &ol, 0) == errQUEUE_FULL) {   // drop-oldest（僅 producer/core1 做此 dance）
         OutLine drop;
@@ -35,9 +40,9 @@ void DualPrint::flushLine() {
 }
 
 size_t DualPrint::write(uint8_t c) {
-    Serial.write(c);                   // (a) 永遠寫 USB（此處保留 Serial，是真實 sink）
-    if (n < sizeof(line) - 1) line[n++] = c;   // (b) 累積行緩衝
-    if (c == '\n') flushLine();
+    Serial.write(c);                   // (a) 永遠寫 USB（此處保留 Serial，是真實 sink；byte-parity）
+    if (c == '\n') { flushLine(); return 1; }   // '\n' 不入緩衝，由 flushLine 統一補
+    if (n < sizeof(line) - 1) line[n++] = c;    // (b) 只累積內容
     return 1;
 }
 
@@ -56,7 +61,8 @@ static void netTask(void* arg) {
     size_t inn = 0;
     for (;;) {
         if (WiFi.status() != WL_CONNECTED) {
-            started = false;
+            if (started) { client.stop(); server.end(); started = false; }  // 釋放半開資源
+            netConnected = false;
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
@@ -64,29 +70,33 @@ static void netTask(void* arg) {
 
         if (!client || !client.connected()) {
             WiFiClient c = server.available();
-            if (c) { client = c; client.setNoDelay(true); inn = 0; }   // 新連線重置行緩衝
+            if (c) { client = c; client.setNoDelay(true); inn = 0; lastNetRxMs = millis(); }
+        }
+        netConnected = (client && client.connected());
+
+        // 出站優先：先排空遙測，避免入站背壓餓死遙測（P3 review nit）。
+        // 無 client 也排空（丟棄）→ queue 不堆積。
+        OutLine ol;
+        while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {
+            if (netConnected) client.print(ol.s);   // ol.s 已含 '\n'
         }
 
-        // 入站：socket → 行切割 → qIn（指令永不丟，netTask 可阻塞 send）
-        while (client && client.connected() && client.available()) {
+        // 入站：socket → 行切割 → qIn。send timeout=0（qIn 滿則丟，不阻塞 netTask）——
+        // 唯有 loop 卡住、16 條未處理才會丟，遠優於遙測連帶停擺。
+        while (netConnected && client.available()) {
             int ch = client.read();
             if (ch < 0) break;
+            lastNetRxMs = millis();      // 任何 byte 都更新心跳基準
             if (ch == '\n' || ch == '\r') {
                 if (inn > 0) {
                     NetCmd nc;
                     size_t m = (inn < sizeof(nc.s)) ? inn : sizeof(nc.s) - 1;
                     memcpy(nc.s, inbuf, m); nc.s[m] = '\0'; inn = 0;
-                    if (qIn) xQueueSend(qIn, &nc, portMAX_DELAY);
+                    if (qIn) xQueueSend(qIn, &nc, 0);
                 }
             } else if (inn < sizeof(inbuf) - 1) {
                 inbuf[inn++] = (char)ch;
             }   // 行超長則丟棄多餘 byte（指令 <128，正常不會觸發）
-        }
-
-        // 出站：排空遙測 queue 寫 socket
-        OutLine ol;
-        while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {     // 無 client 也排空（丟棄）→ queue 不堆積
-            if (client && client.connected()) client.print(ol.s);   // ol.s 已含 '\n'
         }
         vTaskDelay(pdMS_TO_TICKS(2));   // 讓出 CPU
     }
@@ -98,6 +108,7 @@ bool netNextCommand(String& out) {
     NetCmd nc;
     if (xQueueReceive(qIn, &nc, 0) != pdTRUE) return false;
     out = nc.s;
+    out.trim();              // 與 USB 路徑（handleSerial 的 cmd.trim）對稱，免尾空白失配
     return true;
 }
 
@@ -110,9 +121,11 @@ void netInit() {
 void NetCfg::load() {
     Preferences prefs;
     prefs.begin("netcfg", true);
-    ssid    = prefs.getString("ssid", "");
-    pass    = prefs.getString("pass", "");
-    enabled = prefs.getBool("en", false);
+    ssid        = prefs.getString("ssid", "");
+    pass        = prefs.getString("pass", "");
+    enabled     = prefs.getBool("en", false);
+    failsafe    = prefs.getUChar("fs", FS_HOLD_CURRENT);
+    hbTimeoutMs = prefs.getUInt("hb", 0);
     prefs.end();
 }
 
@@ -122,6 +135,8 @@ void NetCfg::save() const {
     prefs.putString("ssid", ssid);
     prefs.putString("pass", pass);
     prefs.putBool("en", enabled);
+    prefs.putUChar("fs", failsafe);
+    prefs.putUInt("hb", hbTimeoutMs);
     prefs.end();
 }
 
@@ -193,6 +208,21 @@ bool netHandleCommand(const String& cmd) {
         netCfg.pass = rest.substring(sp + 1);
         netCfg.save();
         Out.printf("{\"status\":\"wifi creds saved\",\"ssid\":\"%s\"}\n", netCfg.ssid.c_str());
+        return true;
+    }
+    if (cmd.startsWith("FS ")) {
+        // FS <0|1>：斷線安全態（0=HOLD-current 預設 / 1=斷電）
+        int v = cmd.substring(3).toInt();
+        netCfg.failsafe = (v == FS_DISABLE) ? FS_DISABLE : FS_HOLD_CURRENT;
+        netCfg.save();
+        Out.printf("{\"status\":\"failsafe\",\"fs\":%d}\n", netCfg.failsafe);
+        return true;
+    }
+    if (cmd.startsWith("HB ")) {
+        // HB <ms>：心跳逾時，0=停用心跳檢查（僅靠 socket-close）
+        netCfg.hbTimeoutMs = (uint32_t)cmd.substring(3).toInt();
+        netCfg.save();
+        Out.printf("{\"status\":\"heartbeat\",\"hb_ms\":%u}\n", (unsigned)netCfg.hbTimeoutMs);
         return true;
     }
     return false;
