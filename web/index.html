@@ -381,7 +381,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     <!-- 2. 繞擾動控制（U 單軸 / W 模態 / battery 序列；client 看門狗，韌體 U/W 自限保底）-->
     <div class="ui-card">
       <div class="ui-card-title">擾動控制</div>
-      <div class="dev-label" style="margin-bottom:6px">需先 HOLD 鎖位；脈衝自動歸零（韌體 ≤5s 自限）</div>
+      <div class="dev-label" style="margin-bottom:6px">脈衝自動歸零（韌體 ≤5s 自限）· <span id="dist-hold" style="color:var(--sub)">○ 需先 HOLD 鎖位</span></div>
 
       <div class="dev-label" style="margin:8px 0 4px">單軸脈衝 U</div>
       <div style="display:grid;grid-template-columns:auto 1fr auto 1fr auto 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
@@ -1372,6 +1372,14 @@ scope.on('telemetry', d => {
     `<div class="h-cell ${c?c(d):''}"><div class="lbl">${l}</div><div class="val">${v(d)}</div></div>`).join('');
   if ((d.ok??6)<6 || (d.tx??0)>96) { const n=performance.now(); if (n-lastBad>800) {
     scope.markEvent(`CAN ok=${d.ok} TEC=${d.tx}`,'bad'); logEv(`CAN異常 ok=${d.ok} TEC=${d.tx} EFLG=${d.ef}`,'bad'); lastBad=n; } }
+});
+
+// 擾動卡即時 HOLD 指示（純資訊：未鎖位時脈衝/battery 無效，提醒不鎖死按鈕）
+scope.on('telemetry', d => {
+  const el = $o('dist-hold'); if (!el) return;
+  const holding = !!(d.pos && d.hold);
+  el.textContent = holding ? '● HOLD 中' : '○ 未鎖位 · 脈衝無效';
+  el.style.color = holding ? 'var(--contra)' : 'var(--dual)';
 });
 
 // vFOC PID 欄位反寫韌體真值（SoT：telemetry d.pid 是唯一真相源，非編輯中才覆寫）
