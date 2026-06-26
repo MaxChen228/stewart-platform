@@ -63,6 +63,14 @@ async function main() {
   const dAngle = encDelta(MODE, SEV);
   console.log(`模態=${MODE} severity=${SEV}° → enc Δangle=[${dAngle.map(x => x.toFixed(2)).join(' ')}] rms=${rms(dAngle).toFixed(2)}°`);
 
+  // 守門：韌體 W handler 會 constrain(d, ±30°) 靜默截斷。若 host 算出的單軸 Δ 超 30°，
+  // 實際施加 ≠ 記錄值 → 數據失真。寧可中止要求降 severity，不產生失真數據（真實數據說話）。
+  const overAxis = dAngle.findIndex(x => Math.abs(x) > 30);
+  if (overAxis >= 0) {
+    console.error(`⛔ M${overAxis + 1} Δ=${dAngle[overAxis].toFixed(1)}° 超韌體 W ±30° 上限 → 會被靜默截斷致數據失真。請降低 severity（當前 ${SEV}）後重跑。`);
+    process.exit(1);
+  }
+
   ws = new WebSocket(`ws://${HOST}`);
   await new Promise((r, j) => { ws.on('open', r); ws.on('error', j); });
   ws.on('message', onMsg);

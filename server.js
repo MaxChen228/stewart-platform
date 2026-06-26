@@ -7,6 +7,9 @@ const path = require('path');
 
 const HTTP_PORT = 3000;
 const BAUD = 115200;
+// 綁定位址：預設 0.0.0.0（方便站在機台旁用手機/平板驅動平台）。
+// 這是會動的實體機械——若在不可信網段，設環境變數 LOOPBACK_ONLY=1 只綁本機。
+const BIND_HOST = process.env.LOOPBACK_ONLY === '1' ? '127.0.0.1' : '0.0.0.0';
 
 // 最新一筆資料（供 REST API 用）
 let lastData = null;
@@ -98,9 +101,16 @@ const server = http.createServer((req, res) => {
   let urlPath = req.url.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
   else if (urlPath.endsWith('/')) urlPath += 'index.html';
-  // /sysid/*.js 從專案根 serve → 瀏覽器與 Node 共用同一份 kin.js/disturb_modes.js（SoT，不造第二真相源）
-  const fromSysid = urlPath.startsWith('/sysid/') && urlPath.endsWith('.js') && !urlPath.includes('..');
-  const filePath = fromSysid ? path.join(__dirname, urlPath) : path.join(__dirname, 'web', urlPath);
+  // /sysid/*.js 從 sysid/ serve → 瀏覽器與 Node 共用同一份 kin.js/disturb_modes.js（SoT，不造第二真相源）
+  const fromSysid = urlPath.startsWith('/sysid/') && urlPath.endsWith('.js');
+  // 各自的服務沙箱：sysid 只到 sysid/，其餘只到 web/。
+  const rootDir = fromSysid ? path.join(__dirname, 'sysid') : path.join(__dirname, 'web');
+  const relPath = fromSysid ? urlPath.slice('/sysid'.length) : urlPath;
+  const filePath = path.join(rootDir, relPath);
+  // 防目錄遍歷：正規化後必須仍在自己的沙箱內（擋 /sysid/../server.js 之類 ../ 逃逸）
+  if (filePath !== rootDir && !filePath.startsWith(rootDir + path.sep)) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
@@ -119,7 +129,17 @@ function broadcast(line) {
   for (const client of wss.clients) if (client.readyState === 1) client.send(line);
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // 安全：拒絕跨站瀏覽器連線（惡意網頁經 DNS rebinding / CSWSH 可直送指令驅動實體馬達）。
+  // 放行本機 + RFC1918 私網來源（保住站機台旁用手機/平板從 LAN IP 控制）；
+  // 跨站攻擊頁的 Origin 是攻擊者公網域名、不符此段 → 擋掉。無 Origin 的 Node 腳本放行。
+  const origin = req.headers.origin;
+  const ALLOW_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/;
+  if (origin && !ALLOW_ORIGIN.test(origin)) {
+    console.warn(`[WS] rejected cross-origin connection: ${origin}`);
+    ws.close(1008, 'origin not allowed');
+    return;
+  }
   clientCount++;
   console.log(`[WS] client connected (${clientCount})`);
 
@@ -188,8 +208,10 @@ async function connectSerial() {
 }
 
 // ===== 啟動 =====
-server.listen(HTTP_PORT, () => {
-  console.log(`[Server] http://localhost:${HTTP_PORT}`);
+server.listen(HTTP_PORT, BIND_HOST, () => {
+  console.log(`[Server] http://localhost:${HTTP_PORT}  (bind ${BIND_HOST})`);
   console.log(`[Server] REST: http://localhost:${HTTP_PORT}/api/latest`);
+  if (BIND_HOST === '0.0.0.0')
+    console.log('[Server] ⚠ 全網段可達。不可信網路請以 LOOPBACK_ONLY=1 啟動只綁本機。');
   connectSerial();
 });

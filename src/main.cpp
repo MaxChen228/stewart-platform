@@ -141,7 +141,8 @@ void setup() {
         delay(10);
     }
 
-    // 開機持久化 vFOC PID：下發抗自持的 Ki=30（重開機馬達回出廠 100→一推暴走，故每次開機重設）
+    // 開機持久化 vFOC PID：純P 工作點 [1024,0,0,0]（見上 BOOT_* 定義）。
+    // 重開機馬達回出廠值 → 每次開機重設成韌體版控的值，不靠馬達 EEPROM。
     for (int i = 0; i < NUM_MOTORS; i++) {
         servos.setVFOC_KpKi(MOTOR_ADDR[i], BOOT_KP, BOOT_KI);
         delay(10);
@@ -233,9 +234,12 @@ void handleSerial() {
 
         int64_t raw[NUM_MOTORS];
         servos.readAllRawEncoders(raw);
+        enc.updateAngles(raw);   // 0x35 不受 0x92 影響，先刷新 enc.angles 當 fallback 基準
         for (int i = 0; i < NUM_MOTORS; i++) {
+            // 讀失敗 fallback 用新鮮 enc.angles（真實當前角），不用寫死 90°，
+            // 否則 0x92 已把零點設在真實位置 → 首個 F5 coord 算錯 → 該軸跳動（與 H handler 對齊）
             enableAngle[i] = (raw[i] != INT64_MIN)
-                ? enc.rawToAngle(i, raw[i]) : 90.0f;
+                ? enc.rawToAngle(i, raw[i]) : enc.angles[i];
         }
 
         // 初始化控制器：target 自動對齊當前 FK 姿態（避免 Enable 瞬間暴衝）
@@ -613,6 +617,11 @@ void loop() {
     lastReadUs = nowUs;
     ctrlCycles++;
 
+    // 真實取樣間隔（秒），餵控制器的時間導數/平滑項。clamp 到標稱的 [0.5×, 3×]：
+    // 過短 → vel=noise/dt 把 D 項炸成高頻放大器；stall 後一個巨大 Δ 配正常 dt 會 spike。
+    float nominalDt = loopPeriodUs / 1e6f;
+    float dt = fmaxf(0.5f * nominalDt, fminf(3.0f * nominalDt, (float)elapsed / 1000.0f));
+
     int64_t raw[NUM_MOTORS];
     int ok = 0;
     uint32_t canReadUs = 0;
@@ -669,7 +678,7 @@ void loop() {
             controlOk = true;
         } else if (controlMode == 1) {
             // ===== Task-space PD =====
-            controlOk = tsController.update(enc.angles, targetPose, motorTargets);
+            controlOk = tsController.update(enc.angles, targetPose, motorTargets, dt);
 
             // FK 連續失敗 5 次 → 自動降回 joint-space
             if (tsController.fkFailCount >= 5) {
@@ -684,8 +693,10 @@ void loop() {
 
         if (!holdMode && controlMode == 0) {
             // ===== Joint-space 備用 =====
-            constexpr float FIXED_DT = 0.02f;
-            smoothPose(smoothedTarget, targetPose, FIXED_DT);
+            // 平滑時間常數用真實 dt（改 L 時 smoothing 速率才正確）；
+            // 注意：下方自適應追蹤的 vel 是 per-cycle Δ（不除 dt）為刻意設計，
+            // 該公式本質與迴圈率耦合，未在此正規化（見 audit Gate A confound 說明）。
+            smoothPose(smoothedTarget, targetPose, dt);
 
             IKResult target = inverse_kinematics(smoothedTarget);
             if (!target.valid) {

@@ -29,9 +29,11 @@ struct TaskSpacePD {
 
     // 核心：從當前角度 + 目標姿態 → 輸出馬達目標角度
     // 回傳 false = FK 或 IK 失敗
+    // dt = 本 cycle 真實取樣間隔（秒）。D 項 vel=Δpose/dt 必須用真實間隔，
+    // 否則改 L 指令（迴圈週期）時 D 項與 Kd 語義會錯誤縮放（見 audit #1）。
     bool update(const float currentAngles[6], const Pose& target,
-                float outAngles[6]) {
-        constexpr float DT = 0.02f;
+                float outAngles[6], float dt) {
+        const float DT = dt;
 
         // 1. FK：從馬達角度恢復平台姿態
         currentPose = fk.solve(currentAngles);
