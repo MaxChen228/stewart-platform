@@ -294,7 +294,6 @@ canvas {
   <div class="nav-brand">PHYSICS_LAB</div>
   <div class="nav-right">
     <a class="nav-link" href="research/" target="_blank" rel="noopener" title="研究實驗室（受控物理實驗操作台）">⌬ RESEARCH</a>
-    <a class="nav-link" href="scope.html" target="_blank" rel="noopener" title="多軸即時示波器（角度／誤差／相圖）">◳ SCOPE</a>
     <div id="status" class="nav-status disconnected">DISCONNECTED</div>
   </div>
 </nav>
@@ -310,6 +309,28 @@ canvas {
       <div id="state-hmax" style="font-family:var(--font-mono);font-size:13px;text-align:center;color:var(--sub);margin-bottom:14px">—</div>
       <button id="btn-hold" class="chip zbtn" onclick="toggleHold()" disabled
         style="display:block;width:100%;font-size:14px;padding:10px;letter-spacing:1px">HOLD HERE</button>
+    </div>
+
+    <!-- 1.5 POSE 姿態操作（G 指令；滑桿即時驅動綠色 ghost 目標預覽）-->
+    <div class="ui-card">
+      <div class="ui-card-title">姿態操作</div>
+      <div class="dev-label" style="margin-bottom:6px">6-DOF 相對中位偏移 · 綠色 ghost = 目標</div>
+      <div style="display:flex;flex-direction:column;gap:5px;font-family:var(--font-mono);font-size:11px">
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Heave</span><input type="range" id="ps-z" min="-10" max="105" value="0" step="1"><span id="ps-z-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Surge</span><input type="range" id="ps-x" min="-110" max="110" value="0" step="1"><span id="ps-x-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Sway</span><input type="range" id="ps-y" min="-100" max="140" value="0" step="1"><span id="ps-y-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Roll</span><input type="range" id="ps-r" min="-6" max="9" value="0" step="0.5"><span id="ps-r-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Pitch</span><input type="range" id="ps-p" min="-7" max="7" value="0" step="0.5"><span id="ps-p-v" style="text-align:right">0</span></div>
+        <div style="display:grid;grid-template-columns:40px 1fr 42px;gap:4px;align-items:center"><span>Yaw</span><input type="range" id="ps-w" min="-70" max="70" value="0" step="1"><span id="ps-w-v" style="text-align:right">0</span></div>
+      </div>
+      <div style="display:grid;grid-template-columns:34px 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
+        <span title="移動時長 ms">ms</span><input type="number" id="ps-ms" value="1500" min="200" max="5000" step="100" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span id="pose-ctl-status" style="color:var(--sub);font-size:10px"></span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="chip zbtn" onclick="poseGo()" disabled style="flex:2;font-weight:600">GO</button>
+        <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
+      </div>
     </div>
 
     <!-- 2. LIVE TELEMETRY -->
@@ -396,6 +417,9 @@ canvas {
   <div class="canvas-zone" id="canvas-zone"></div>
 </div>
 
+<!-- 共用幾何/擾動數學（與 Node sysid 工具同一份，SoT）：非 module 先載 → window.Kin / window.DisturbModes -->
+<script src="/sysid/kin.js"></script>
+<script src="/sysid/disturb_modes.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -752,6 +776,48 @@ function updateGhost() {
   updatePlatMesh(ghostPlatGeo, Q);
   ghostPlatMesh.visible = true;
 }
+
+// ===== 姿態操作（滑桿 → ghost 目標預覽 → G 指令）=====
+// 共用 window.Kin.deltaAngle + window.DisturbModes.MOTOR_SIGN（與 host pose_ctl.js 同一份數學，SoT）
+const POSE_AXES = [['ps-x',0],['ps-y',1],['ps-z',2],['ps-r',3],['ps-p',4],['ps-w',5]];
+function poseReadOffset() {
+  const o = [0,0,0,0,0,0];
+  for (const [id, idx] of POSE_AXES) o[idx] = parseFloat(document.getElementById(id).value) || 0;
+  return o;   // [x,y,z,roll,pitch,yaw] 相對中位偏移
+}
+let poseReachable = true;
+function poseUpdateGhost() {
+  const o = poseReadOffset();
+  ghostTarget = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];   // 絕對 pose（z 疊中位）
+  for (const [id, idx] of POSE_AXES) document.getElementById(id+'-v').textContent = o[idx].toFixed(1);
+  // 6D 工作空間非立方：各 DOF 耦合 → 即時 ik valid 判斷此「組合」是否真可達（滑桿單軸範圍只是上界）
+  // 注意用 window.Kin.ik（回 {angles,valid}）；index 內建 ik() 只回裸 angles 陣列、無 valid
+  poseReachable = window.Kin.ik(ghostTarget).valid;
+  const hex = poseReachable ? 0x27AE60 : 0xC0392B;   // 綠=可達 / 紅=超耦合工作空間
+  ghostMat.color.setHex(hex);
+  ghostPlatMesh.material.color.setHex(hex);
+  updateGhost();
+  const st = document.getElementById('pose-ctl-status');
+  if (!poseReachable) { st.textContent = '✗ 此組合超工作空間'; st.style.color = '#C0392B'; }
+  else { st.textContent = ''; st.style.color = 'var(--sub)'; }
+}
+POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', poseUpdateGhost));
+window.poseGo = function() {
+  const o = poseReadOffset();
+  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
+  const r = window.Kin.deltaAngle([0,0,NEUTRAL_Z,0,0,0], o);   // ik(中位+offset) − ik(中位)
+  const st = document.getElementById('pose-ctl-status');
+  if (!r.valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--danger,#c0392b)'; return; }
+  const denc = r.d.map((v,i) => v * window.DisturbModes.MOTOR_SIGN[i]);   // IK 慣例 → enc 慣例
+  window.sendCmd(`G ${denc.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
+  st.style.color = 'var(--sub)';
+  st.textContent = `→ Δenc max ${Math.max(...denc.map(Math.abs)).toFixed(1)}°`;
+};
+window.poseHome = function() {
+  POSE_AXES.forEach(([id]) => { document.getElementById(id).value = 0; });
+  poseUpdateGhost();
+  window.sendCmd(`G 0 0 0 0 0 0 ${parseInt(document.getElementById('ps-ms').value)||1500}`);
+};
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {

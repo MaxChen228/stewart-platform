@@ -98,7 +98,9 @@ const server = http.createServer((req, res) => {
   let urlPath = req.url.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
   else if (urlPath.endsWith('/')) urlPath += 'index.html';
-  const filePath = path.join(__dirname, 'web', urlPath);
+  // /sysid/*.js 從專案根 serve → 瀏覽器與 Node 共用同一份 kin.js/disturb_modes.js（SoT，不造第二真相源）
+  const fromSysid = urlPath.startsWith('/sysid/') && urlPath.endsWith('.js') && !urlPath.includes('..');
+  const filePath = fromSysid ? path.join(__dirname, urlPath) : path.join(__dirname, 'web', urlPath);
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }

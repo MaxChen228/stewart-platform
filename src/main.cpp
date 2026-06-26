@@ -37,14 +37,22 @@ float holdAngles[NUM_MOTORS] = {0};
 float maxHoldErr = 0;
 
 // 擾動注入器（U 指令）：HOLD 模式下對單顆馬達的 F5 目標短暫加偏移 → 馬達主動衝出再彈回 = 脈衝
-int      bumpMotor   = -1;
-float    bumpDeg     = 0;
-uint32_t bumpUntilMs = 0;
+float    bumpDeg[NUM_MOTORS] = {0};   // 六軸脈衝偏移（enc 慣例度）；U=單軸填一格、W=六軸全填
+uint32_t bumpUntilMs = 0;             // 脈衝結束時刻（millis）；過期由 hold 迴圈歸零
 
-// 開機預設 vFOC PID：Ki 由出廠 100 → 30，殺 M4 自持極限環（2026-06-26 45格矩陣定：
-// 門檻40-60、Ki30 殺住16°擾動、跨六軸通用、剛性零代價）。runtime K 指令仍可覆蓋微調；
-// 無支架(P3)重力力矩變大若門檻移再改此值。不靠馬達 EEPROM，版本控制在韌體。
-constexpr uint16_t BOOT_KP = 220, BOOT_KI = 30, BOOT_KD = 270, BOOT_KV = 320;
+// 姿態調控（G 指令）：HOLD 下把 holdAngles 從 holdBase 平滑移到 holdBase+Δ（升降/旋轉/平移）。
+// 保留 HOLD 直送機制 → 馬達純 P 死咬移動中的目標 = 穩定性不變，只是目標會動。
+// host 用 kin.js IK 算 Δenc（同 W 的 deltaAngle×MOTOR_SIGN）；Δ 相對 H 基準、不累積。
+float    holdBase[NUM_MOTORS]   = {0};   // H 鎖位時的基準姿態（不變，G 的 Δ 相對它）
+float    holdTarget[NUM_MOTORS] = {0};   // 移動目標 = holdBase + Δ
+float    holdStart[NUM_MOTORS]  = {0};   // 本次移動起點（發 G 當下的 holdAngles）
+uint32_t holdMoveStart = 0, holdMoveMs = 0;   // 移動起始時刻、總時長（0=不在移動）
+
+// 開機預設 vFOC PID：純P工作點 [1024,0,0,0]（2026-06-26 定案）。
+// Ki=0 滅自持極限環根因（積分撞死區）；maxKp 補剛性；F5 posSpeed 提供阻尼；
+// Kd=0 因離散微分=高頻放大器→嘯叫，Kv=0 不需。runtime K 指令仍可覆蓋微調。
+// 不靠馬達 EEPROM，版本控制在韌體。詳見記憶 project_pid_working_point。
+constexpr uint16_t BOOT_KP = 1024, BOOT_KI = 0, BOOT_KD = 0, BOOT_KV = 0;
 
 // 當前 vFOC PID（單一真相源）：開機=BOOT 值，收 K 指令更新，telemetry 上報 → 前端滑桿反映真值不寫死
 uint16_t curKp = BOOT_KP, curKi = BOOT_KI, curKd = BOOT_KD, curKv = BOOT_KV;
@@ -262,6 +270,8 @@ void handleSerial() {
         servos.readAllRawEncoders(raw0);
         enc.updateAngles(raw0);
         for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = enc.angles[i];
+        for (int i = 0; i < NUM_MOTORS; i++) holdBase[i] = holdAngles[i];   // G 的 Δ 基準
+        holdMoveMs = 0;                                                     // 取消任何進行中的姿態移動
 
         // Enable 馬達 + 設零點
         uint8_t enMask = servos.enableAll();
@@ -385,14 +395,40 @@ void handleSerial() {
                 idx + 1, delta, degChange);
         }
     } else if (cmd.startsWith("U ")) {
-        // 擾動脈衝：U <motor 0-5> <deg> <ms> — HOLD 模式下對該馬達 F5 目標加 deg 偏移持續 ms，再自動歸零
+        // 擾動脈衝（單軸）：U <motor 0-5> <deg> <ms> — HOLD 模式下對該馬達 F5 目標加 deg 偏移持續 ms，再自動歸零
         int idx, ms; float deg;
         if (sscanf(cmd.c_str(), "U %d %f %d", &idx, &deg, &ms) == 3 && idx >= 0 && idx < NUM_MOTORS) {
-            bumpMotor = idx;
-            bumpDeg = deg;
+            for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
+            bumpDeg[idx] = deg;
             bumpUntilMs = millis() + constrain(ms, 1, 5000);
             Serial.printf("{\"status\":\"bump\",\"motor\":%d,\"deg\":%.2f,\"ms\":%d,\"hold\":%d}\n",
                 idx + 1, deg, ms, holdMode ? 1 : 0);
+        }
+    } else if (cmd.startsWith("W ")) {
+        // 擾動脈衝（六軸協同）：W <d0> <d1> <d2> <d3> <d4> <d5> <ms> — HOLD 模式下六軸同時加各自偏移持續 ms
+        // host 端 disturb.js 用 task-space IK 算各軸 deg（已乘 MOTOR_SIGN 轉 enc 慣例），這裡只照單全收
+        float d[NUM_MOTORS]; int ms;
+        if (sscanf(cmd.c_str(), "W %f %f %f %f %f %f %d",
+                   &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &ms) == 7) {
+            for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = constrain(d[i], -30.0f, 30.0f);
+            bumpUntilMs = millis() + constrain(ms, 1, 5000);
+            Serial.printf("{\"status\":\"bumpW\",\"deg\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],\"ms\":%d,\"hold\":%d}\n",
+                bumpDeg[0], bumpDeg[1], bumpDeg[2], bumpDeg[3], bumpDeg[4], bumpDeg[5], ms, holdMode ? 1 : 0);
+        }
+    } else if (cmd.startsWith("G ")) {
+        // 姿態調控（六軸協同持久移動）：G <d0..d5> <ms> — HOLD 下把 holdAngles 從 holdBase 平滑移到 holdBase+Δ
+        // host 用 kin.js IK 算 Δenc（同 W 的 deltaAngle×MOTOR_SIGN）；Δ 相對 H 基準、不累積。ms 內 smoothstep 加減速。
+        float d[NUM_MOTORS]; int ms;
+        if (sscanf(cmd.c_str(), "G %f %f %f %f %f %f %d",
+                   &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &ms) == 7) {
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                holdStart[i]  = holdAngles[i];                       // 從當下位置起步（多段 G 可接續）
+                holdTarget[i] = holdBase[i] + constrain(d[i], -40.0f, 40.0f);
+            }
+            holdMoveStart = millis();
+            holdMoveMs = constrain(ms, 1, 10000);
+            Serial.printf("{\"status\":\"goto\",\"d\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],\"ms\":%d,\"hold\":%d}\n",
+                d[0], d[1], d[2], d[3], d[4], d[5], ms, holdMode ? 1 : 0);
         }
     } else if (cmd.startsWith("R ")) {
         float v[6];
@@ -785,11 +821,26 @@ void loop() {
 
         if (holdMode) {
             // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
-            bool bumpActive = (bumpMotor >= 0 && millis() < bumpUntilMs);
-            if (bumpMotor >= 0 && !bumpActive) bumpMotor = -1;   // 脈衝結束，自動歸零
+            // 姿態移動（G）：平滑過渡 holdAngles → holdTarget（smoothstep 加減速，避免階躍衝擊）
+            if (holdMoveMs > 0) {
+                float t = (float)(millis() - holdMoveStart) / holdMoveMs;
+                if (t >= 1.0f) {
+                    for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = holdTarget[i];
+                    holdMoveMs = 0;
+                } else {
+                    float s = t * t * (3.0f - 2.0f * t);   // smoothstep
+                    for (int i = 0; i < NUM_MOTORS; i++)
+                        holdAngles[i] = holdStart[i] + (holdTarget[i] - holdStart[i]) * s;
+                }
+            }
+            bool bumpActive = (bumpUntilMs != 0 && millis() < bumpUntilMs);
+            if (bumpUntilMs != 0 && !bumpActive) {               // 脈衝結束，六軸偏移歸零
+                for (int i = 0; i < NUM_MOTORS; i++) bumpDeg[i] = 0;
+                bumpUntilMs = 0;
+            }
             for (int i = 0; i < NUM_MOTORS; i++) {
                 motorTargets[i] = holdAngles[i];
-                if (bumpActive && i == bumpMotor) motorTargets[i] += bumpDeg;
+                if (bumpActive) motorTargets[i] += bumpDeg[i];
             }
             float maxAbs = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
