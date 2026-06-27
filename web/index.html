@@ -6,6 +6,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/app-ui.css">
 <style>
 :root {
   --bg: #F8F7F4;
@@ -56,11 +57,11 @@ body {
   height: var(--nav-height);
   background: var(--surface);
   border-bottom: 1px solid var(--borderBase);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
   align-items: center;
-  justify-content: space-between;
   padding: 0 24px;
-  z-index: 20;
+  z-index: 100;
   flex-shrink: 0;
 }
 
@@ -97,8 +98,25 @@ body {
 .nav-transport.up   { color: var(--contra); }                 /* connected */
 .nav-transport.busy { color: var(--sub); }                    /* selecting/connecting/switching */
 .nav-transport.down { color: var(--dev); }                    /* down */
+.nav-session {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  padding: 2px 9px;
+  border-radius: 4px;
+  border: 1px solid var(--borderBase);
+  color: var(--sub);
+  white-space: nowrap;
+}
+.nav-session.active {
+  border-color: var(--dual);
+  color: var(--dual);
+  background: rgba(211,84,0,0.06);
+}
 
-.nav-right { display: flex; align-items: center; gap: 18px; }
+.nav-center { justify-self: center; }
+.nav-right { display: flex; align-items: center; justify-self: end; gap: 18px; }
 .nav-link {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -110,6 +128,7 @@ body {
   transition: opacity 0.15s;
 }
 .nav-link:hover { opacity: 1; }
+.nav-link.active { opacity: 1; color: var(--contra); }
 
 /* ===== Button feedback states ===== */
 @keyframes btn-pulse { 0%,100%{opacity:1} 50%{opacity:0.55} }
@@ -506,23 +525,6 @@ body {
 .bus-legend .it { display: flex; align-items: center; gap: 3px; }
 .bus-legend .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 
-/* 標準動作播放器 */
-.motion-panel { display: flex; flex-direction: column; gap: 8px; }
-.motion-loop-row { display: grid; grid-template-columns: 34px auto 1fr auto auto; gap: 4px; align-items: center; font-family: var(--font-mono); font-size: 11px; }
-.motion-loop-row button { padding: 2px 8px; font-size: 10px; line-height: 18px; }
-.motion-loop-row input { width: 100%; font-family: inherit; font-size: 11px; padding: 2px 4px; border: 1px solid var(--borderBase); border-radius: 2px; text-align: center; }
-.motion-timeline { border: 1px solid var(--borderL); background: var(--bg); border-radius: 4px; padding: 8px 9px 7px; font-family: var(--font-mono); }
-.motion-time-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--sub); font-size: 10px; }
-.motion-time-top strong { color: var(--ink); font-weight: 600; letter-spacing: 0.04em; }
-.motion-track { position: relative; height: 10px; border-radius: 999px; background: #e9e4da; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04); }
-.motion-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: linear-gradient(90deg, var(--contra), var(--accent)); transition: width 0.08s linear; }
-.motion-cursor { position: absolute; top: -3px; left: 0%; width: 2px; height: 16px; border-radius: 2px; background: var(--ink); transform: translateX(-1px); transition: left 0.08s linear; }
-.motion-home-dot { position: absolute; top: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--surface); border: 1px solid var(--inkLight); z-index: 2; }
-.motion-home-dot.start { left: 2px; }
-.motion-home-dot.end { right: 2px; }
-.motion-time-bottom { display: flex; justify-content: space-between; margin-top: 5px; color: var(--sub); font-size: 9px; letter-spacing: 0; }
-.motion-time-bottom span:nth-child(2) { color: var(--contra); }
-
 /* ===== Canvas Zone ===== */
 .canvas-zone {
   flex: 1;
@@ -606,8 +608,13 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 <!-- Nav Bar -->
 <nav class="nav">
   <div class="nav-brand">PHYSICS_LAB</div>
+  <nav class="app-nav nav-center" aria-label="Main navigation">
+    <a class="app-link active" href="/" title="即時主控">主控</a>
+    <a class="app-link" href="/workspace.html" title="Program Workspace">Workspace</a>
+    <a class="app-link" href="/research/runs.html" title="Session 執行紀錄">Runs</a>
+  </nav>
   <div class="nav-right">
-    <a class="nav-link" href="research/" target="_blank" rel="noopener" title="研究實驗室（受控物理實驗操作台）">⌬ RESEARCH</a>
+    <div id="session-badge" class="nav-session" title="manual control / program session ownership">MANUAL</div>
     <div id="transport" class="nav-transport busy" title="server↔平台 傳輸鏈">⋯ 偵測中</div>
     <div id="status" class="nav-status disconnected">DISCONNECTED</div>
   </div>
@@ -629,9 +636,9 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     <!-- 1.5 POSE 姿態操作（G 指令；滑桿即時驅動綠色 ghost 目標預覽）-->
     <div class="ui-card">
       <div class="ui-card-title">姿態操作</div>
-      <div class="dev-label" style="margin-bottom:6px">6-DOF 相對中位偏移 · 綠色 ghost = 目標</div>
+      <div class="dev-label" style="margin-bottom:6px">6-DOF 相對中位偏移 · slider 範圍由 IK 可達性動態更新</div>
       <div style="display:flex;flex-direction:column;gap:5px;font-family:var(--font-mono);font-size:11px">
-        <div class="pose-axis-row" data-pose-axis="2"><span class="axis-name">Heave</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-z" min="-10" max="105" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-z-v">0</span><span class="actual-v" id="ps-z-a">—</span><span class="range-v" id="ps-z-range">—</span></span></div>
+        <div class="pose-axis-row" data-pose-axis="2"><span class="axis-name">Heave</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-z" min="-20" max="105" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-z-v">0</span><span class="actual-v" id="ps-z-a">—</span><span class="range-v" id="ps-z-range">—</span></span></div>
         <div class="pose-axis-row" data-pose-axis="0"><span class="axis-name">Surge</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-x" min="-110" max="110" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-x-v">0</span><span class="actual-v" id="ps-x-a">—</span><span class="range-v" id="ps-x-range">—</span></span></div>
         <div class="pose-axis-row" data-pose-axis="1"><span class="axis-name">Sway</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-y" min="-100" max="140" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-y-v">0</span><span class="actual-v" id="ps-y-a">—</span><span class="range-v" id="ps-y-range">—</span></span></div>
         <div class="pose-axis-row" data-pose-axis="3"><span class="axis-name">Roll</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-r" min="-20" max="20" value="0" step="0.5"></span><span class="pose-axis-value"><span class="target-v" id="ps-r-v">0</span><span class="actual-v" id="ps-r-a">—</span><span class="range-v" id="ps-r-range">—</span></span></div>
@@ -646,6 +653,14 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <button class="chip zbtn" onclick="poseGo()" disabled style="flex:2;font-weight:600">GO</button>
         <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
         <button class="chip zbtn" onclick="poseSetHome()" disabled style="flex:1" title="把當前目標姿態存為 Home，之後 HOME 回到此姿態">⌂ 存Home</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="chip zbtn" onclick="poseRelease()" disabled style="flex:1" title="移到保存的 Release/Landing 姿態，但不斷電">RELEASE</button>
+        <button class="chip zbtn" onclick="poseSetRelease()" disabled style="flex:1" title="把當前目標姿態存為 Release/Landing，之後實驗落地後會在此姿態斷電">⌂ 存Release</button>
+      </div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 8px;margin-top:8px;font-family:var(--font-mono);font-size:10px;color:var(--sub)">
+        <span>HOME</span><span id="pose-home-summary">—</span>
+        <span>RELEASE</span><span id="pose-release-summary">—</span>
       </div>
       <div class="pose-live-summary">
         <div class="pose-legend"><span class="target">藍底=可達</span><span class="target">藍色 thumb=目標</span><span class="actual">螢光線=實際</span><span>底線=誤差</span></div>
@@ -668,77 +683,19 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
     </div>
 
-    <!-- 1.6 標準動作（host 串流 pose(t) → PF → 韌體速限濾波器跟隨；參數可即時調）-->
-    <div class="ui-card">
-      <div class="ui-card-title">標準動作</div>
-      <div class="dev-label" style="margin-bottom:6px">host 串流 · 速度受限跟隨（拖快不硬撲）· 需先 HOLD</div>
-      <div class="motion-panel">
-        <select id="motion-sel" onchange="onMotionSel()" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 4px;border:1px solid var(--borderBase);border-radius:2px;background:var(--bgBase);color:var(--fg)"></select>
-        <div id="motion-params" style="display:flex;flex-direction:column;gap:5px"></div>
-        <div class="motion-loop-row">
-          <span title="跑幾圈後自動回 home（0=無限循環）">圈</span>
-          <button class="chip" onclick="motionSetLoops(0)" title="無限循環">∞</button>
-          <input type="number" id="motion-loops" value="0" min="0" max="999" step="1" oninput="motionRefreshTimeline()">
-          <button class="chip" onclick="motionAdjustLoops(-1)" title="少一圈">−</button>
-          <button class="chip" onclick="motionAdjustLoops(1)" title="多一圈">＋</button>
-        </div>
-        <div class="motion-timeline" aria-label="motion timeline">
-          <div class="motion-time-top">
-            <strong id="motion-clock">00.0 / 00.0s</strong>
-            <span id="motion-loop-label">∞ loop</span>
-          </div>
-          <div class="motion-track">
-            <div class="motion-fill" id="motion-fill"></div>
-            <div class="motion-cursor" id="motion-cursor"></div>
-            <i class="motion-home-dot start" title="home"></i>
-            <i class="motion-home-dot end" title="home"></i>
-          </div>
-          <div class="motion-time-bottom"><span>home</span><span id="motion-phase-label">ready</span><span>home</span></div>
-        </div>
-        <div style="display:flex;gap:6px">
-          <button class="chip" id="motion-preview" onclick="motionPreview()" style="flex:1" title="只動畫綠色 ghost 看形狀，不驅動平台、不需 HOLD/連線">👁 預覽</button>
-          <button class="chip zbtn" id="motion-play" onclick="motionToggle()" disabled style="flex:2;font-weight:600">▶ 播放</button>
-          <button class="chip" onclick="motionStopBtn()" style="flex:1">■ 停</button>
-        </div>
-        <div style="display:grid;grid-template-columns:38px 1fr 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px" title="跟隨速度上限 = 所有動作的硬體安全閥">
-          <span>vmax</span>
-          <input type="number" id="vf-t" value="60" min="1" max="500" step="5" title="平移 mm/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-          <input type="number" id="vf-r" value="45" min="1" max="360" step="5" title="旋轉 °/s" style="width:100%;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-          <button class="chip zbtn" onclick="applyVF()" disabled style="padding:2px 8px;font-size:11px">套用</button>
-        </div>
-        <div id="motion-status" style="color:var(--sub);font-size:10px;min-height:12px"></div>
-      </div>
-    </div>
-
-    <!-- 2. 繞擾動控制（U 單軸 / W 模態 / battery 序列；client 看門狗，韌體 U/W 自限保底）-->
+    <!-- 2. 擾動控制（單一強度 + 隨機標準模態；擾動數學走 DisturbModes SoT）-->
     <div class="ui-card">
       <div class="ui-card-title">擾動控制</div>
-      <div class="dev-label" style="margin-bottom:6px">脈衝自動歸零（韌體 ≤5s 自限）· <span id="dist-hold" style="color:var(--sub)">○ 需先 HOLD 鎖位</span></div>
-
-      <div class="dev-label" style="margin:8px 0 4px">單軸脈衝 U</div>
-      <div style="display:grid;grid-template-columns:auto 1fr auto 1fr auto 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>軸</span><select id="u-motor" style="width:100%;font-family:inherit;font-size:11px;padding:2px;border:1px solid var(--borderBase);border-radius:2px"><option value="0">M1</option><option value="1">M2</option><option value="2">M3</option><option value="3" selected>M4</option><option value="4">M5</option><option value="5">M6</option></select>
-        <span>°</span><input type="number" id="u-deg" value="8" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <span>ms</span><input type="number" id="u-ms" value="150" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <button class="chip zbtn" onclick="disturbU()" disabled style="padding:2px 8px;font-size:11px">⚡</button>
+      <div class="dev-label" style="margin-bottom:8px">韌體自動歸零（≤5s 自限）· <span id="dist-hold" style="color:var(--sub)">○ 需先 HOLD 鎖位</span></div>
+      <label class="param-row" style="grid-template-columns:64px minmax(0,1fr) 48px;margin-bottom:10px">
+        <span>強度</span>
+        <input type="range" id="dist-sev" min="0.5" max="8" value="3" step="0.5">
+        <output id="dist-sev-v">3.0</output>
+      </label>
+      <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:8px">
+        <button class="chip zbtn" id="dist-random-btn" onclick="randomDisturb()" disabled style="width:100%;font-weight:600">↯ 隨機擾動</button>
+        <div id="dist-status" class="dev-label" style="min-height:16px;font-family:var(--font-mono)">ready</div>
       </div>
-
-      <div class="dev-label" style="margin:12px 0 4px">模態 W（task-space 方向）</div>
-      <div style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <select id="w-mode" style="width:100%;font-family:inherit;font-size:11px;padding:2px;border:1px solid var(--borderBase);border-radius:2px"><option>roll</option><option>pitch</option><option selected>tilt</option><option>surge</option><option>sway</option><option>heave</option><option>yaw</option><option>mixed</option></select>
-        <span>sev</span><input type="number" id="w-sev" value="3" step="0.5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <span>ms</span><input type="number" id="w-ms" value="120" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <button class="chip zbtn" onclick="disturbW()" disabled style="padding:2px 8px;font-size:11px">⚡</button>
-      </div>
-      <div id="w-preview" class="dev-label" style="margin-top:4px;font-family:var(--font-mono)">Δ° —</div>
-
-      <div class="dev-label" style="margin:12px 0 4px">壓測序列 battery（21 事件 ~60s，可比基準）</div>
-      <div style="display:grid;grid-template-columns:auto auto 1fr auto;gap:6px;align-items:center;font-family:var(--font-mono);font-size:11px">
-        <span>backstop°</span><input type="number" id="bat-backstop" value="15" step="1" style="width:48px;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <button class="chip zbtn" id="bat-run" onclick="batteryRun()" disabled style="font-weight:600">▶ RUN</button>
-        <button class="chip danger" id="bat-stop" onclick="batteryStop()" style="display:none;font-weight:600">■ STOP</button>
-      </div>
-      <div id="bat-progress" class="dev-label" style="margin-top:5px;min-height:14px;font-family:var(--font-mono)"></div>
     </div>
 
     <!-- 3. TUNING -->
@@ -839,7 +796,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     </div>
   </div>
 
-  <!-- 右區：觀測（CAN/迴圈健康 + Live + FFT/σ + 錄製 + 日誌）-->
+  <!-- 右區：觀測（CAN/迴圈健康 + Live + FFT/σ + 日誌）-->
   <aside class="obs-rail">
     <div class="ui-card">
       <div class="ui-card-title">CAN / 迴圈健康</div>
@@ -881,14 +838,6 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
     </div>
 
     <div class="ui-card">
-      <div class="ui-card-title">錄製 <span id="rec-stat" class="dev-label" style="display:inline"></span></div>
-      <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center">
-        <input type="text" id="rec-name" value="run" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:3px 5px;border:1px solid var(--borderBase);border-radius:2px">
-        <button class="chip" id="rec-go" onclick="recToggle()" style="padding:4px 12px;font-weight:600">● REC</button>
-      </div>
-    </div>
-
-    <div class="ui-card">
       <div class="ui-card-title">事件日誌</div>
       <div class="evlog" id="evlog"></div>
     </div>
@@ -913,19 +862,21 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import {
+  DEG,
+  StewartStyle,
+  createStewartModel,
+  computeActuatorPoints,
+  platformPointsFromPose,
+  createStewartRig,
+  createGhostRig,
+} from '/shared/stewart-renderer.js';
 
-// ===== 幾何參數：純量從共用 kin.js 取（SoT，數字單一來源；THREE B/P 為渲染專用、本地建）=====
-const { BASE_RADIUS, PLATFORM_RADIUS, LOWER_LEG, UPPER_LEG, NEUTRAL_Z,
-        MOTOR_PLANE_ANGLE, BASE_ANGLES, PLATFORM_ANGLES } = window.Kin;
-const DEG = Math.PI / 180;
+// ===== 幾何參數：純量從共用 kin.js 取；THREE 渲染模型由 shared renderer 統一建立（SoT）=====
+const { LOWER_LEG, UPPER_LEG, NEUTRAL_Z } = window.Kin;
 // CW 排列：pair@210°(M1,M2左下), pair@90°(M3,M4上), pair@-30°(M5,M6右)；奇數馬達在 +ANGLE/2 側
-
-const B = [], P = [];
-for (let i = 0; i < 6; i++) {
-  const ba = BASE_ANGLES[i] * DEG, pa = PLATFORM_ANGLES[i] * DEG;
-  B.push(new THREE.Vector3(BASE_RADIUS*Math.cos(ba), BASE_RADIUS*Math.sin(ba), 0));
-  P.push(new THREE.Vector3(PLATFORM_RADIUS*Math.cos(pa), PLATFORM_RADIUS*Math.sin(pa), 0));
-}
+const stewartModel = createStewartModel(window.Kin);
+const { B, P } = stewartModel;
 
 const hDist2 = (P[0].x-B[0].x)**2 + (P[0].y-B[0].y)**2;
 const Z_LEGS_UP = LOWER_LEG + Math.sqrt(UPPER_LEG*UPPER_LEG - hDist2);
@@ -934,137 +885,26 @@ console.log('Z_LEGS_UP =', Z_LEGS_UP.toFixed(1));
 // ===== 逆向運動學：委派共用 kin.js（消除重複邏輯；本地僅取裸 angles 供 render）=====
 const ik = (pose) => window.Kin.ik(pose).angles;
 
-// ===== 高斯消去 6×6 =====
-function gaussSolve(A, b) {
-  const n = 6;
-  const M = A.map((row,i) => [...row, b[i]]);
-  for (let i = 0; i < n; i++) {
-    let mx = i;
-    for (let k=i+1;k<n;k++) if(Math.abs(M[k][i])>Math.abs(M[mx][i])) mx=k;
-    [M[i],M[mx]]=[M[mx],M[i]];
-    if (Math.abs(M[i][i])<1e-10) return null;
-    for (let k=i+1;k<n;k++) {
-      const c=M[k][i]/M[i][i];
-      for(let j=i;j<=n;j++) M[k][j]-=c*M[i][j];
-    }
-  }
-  const x=new Array(n);
-  for(let i=n-1;i>=0;i--) {
-    x[i]=M[i][n];
-    for(let j=i+1;j<n;j++) x[i]-=M[i][j]*x[j];
-    x[i]/=M[i][i];
-  }
-  return x;
-}
-
-// ===== FK（距離約束 Newton-Raphson，解析 Jacobian）=====
-let lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+// ===== FK：委派共用 kin.js；主頁只保留狀態文字 =====
 let fkStatus = '';
 
 function solveFK(measured) {
-  const A = computeA(measured);
-  if (lastPose.some(v => !isFinite(v))) lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
-  let pose = [...lastPose];
-  let finalIter = 0, finalErr = 999;
-
-  for (let iter = 0; iter < 50; iter++) {
-    const [x, y, z, roll, pitch, yaw] = pose;
-    const cr = Math.cos(roll*DEG), sr = Math.sin(roll*DEG);
-    const cp = Math.cos(pitch*DEG), sp = Math.sin(pitch*DEG);
-    const cy2 = Math.cos(yaw*DEG), sy2 = Math.sin(yaw*DEG);
-    const R = [
-      [cy2*cp, cy2*sp*sr-sy2*cr, cy2*sp*cr+sy2*sr],
-      [sy2*cp, sy2*sp*sr+cy2*cr, sy2*sp*cr-cy2*sr],
-      [-sp, cp*sr, cp*cr]
-    ];
-    const dRr = [
-      [0, cy2*sp*cr+sy2*sr, -cy2*sp*sr+sy2*cr],
-      [0, sy2*sp*cr-cy2*sr, -sy2*sp*sr-cy2*cr],
-      [0, cp*cr, -cp*sr]
-    ];
-    const dRp = [
-      [-cy2*sp, cy2*cp*sr, cy2*cp*cr],
-      [-sy2*sp, sy2*cp*sr, sy2*cp*cr],
-      [-cp, -sp*sr, -sp*cr]
-    ];
-    const dRyw = [
-      [-sy2*cp, -sy2*sp*sr-cy2*cr, -sy2*sp*cr+cy2*sr],
-      [cy2*cp, cy2*sp*sr-sy2*cr, cy2*sp*cr+sy2*sr],
-      [0, 0, 0]
-    ];
-
-    const f = [], J = [];
-    for (let i = 0; i < 6; i++) {
-      const px = P[i].x, py = P[i].y;
-      const qx = R[0][0]*px + R[0][1]*py + x;
-      const qy = R[1][0]*px + R[1][1]*py + y;
-      const qz = R[2][0]*px + R[2][1]*py + z;
-      const vx = qx-A[i].x, vy = qy-A[i].y, vz = qz-A[i].z;
-      f.push(vx*vx + vy*vy + vz*vz - UPPER_LEG*UPPER_LEG);
-      const drx = dRr[0][0]*px+dRr[0][1]*py, dry = dRr[1][0]*px+dRr[1][1]*py, drz = dRr[2][0]*px+dRr[2][1]*py;
-      const dpx2 = dRp[0][0]*px+dRp[0][1]*py, dpy2 = dRp[1][0]*px+dRp[1][1]*py, dpz2 = dRp[2][0]*px+dRp[2][1]*py;
-      const dyx = dRyw[0][0]*px+dRyw[0][1]*py, dyy = dRyw[1][0]*px+dRyw[1][1]*py;
-      J.push([
-        2*vx, 2*vy, 2*vz,
-        2*(vx*drx+vy*dry+vz*drz)*DEG,
-        2*(vx*dpx2+vy*dpy2+vz*dpz2)*DEG,
-        2*(vx*dyx+vy*dyy)*DEG
-      ]);
-    }
-
-    const maxF = Math.max(...f.map(Math.abs));
-    finalIter = iter; finalErr = maxF;
-
-    if (maxF < 1.0) {
-      fkStatus = `FK OK iter=${iter} err=${maxF.toFixed(3)}`;
-      lastPose = [...pose];
-      return pose;
-    }
-
-    const neg_f = f.map(v => -v);
-    const dp = gaussSolve(J, neg_f);
-    if (!dp || dp.some(v => !isFinite(v))) {
-      fkStatus = `FK FAIL singular iter=${iter} err=${maxF.toFixed(1)}`;
-      break;
-    }
-
-    const stepLimit = [30, 30, 30, 15, 15, 15];
-    for (let j = 0; j < 6; j++) {
-      dp[j] = Math.max(-stepLimit[j], Math.min(stepLimit[j], dp[j]));
-      pose[j] += dp[j];
-    }
-
-    if (pose.some(v => !isFinite(v))) {
-      fkStatus = `FK FAIL NaN iter=${iter}`;
-      pose = [...lastPose];
-      break;
-    }
-  }
-
-  if (finalErr > 1.0) {
-    fkStatus = `FK NO CONVERGE iter=${finalIter} err=${finalErr.toFixed(1)}`;
-  }
-
-  if (pose.every(v => isFinite(v))) lastPose = [...pose];
-  return lastPose;
+  const r = window.Kin.solveFK(measured);
+  fkStatus = r.converged
+    ? `FK OK iter=${r.iterations} err=${r.residual.toFixed(3)}`
+    : `FK NO CONVERGE iter=${r.iterations} err=${r.residual.toFixed(1)}`;
+  return r.pose;
 }
 
 // ===== 從馬達角度算 A 點 =====
 function computeA(angles) {
-  return angles.map((ang, i) => {
-    const a = ang * DEG, th = MOTOR_PLANE_ANGLE[i] * DEG;
-    return new THREE.Vector3(
-      LOWER_LEG*Math.cos(a)*Math.cos(th) + B[i].x,
-      LOWER_LEG*Math.cos(a)*Math.sin(th) + B[i].y,
-      LOWER_LEG*Math.sin(a) + B[i].z
-    );
-  });
+  return computeActuatorPoints(angles, stewartModel);
 }
 
 // ===== Three.js 場景 =====
 const canvasZone = document.getElementById('canvas-zone');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xF8F7F4);
+scene.background = new THREE.Color(StewartStyle.scene.lightBg);
 const camera = new THREE.PerspectiveCamera(50, canvasZone.clientWidth/canvasZone.clientHeight, 1, 2000);
 camera.up.set(0,0,1);
 camera.position.set(300, -300, 250);
@@ -1089,132 +929,32 @@ dl.position.set(200, -200, 300);
 scene.add(dl);
 
 // 地面網格 — warm neutral tones
-const grid = new THREE.GridHelper(400, 20, 0xDBD6CD, 0xE8E4DB);
+const grid = new THREE.GridHelper(400, 20, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor);
 grid.rotation.x = Math.PI/2;
 scene.add(grid);
 
-// 建立幾何物件
-function makeSphere(color, r=4) {
-  const m = new THREE.Mesh(new THREE.SphereGeometry(r,8,8), new THREE.MeshPhongMaterial({color}));
-  scene.add(m);
-  return m;
-}
-function makeLine(color, width=1) {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0,0,0,0],3));
-  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color}));
-  scene.add(line);
-  return line;
-}
-function updateLine(line, a, b) {
-  const p = line.geometry.attributes.position.array;
-  p[0]=a.x;p[1]=a.y;p[2]=a.z; p[3]=b.x;p[4]=b.y;p[5]=b.z;
-  line.geometry.attributes.position.needsUpdate = true;
-}
-
-const bSpheres=[], aSpheres=[], qSpheres=[];
-const lowerLines=[], upperLines=[];
-for (let i=0;i<6;i++) {
-  bSpheres.push(makeSphere(0xC0392B, 5));   // dev red
-  aSpheres.push(makeSphere(0xE6B300, 4));   // accent gold
-  qSpheres.push(makeSphere(0x4A6B8C, 4));   // contra blue
-  lowerLines.push(makeLine(0x4A6B8C));       // contra
-  upperLines.push(makeLine(0xD35400));       // dual
-}
-
-// 馬達編號標籤 (CSS2D screen-space)
-const motorLabels = [];
-for (let i = 0; i < 6; i++) {
-  const div = document.createElement('div');
-  div.className = 'motor-label';
-  div.textContent = `M${i+1}`;
-  const label = new CSS2DObject(div);
-  label.position.copy(B[i]);
-  label.position.z = -12;
-  scene.add(label);
-  motorLabels.push(label);
-}
-
-// 底座面
-const baseMesh = (() => {
-  const shape = new THREE.Shape();
-  shape.moveTo(B[0].x, B[0].y);
-  for(let i=1;i<6;i++) shape.lineTo(B[i].x, B[i].y);
-  shape.closePath();
-  const geo = new THREE.ShapeGeometry(shape);
-  const mat = new THREE.MeshPhongMaterial({color:0xDBD6CD, transparent:true, opacity:0.5, side:THREE.DoubleSide});
-  const m = new THREE.Mesh(geo, mat);
-  scene.add(m);
-  return m;
-})();
-
-// 平台面
-const platGeo = new THREE.BufferGeometry();
-platGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
-const platMesh = new THREE.Mesh(platGeo, new THREE.MeshPhongMaterial({color:0xC0392B, transparent:true, opacity:0.35, side:THREE.DoubleSide}));
-scene.add(platMesh);
-
-function updatePlatMesh(geo, Q) {
-  const p = geo.attributes.position.array;
-  let cx=0,cy=0,cz=0;
-  for(let i=0;i<6;i++){cx+=Q[i].x;cy+=Q[i].y;cz+=Q[i].z;}
-  cx/=6;cy/=6;cz/=6;
-  for(let i=0;i<6;i++){
-    const j=(i+1)%6, k=i*9;
-    p[k]=cx;p[k+1]=cy;p[k+2]=cz;
-    p[k+3]=Q[i].x;p[k+4]=Q[i].y;p[k+5]=Q[i].z;
-    p[k+6]=Q[j].x;p[k+7]=Q[j].y;p[k+8]=Q[j].z;
-  }
-  geo.attributes.position.needsUpdate = true;
-  geo.computeVertexNormals();
-}
-function updatePlatform(Q) { updatePlatMesh(platGeo, Q); }
+const stewartRig = createStewartRig(scene, stewartModel, {
+  CSS2DObject,
+  labels: true,
+  labelClassName: 'motor-label',
+});
 
 // ===== Ghost（IK 目標疊影）=====
-const ghostMat = new THREE.LineBasicMaterial({color:0x27AE60, transparent:true, opacity:0.5});
-const ghostLines = [];
-for (let i = 0; i < 12; i++) { // 6 lower + 6 upper
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0,0,0,0],3));
-  const line = new THREE.Line(geo, ghostMat);
-  line.visible = false;
-  scene.add(line);
-  ghostLines.push(line);
-}
-const ghostPlatGeo = new THREE.BufferGeometry();
-ghostPlatGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
-const ghostPlatMesh = new THREE.Mesh(ghostPlatGeo, new THREE.MeshPhongMaterial({color:0x27AE60, transparent:true, opacity:0.15, side:THREE.DoubleSide}));
-ghostPlatMesh.visible = false;
-scene.add(ghostPlatMesh);
+const ghostRig = createGhostRig(scene, stewartModel);
+const ghostMat = ghostRig.lineMaterial;
+const ghostPlatMesh = ghostRig.plateMesh;
 
 let ghostTarget = null; // [x,y,z,r,p,y] from slider
 
 function updateGhost() {
   if (!ghostTarget) {
-    ghostPlatMesh.visible = false;
-    ghostLines.forEach(l => l.visible = false);
+    ghostRig.hide();
     return;
   }
   const angles = ik(ghostTarget);
   const Apt = computeA(angles);
-  const [x,y,z,roll,pitch,yaw] = ghostTarget;
-  const cr=Math.cos(roll*DEG),sr=Math.sin(roll*DEG);
-  const cp=Math.cos(pitch*DEG),sp=Math.sin(pitch*DEG);
-  const cy2=Math.cos(yaw*DEG),sy2=Math.sin(yaw*DEG);
-  const R=[[cy2*cp,cy2*sp*sr-sy2*cr,cy2*sp*cr+sy2*sr],[sy2*cp,sy2*sp*sr+cy2*cr,sy2*sp*cr-cy2*sr],[-sp,cp*sr,cp*cr]];
-  const Q = P.map(p => new THREE.Vector3(
-    R[0][0]*p.x+R[0][1]*p.y+R[0][2]*p.z+x,
-    R[1][0]*p.x+R[1][1]*p.y+R[1][2]*p.z+y,
-    R[2][0]*p.x+R[2][1]*p.y+R[2][2]*p.z+z
-  ));
-  for (let i = 0; i < 6; i++) {
-    updateLine(ghostLines[i], B[i], Apt[i]);
-    updateLine(ghostLines[i+6], Apt[i], Q[i]);
-    ghostLines[i].visible = true;
-    ghostLines[i+6].visible = true;
-  }
-  updatePlatMesh(ghostPlatGeo, Q);
-  ghostPlatMesh.visible = true;
+  const Q = platformPointsFromPose(ghostTarget, stewartModel);
+  ghostRig.updateFromPoints(Apt, Q);
 }
 
 // ===== 姿態操作（滑桿 → ghost 目標預覽 → 絕對 pose P 指令）=====
@@ -1266,6 +1006,36 @@ function ikValidOffset(off) {
   const r = window.Kin && window.Kin.ik(poseFromOffset(off));
   return !!(r && r.valid);
 }
+function poseAxisScanLimits(idx) {
+  const kin = window.Kin || {};
+  const radial = Number(kin.BASE_RADIUS || 152) + Number(kin.PLATFORM_RADIUS || 103) + Number(kin.UPPER_LEG || 165);
+  const zMin = -Number(kin.NEUTRAL_Z || NEUTRAL_Z) + 1;
+  const zMax = Number(kin.LOWER_LEG || 65) + Number(kin.UPPER_LEG || 165) - Number(kin.NEUTRAL_Z || NEUTRAL_Z);
+  if (idx === 0 || idx === 1) return [-radial, radial];
+  if (idx === 2) return [zMin, zMax];
+  return [-180, 180];
+}
+function roundRangeEdge(v, step, dir) {
+  const s = Number.isFinite(step) && step > 0 ? step : 1;
+  return dir < 0 ? Math.floor(v / s) * s : Math.ceil(v / s) * s;
+}
+function updateInputDynamicRange(input, intervals, idx, base) {
+  if (!input) return;
+  const [capMin, capMax] = poseAxisScanLimits(idx);
+  const step = parseFloat(input.step) || (idx < 3 ? 1 : 0.5);
+  const current = Number.isFinite(Number(base[idx])) ? Number(base[idx]) : (parseFloat(input.value) || 0);
+  let mn = capMin, mx = capMax;
+  if (intervals.length) {
+    mn = Math.min(...intervals.map(([a]) => a));
+    mx = Math.max(...intervals.map(([, b]) => b));
+    const pad = Math.max(step * 2, (mx - mn) * 0.02);
+    mn = Math.max(capMin, Math.min(mn, current) - pad);
+    mx = Math.min(capMax, Math.max(mx, current) + pad);
+  }
+  if (!(mx > mn)) { mn = capMin; mx = capMax; }
+  input.min = String(roundRangeEdge(mn, step, -1));
+  input.max = String(roundRangeEdge(mx, step, 1));
+}
 function refineReachBoundary(base, idx, a, b, validA) {
   let lo = a, hi = b;
   for (let k = 0; k < 9; k++) {
@@ -1276,10 +1046,10 @@ function refineReachBoundary(base, idx, a, b, validA) {
   }
   return validA ? lo : hi;
 }
-function scanAxisReach(base, idx, input) {
-  const mn = parseFloat(input.min), mx = parseFloat(input.max);
+function scanAxisReach(base, idx) {
+  const [mn, mx] = poseAxisScanLimits(idx);
   if (!(mx > mn)) return [];
-  const samples = idx < 3 ? 72 : 80;
+  const samples = idx < 3 ? 240 : 1440;
   const intervals = [];
   let prevV = mn;
   let probe = base.slice(); probe[idx] = prevV;
@@ -1327,26 +1097,29 @@ function renderReachBands(input, intervals) {
     rangeEl.style.color = !inside ? 'var(--dev)' : tight ? 'var(--dual)' : 'var(--sub)';
   }
 }
-let workspaceScanRAF = 0;
-let workspaceLast = null;
-function updatePoseWorkspaceNow(base = poseReadOffset()) {
-  workspaceLast = base.slice();
+let poseReachScanRAF = 0;
+let poseReachLast = null;
+function updatePoseReachNow(base = poseReadOffset()) {
+  poseReachLast = base.slice();
   for (const [id, idx] of POSE_AXES) {
     const input = document.getElementById(id);
     if (!input) continue;
-    renderReachBands(input, scanAxisReach(base, idx, input));
+    const intervals = scanAxisReach(base, idx);
+    updateInputDynamicRange(input, intervals, idx, base);
+    renderReachBands(input, intervals);
   }
 }
-function schedulePoseWorkspaceScan(base = poseReadOffset()) {
-  workspaceLast = base.slice();
-  if (workspaceScanRAF) return;
-  workspaceScanRAF = requestAnimationFrame(() => {
-    workspaceScanRAF = 0;
-    updatePoseWorkspaceNow(workspaceLast || poseReadOffset());
+function schedulePoseReachScan(base = poseReadOffset()) {
+  poseReachLast = base.slice();
+  if (poseReachScanRAF) return;
+  poseReachScanRAF = requestAnimationFrame(() => {
+    poseReachScanRAF = 0;
+    updatePoseReachNow(poseReachLast || poseReadOffset());
   });
 }
 function setPoseSliderTargetFromPose(pose) {
   const off = poseToOffset(pose); if (!off) return;
+  updatePoseReachNow(off);
   for (const [id, idx] of POSE_AXES) {
     const el = document.getElementById(id);
     const val = off[idx];
@@ -1357,7 +1130,7 @@ function setPoseSliderTargetFromPose(pose) {
     const v = document.getElementById(id + '-v');
     if (v) v.textContent = liveFmt(val, 1, false);
   }
-  schedulePoseWorkspaceScan(off);
+  schedulePoseReachScan(off);
 }
 function setPoseErrorLive(actual) {
   const act = poseToOffset(actual), tgt = poseToOffset(ghostTarget);
@@ -1390,7 +1163,7 @@ function poseUpdateGhost() {
   const o = poseReadOffset();
   ghostTarget = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];   // 絕對 pose（z 疊中位）
   for (const [id, idx] of POSE_AXES) document.getElementById(id+'-v').textContent = o[idx].toFixed(1);
-  schedulePoseWorkspaceScan(o);
+  schedulePoseReachScan(o);
   // 6D 工作空間非立方：各 DOF 耦合 → 即時 ik valid 判斷此「組合」是否真可達（滑桿單軸範圍只是上界）
   // 注意用 window.Kin.ik（回 {angles,valid}）；index 內建 ik() 只回裸 angles 陣列、無 valid
   poseReachable = window.Kin.ik(ghostTarget).valid;
@@ -1408,7 +1181,9 @@ POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input'
 // Server `/api/platform-config` 是 SoT；localStorage 只當離線/舊版備援。
 let platformConfig = window.PlatformSoT ? window.PlatformSoT.mergeConfig({}) : null;
 let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
+let releasePose = [0, 0, NEUTRAL_Z - 10, 0, 0, 34];
 try { const h = JSON.parse(localStorage.getItem('pose.home')); if (Array.isArray(h) && h.length === 6 && h.every(Number.isFinite)) homePose = h; } catch (e) {}
+try { const p = JSON.parse(localStorage.getItem('pose.release')); if (Array.isArray(p) && p.length === 6 && p.every(Number.isFinite)) releasePose = p; } catch (e) {}
 let platformSaveTimer = null;
 function clampInputValue(el, v) {
   if (!el || !Number.isFinite(v)) return;
@@ -1416,33 +1191,14 @@ function clampInputValue(el, v) {
   el.value = Math.max(Number.isFinite(min) ? min : v, Math.min(Number.isFinite(max) ? max : v, v));
 }
 function currentUiState() {
-  const motionParams = {};
-  if (typeof MOTIONS !== 'undefined') {
-    for (const m of MOTIONS) {
-      const existing = platformConfig?.uiState?.motion?.paramsById?.[m.id] || {};
-      motionParams[m.id] = { ...existing };
-    }
-    const def = selectedMotion && selectedMotion();
-    if (def) motionParams[def.id] = readMotionParams();
-  }
+  const existing = platformConfig?.uiState || {};
   return {
+    ...existing,
     poseTargetRelative: poseReadOffset(),
     poseMoveMs: Number(document.getElementById('ps-ms')?.value) || 1500,
-    motion: {
-      selectedId: document.getElementById('motion-sel')?.value || platformConfig?.uiState?.motion?.selectedId || 'helix',
-      loops: motionReadLoops ? motionReadLoops() : 0,
-      paramsById: motionParams,
-    },
     disturbance: {
-      uMotor: Number(document.getElementById('u-motor')?.value) || 0,
-      uDeg: Number(document.getElementById('u-deg')?.value) || 0,
-      uMs: Number(document.getElementById('u-ms')?.value) || 0,
-      wMode: document.getElementById('w-mode')?.value || 'tilt',
-      wSev: Number(document.getElementById('w-sev')?.value) || 0,
-      wMs: Number(document.getElementById('w-ms')?.value) || 0,
-      batteryBackstop: Number(document.getElementById('bat-backstop')?.value) || 15,
+      randomSev: Number(document.getElementById('dist-sev')?.value) || 3,
     },
-    recorderName: document.getElementById('rec-name')?.value || 'run',
   };
 }
 function savePlatformConfigSoon() {
@@ -1450,11 +1206,10 @@ function savePlatformConfigSoon() {
   clearTimeout(platformSaveTimer);
   platformSaveTimer = setTimeout(async () => {
     try {
-      const body = window.PlatformSoT.mergeConfig({ ...platformConfig, uiState: currentUiState() });
       const r = await fetch('/api/platform-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ uiState: currentUiState() }),
       });
       if (r.ok) platformConfig = window.PlatformSoT.mergeConfig(await r.json());
     } catch (e) {}
@@ -1464,41 +1219,45 @@ function applyPersistedUiState() {
   const ui = platformConfig?.uiState;
   if (!ui) return;
   if (Array.isArray(ui.poseTargetRelative)) {
+    updatePoseReachNow(ui.poseTargetRelative.map(Number));
     for (const [id, idx] of POSE_AXES) clampInputValue(document.getElementById(id), Number(ui.poseTargetRelative[idx]));
   }
   clampInputValue(document.getElementById('ps-ms'), Number(ui.poseMoveMs));
-  const vf = platformConfig.followLimits || {};
-  clampInputValue(document.getElementById('vf-t'), Number(vf.vmaxT));
-  clampInputValue(document.getElementById('vf-r'), Number(vf.vmaxR));
-  const sel = document.getElementById('motion-sel');
-  if (sel && ui.motion?.selectedId && [...sel.options].some(o => o.value === ui.motion.selectedId)) sel.value = ui.motion.selectedId;
-  clampInputValue(document.getElementById('motion-loops'), Number(ui.motion?.loops));
-  if (typeof renderMotionParams === 'function') renderMotionParams();
   const d = ui.disturbance || {};
-  const uMotor = document.getElementById('u-motor');
-  if (uMotor && Number.isFinite(Number(d.uMotor))) uMotor.value = String(d.uMotor);
-  clampInputValue(document.getElementById('u-deg'), Number(d.uDeg));
-  clampInputValue(document.getElementById('u-ms'), Number(d.uMs));
-  const wMode = document.getElementById('w-mode');
-  if (wMode && d.wMode && [...wMode.options].some(o => o.value === d.wMode || o.textContent === d.wMode)) wMode.value = d.wMode;
-  clampInputValue(document.getElementById('w-sev'), Number(d.wSev));
-  clampInputValue(document.getElementById('w-ms'), Number(d.wMs));
-  clampInputValue(document.getElementById('bat-backstop'), Number(d.batteryBackstop));
-  const recName = document.getElementById('rec-name');
-  if (recName && typeof ui.recorderName === 'string') recName.value = ui.recorderName;
-  if (typeof wPreview === 'function') wPreview();
-  motionRefreshTimeline?.();
+  const sev = Number.isFinite(Number(d.randomSev))
+    ? Number(d.randomSev)
+    : (Number.isFinite(Number(d.wSev)) ? Number(d.wSev) : 3);
+  clampInputValue(document.getElementById('dist-sev'), sev);
+  updateDisturbUi();
   poseUpdateGhost();
 }
 function poseHomeOffset() {
   return [homePose[0], homePose[1], homePose[2] - NEUTRAL_Z, homePose[3], homePose[4], homePose[5]];
 }
-function poseApplyHomeToSliders() {
-  const off = poseHomeOffset();
+function poseReleaseOffset() {
+  return [releasePose[0], releasePose[1], releasePose[2] - NEUTRAL_Z, releasePose[3], releasePose[4], releasePose[5]];
+}
+function poseOffsetLabel(off) {
+  return `[${off.map((x) => Number(x || 0).toFixed(Math.abs(x) >= 10 ? 1 : 2)).join(', ')}]`;
+}
+function updateSavedPoseSummary() {
+  const h = document.getElementById('pose-home-summary');
+  const r = document.getElementById('pose-release-summary');
+  if (h) h.textContent = poseOffsetLabel(poseHomeOffset());
+  if (r) r.textContent = poseOffsetLabel(poseReleaseOffset());
+}
+function poseApplyOffsetToSliders(off) {
+  updatePoseReachNow(off);
   POSE_AXES.forEach(([id, idx]) => {
     const el = document.getElementById(id);
     el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));
   });
+}
+function poseApplyHomeToSliders() {
+  poseApplyOffsetToSliders(poseHomeOffset());
+}
+function poseApplyReleaseToSliders() {
+  poseApplyOffsetToSliders(poseReleaseOffset());
 }
 async function poseLoadHomeFromServer() {
   try {
@@ -1509,25 +1268,31 @@ async function poseLoadHomeFromServer() {
     const pose = Array.isArray(d.homePose) ? d.homePose : d.pose;
     if (!Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
     homePose = pose;
+    if (Array.isArray(d.landingPose) && d.landingPose.length === 6 && d.landingPose.every(Number.isFinite)) releasePose = d.landingPose;
     try { localStorage.setItem('pose.home', JSON.stringify(homePose)); } catch (e) {}
+    try { localStorage.setItem('pose.release', JSON.stringify(releasePose)); } catch (e) {}
+    updateSavedPoseSummary();
     applyPersistedUiState();
   } catch (e) {}
 }
-async function poseSaveHomeToServer() {
+async function poseSavePlatformPoseToServer(extra) {
   try {
-    const body = platformConfig && window.PlatformSoT
-      ? { ...platformConfig, homePose }
-      : { homePose };
     const r = await fetch('/api/platform-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(extra),
     });
     if (r.ok) {
       const d = await r.json();
       if (window.PlatformSoT) platformConfig = window.PlatformSoT.mergeConfig(d);
     }
   } catch (e) {}
+}
+async function poseSaveHomeToServer() {
+  await poseSavePlatformPoseToServer({ homePose });
+}
+async function poseSaveReleaseToServer() {
+  await poseSavePlatformPoseToServer({ landingPose: releasePose });
 }
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
@@ -1560,10 +1325,35 @@ window.poseSetHome = function() {
   const o = poseReadOffset();
   homePose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   try { localStorage.setItem('pose.home', JSON.stringify(homePose)); } catch (e) {}
+  updateSavedPoseSummary();
   poseSaveHomeToServer();
   const st = document.getElementById('pose-ctl-status');
   st.style.color = 'var(--sub)';
   st.textContent = `⌂ Home 已設為 [${homePose.map(x => x.toFixed(1)).join(', ')}]`;
+};
+window.poseRelease = function() {
+  // Release 目標 = 實驗流程中的 landingPose；此按鈕只移到該 pose，不直接 D 斷電。
+  poseApplyReleaseToSliders();
+  poseUpdateGhost();
+  if (followActive) return;
+  const o = poseReadOffset();
+  const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
+  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
+  const st = document.getElementById('pose-ctl-status');
+  st.style.color = 'var(--sub)';
+  st.textContent = `→ Release pose [${pose.map(x => x.toFixed(1)).join(', ')}] ${ms}ms`;
+};
+window.poseSetRelease = function() {
+  // 把當前目標姿態設為 Release/Landing，Workspace session 最後會移到此姿態再 D。
+  const o = poseReadOffset();
+  releasePose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+  try { localStorage.setItem('pose.release', JSON.stringify(releasePose)); } catch (e) {}
+  updateSavedPoseSummary();
+  poseSaveReleaseToServer();
+  const st = document.getElementById('pose-ctl-status');
+  st.style.color = 'var(--sub)';
+  st.textContent = `⌂ Release 已設為 [${releasePose.map(x => x.toFixed(1)).join(', ')}]`;
 };
 document.getElementById('ps-ms')?.addEventListener('input', savePlatformConfigSoon);
 
@@ -1605,237 +1395,15 @@ function onFollowOn(pose) {
   poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
   followActive = true;
   updateFollowUI();
-  if (pendingPlay) _motionStart(false);   // 動作播放觸發的 arm → 跟隨就緒即啟動（實跑）
 }
-function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } if (motion.def && !motion.preview) motionStop(); updateFollowUI(); }
-
-// ===== 標準動作庫：host 串流 pose(t) → PF → 韌體速限濾波器跟隨 =====
-// 每個動作 fn 回「相對 home 的 delta」[dx,dy,dz,droll,dpitch,dyaw]；引擎合成 pose = homePose + delta。
-// → 所有動作以 home 為原點（home 預設中位，可用「存 Home」改）。參數可即時調（每 tick 重讀）。
-const TAU = Math.PI * 2;
-const ss = (x) => { x = Math.max(0, Math.min(1, x)); return x*x*(3-2*x); };   // smoothstep 0..1
-// 每個 motion 的一圈都必須從 home 出發、回到 home；對任意 delta 套 Hann envelope 可保證端點為 0。
-const cycleEnvelope = (t, per) => (per > 0) ? Math.sin(Math.PI * ((t % per) / per)) ** 2 : 1;
-const MOTIONS = [
-  { id:'helix', label:'螺旋升降', per:(p)=>p.T,
-    params:[{k:'r',l:'半徑',min:0,max:40,def:15,step:1,u:'mm'},{k:'zlo',l:'低點',min:-15,max:0,def:-8,step:1,u:'mm'},
-            {k:'zhi',l:'高點',min:0,max:30,def:8,step:1,u:'mm'},{k:'T',l:'週期',min:1,max:20,def:6,step:0.5,u:'s'},
-            {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
-    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t, z=p.zlo+(p.zhi-p.zlo)*(0.5-0.5*Math.cos(w*t));
-      return [p.r*Math.cos(th), p.r*Math.sin(th), z, 0,0,0]; } },
-  { id:'poke', label:'法向推擠回彈', per:(p)=>p.push+p.ret+p.rest,
-    params:[{k:'d',l:'距離',min:0,max:30,def:18,step:1,u:'mm'},{k:'push',l:'推時長',min:0.1,max:1,def:0.25,step:0.05,u:'s'},
-            {k:'ret',l:'回時長',min:0.1,max:2,def:0.6,step:0.05,u:'s'},{k:'rest',l:'間隔',min:0,max:3,def:0.6,step:0.1,u:'s'}],
-    fn:(t,p)=>{ const T=p.push+p.ret+p.rest, ph=t%T; let a=0;          // 法向=+z（home 水平時），非對稱推/回
-      if(ph<p.push) a=ss(ph/p.push); else if(ph<p.push+p.ret) a=1-ss((ph-p.push)/p.ret);
-      return [0,0,p.d*a,0,0,0]; } },
-  { id:'yaw', label:'偏航擺盪', per:(p)=>p.T,
-    params:[{k:'A',l:'幅度',min:0,max:60,def:30,step:1,u:'°'},{k:'T',l:'週期',min:0.5,max:10,def:3,step:0.5,u:'s'},
-            {k:'sym',l:'雙向',min:0,max:1,def:0,step:1,u:''}],
-    fn:(t,p)=>{ const w=TAU/p.T, yaw=p.sym? p.A*Math.sin(w*t) : p.A*(0.5-0.5*Math.cos(w*t));   // sym0=純CCW單向
-      return [0,0,0,0,0,yaw]; } },
-  { id:'coning', label:'進動 coning', per:(p)=>p.T,
-    params:[{k:'A',l:'傾角',min:0,max:12,def:6,step:0.5,u:'°'},{k:'T',l:'週期',min:1,max:12,def:4,step:0.5,u:'s'},
-            {k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
-    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t; return [0,0,0, p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
-  { id:'idle', label:'漂浮 idle', per:(p)=>p.T,
-    params:[{k:'tr',l:'平移範圍',min:0,max:20,def:8,step:1,u:'mm'},{k:'rr',l:'旋轉範圍',min:0,max:12,def:4,step:0.5,u:'°'},
-            {k:'spd',l:'速度',min:0.2,max:3,def:1,step:0.1,u:'×'},{k:'T',l:'週期',min:4,max:60,def:16,step:1,u:'s'}],
-    fn:(t,p)=>{ const s=p.spd, d=(f1,f2,ph)=>0.5*Math.sin(s*f1*t)+0.5*Math.sin(s*f2*t+ph);   // 互質頻率和=平滑準隨機
-      return [p.tr*d(0.17,0.31,1.3), p.tr*d(0.13,0.27,2.1), p.tr*0.6*d(0.11,0.23,0.7),
-              p.rr*d(0.19,0.29,0.4), p.rr*d(0.23,0.37,1.9), p.rr*d(0.15,0.33,2.7)]; } },
-  { id:'fig8', label:'8字 Lissajous', per:(p)=>p.T,
-    params:[{k:'ax',l:'X幅',min:0,max:40,def:20,step:1,u:'mm'},{k:'ay',l:'Y幅',min:0,max:40,def:15,step:1,u:'mm'},
-            {k:'ratio',l:'頻比',min:1,max:4,def:2,step:1,u:'×'},{k:'T',l:'週期',min:1,max:15,def:6,step:0.5,u:'s'}],
-    fn:(t,p)=>{ const w=TAU/p.T; return [p.ax*Math.sin(w*t), p.ay*Math.sin(p.ratio*w*t), 0, 0,0,0]; } },
-  { id:'buoy', label:'海浪 buoy', per:(p)=>p.T,
-    params:[{k:'A',l:'傾角',min:0,max:12,def:5,step:0.5,u:'°'},{k:'H',l:'起伏',min:0,max:25,def:4,step:1,u:'mm'},
-            {k:'T',l:'週期',min:1,max:12,def:5,step:0.5,u:'s'},{k:'dir',l:'方向',min:-1,max:1,def:1,step:2,u:''}],
-    fn:(t,p)=>{ const w=TAU/p.T, th=p.dir*w*t;
-      return [0,0,p.H*Math.sin(w*t), p.A*Math.cos(th), p.A*Math.sin(th), 0]; } },
-  { id:'heartbeat', label:'心跳 heartbeat', per:(p)=>p.T,
-    params:[{k:'d',l:'強度',min:0,max:25,def:12,step:1,u:'mm'},{k:'T',l:'節律',min:0.6,max:3,def:1.2,step:0.1,u:'s'}],
-    fn:(t,p)=>{ const ph=t%p.T, w=0.05*p.T, g=(tc,amp)=>amp*Math.exp(-(((ph-tc)/w)**2));
-      return [0,0,p.d*(g(0.08*p.T,1.0)+g(0.22*p.T,0.6)), 0,0,0]; } },   // lub-dub
-];
-
-const MOTION_HZ = 30;
-let platHolding = false, pendingPlay = false;
-let motion = { def:null, t0:0, raf:null, mLast:0, preview:false, maxLoops:0, cycle:0 };
-function motionParamBox(){ return document.getElementById('motion-params'); }
-function selectedMotion(){ return MOTIONS.find(m => m.id === document.getElementById('motion-sel').value); }
-function motionReadLoops(){
-  const el = document.getElementById('motion-loops');
-  return Math.max(0, Math.min(999, parseInt(el && el.value, 10) || 0));
-}
-function fmtSec(s){
-  if (!Number.isFinite(s)) return '00.0';
-  return s < 100 ? s.toFixed(1).padStart(4, '0') : Math.round(s).toString();
-}
-function motionPeriod(params = readMotionParams(), def = selectedMotion()){
-  if (!def) return 0;
-  const per = def.per(params);
-  return Number.isFinite(per) && per > 0 ? per : 0;
-}
-function motionSetTimeline(frac, tInCycle, per, loopNow, loops, phase){
-  frac = Math.max(0, Math.min(1, frac || 0));
-  const fill = document.getElementById('motion-fill'), cur = document.getElementById('motion-cursor');
-  const clock = document.getElementById('motion-clock'), loop = document.getElementById('motion-loop-label'), ph = document.getElementById('motion-phase-label');
-  if (fill) fill.style.width = (frac * 100).toFixed(2) + '%';
-  if (cur) cur.style.left = (frac * 100).toFixed(2) + '%';
-  if (clock) clock.textContent = `${fmtSec(tInCycle)} / ${fmtSec(per)}s`;
-  if (loop) loop.textContent = loops > 0 ? `loop ${loopNow}/${loops}` : `loop ${loopNow} / ∞`;
-  if (ph) ph.textContent = phase || (frac < 0.04 || frac > 0.96 ? 'home' : `${Math.round(frac * 100)}%`);
-}
-function motionRefreshTimeline(){
-  const per = motionPeriod();
-  const loops = motion.def ? motion.maxLoops : motionReadLoops();
-  motionSetTimeline(0, 0, per, motion.def ? motion.cycle + 1 : 1, loops, motion.def ? 'home' : 'ready');
-}
-window.motionSetLoops = function(v){
-  const el = document.getElementById('motion-loops'); if (!el) return;
-  el.value = Math.max(0, Math.min(999, parseInt(v, 10) || 0));
-  if (motion.def) motion.maxLoops = motionReadLoops();
-  motionRefreshTimeline();
-  savePlatformConfigSoon();
-};
-window.motionAdjustLoops = function(delta){ motionSetLoops(motionReadLoops() + delta); };
-window.motionRefreshTimeline = motionRefreshTimeline;
-function renderMotionParams(){
-  const def = selectedMotion(), box = motionParamBox(); box.innerHTML = '';
-  if (!def) return;
-  const saved = platformConfig?.uiState?.motion?.paramsById?.[def.id] || {};
-  def.params.forEach(pr => {
-    const value = Number.isFinite(Number(saved[pr.k])) ? saved[pr.k] : pr.def;
-    const row = document.createElement('div');
-    row.style.cssText = 'display:grid;grid-template-columns:54px 1fr 44px;gap:4px;align-items:center;font-size:11px';
-    row.innerHTML = `<span title="${pr.l}">${pr.l}</span>` +
-      `<input type="range" data-k="${pr.k}" min="${pr.min}" max="${pr.max}" value="${value}" step="${pr.step}">` +
-      `<span class="mp-v" style="text-align:right">${value}${pr.u}</span>`;
-    const inp = row.querySelector('input'), vv = row.querySelector('.mp-v');
-    inp.addEventListener('input', () => { vv.textContent = inp.value + pr.u; motionRefreshTimeline(); savePlatformConfigSoon(); });
-    box.appendChild(row);
-  });
-  motionRefreshTimeline();
-}
-function readMotionParams(){ const o = {}; motionParamBox().querySelectorAll('input').forEach(i => o[i.dataset.k] = parseFloat(i.value)); return o; }
-function updateMotionUI(){
-  const running = !!motion.def;
-  const b = document.getElementById('motion-play'), pv = document.getElementById('motion-preview');
-  if (b)  { const real = running && !motion.preview; b.textContent = real ? '● 運行中' : '▶ 播放'; b.style.background = real ? 'var(--contra)' : ''; b.style.color = real ? '#fff' : ''; }
-  if (pv) { const prev = running &&  motion.preview; pv.textContent = prev ? '◆ 預覽中' : '👁 預覽'; pv.style.background = prev ? '#7c5cff' : ''; pv.style.color = prev ? '#fff' : ''; }
-}
-function motionTick(now){
-  // 實跑需 followActive（PF 串流）；預覽純前端 ghost，不需 follow、不送 PF。
-  if (!motion.def || (!motion.preview && !followActive)) { motion.raf = null; return; }
-  motion.raf = requestAnimationFrame(motionTick);
-  if (now - motion.mLast < 1000 / MOTION_HZ) return;
-  motion.mLast = now;
-  const t = (now - motion.t0) / 1000, p = readMotionParams();        // 即時重讀參數 → 邊跑邊調
-  const per = motion.def.per(p);
-  if (motion.maxLoops > 0 && per > 0 && t >= motion.maxLoops * per) { motionStop(); return; }   // N 圈後回 home
-  const cyc = per > 0 ? Math.floor(t / per) : 0;
-  const boundaryHome = per > 0 && cyc !== motion.cycle;
-  motion.cycle = cyc;
-  const tCycle = per > 0 ? (boundaryHome ? 0 : t % per) : t;
-  const frac = per > 0 ? tCycle / per : 0;
-  const env = boundaryHome ? 0 : cycleEnvelope(t, per);
-  const d = motion.def.fn(t, p).map(v => v * env);
-  const pose = homePose.map((h, i) => h + d[i]);                      // 以 home 為原點合成絕對 pose
-  const ok = window.Kin.ik(pose).valid;
-  ghostMat.color.setHex(ok ? 0x27AE60 : 0xC0392B);
-  ghostPlatMesh.material.color.setHex(ok ? 0x27AE60 : 0xC0392B);
-  ghostTarget = pose; setPoseSliderTargetFromPose(ghostTarget); updateGhost();
-  if (!motion.preview && ok) streamPF(pose);                          // 預覽不送 PF；超工作空間瞬時 sample 跳過（韌體 hold-last）
-  motionSetTimeline(frac, tCycle, per, motion.cycle + 1, motion.maxLoops, boundaryHome ? 'home' : (ok ? `${Math.round(frac * 100)}%` : 'limit'));
-}
-function _motionStart(preview){
-  pendingPlay = false;
-  motion.preview = !!preview;
-  motion.def = selectedMotion();
-  motion.t0 = performance.now(); motion.mLast = 0;
-  motion.maxLoops = motionReadLoops();
-  motion.cycle = 0;
-  ghostTarget = homePose.slice(); setPoseSliderTargetFromPose(ghostTarget); updateGhost();
-  if (!motion.preview && followActive) streamPF(homePose.slice());
-  if (!motion.raf) motion.raf = requestAnimationFrame(motionTick);
-  updateMotionUI();
-  motionRefreshTimeline();
-  const lbl = motion.preview ? '👁 預覽' : '▶';
-  document.getElementById('motion-status').textContent = `${lbl} ${motion.def.label}${motion.maxLoops>0?` ×${motion.maxLoops}`:' 循環'} · 以 home 為原點`;
-}
-window.motionToggle = function(){                 // 實跑：需 HOLD + follow，串流 PF 驅動平台
-  if (motion.def && !motion.preview) { motionStop(); return; }   // 實跑中 → 停
-  const st = document.getElementById('motion-status');           // 閒置或預覽中 → 轉實跑
-  if (!platHolding) { st.textContent = '需先按 HOLD'; st.style.color = 'var(--dev)'; return; }
-  if (motion.preview) motionStop();                              // 預覽中 → 先停預覽再實跑
-  st.style.color = 'var(--sub)';
-  if (followActive) _motionStart(false);
-  else { pendingPlay = true; window.sendCmd('FOLLOW 1'); }   // 先 arm 跟隨，onFollowOn 回來再啟動
-};
-window.motionPreview = function(){                // 預覽：純前端 ghost 動畫，不需 HOLD/連線、不驅動平台
-  if (motion.def) { motionStop(); return; }
-  const st = document.getElementById('motion-status'); st.style.color = 'var(--sub)';
-  _motionStart(true);
-};
-function motionStop(){
-  const wasReal = motion.def && !motion.preview;
-  if (motion.raf) cancelAnimationFrame(motion.raf);
-  motion.raf = null; motion.def = null; motion.preview = false; pendingPlay = false;
-  if (wasReal && followActive) streamPF(homePose.slice());    // 實跑停 → ease 回 home
-  ghostTarget = homePose.slice(); setPoseSliderTargetFromPose(ghostTarget); ghostMat.color.setHex(0x27AE60); ghostPlatMesh.material.color.setHex(0x27AE60); updateGhost();
-  updateMotionUI();
-  motionRefreshTimeline();
-}
-window.motionStopBtn = function(){ const st = document.getElementById('motion-status'); st.textContent = '■ 已停'; st.style.color = 'var(--sub)'; motionStop(); };
-window.applyVF = function(){
-  const vt = parseFloat(document.getElementById('vf-t').value) || 60, vr = parseFloat(document.getElementById('vf-r').value) || 45;
-  if (platformConfig) {
-    platformConfig.followLimits = { vmaxT: vt, vmaxR: vr };
-    savePlatformConfigSoon();
-  }
-  window.sendCmd(`VF ${vt} ${vr}`);
-};
-window.onMotionSel = function(){ motionStop(); renderMotionParams(); motionRefreshTimeline(); savePlatformConfigSoon(); };
-// 填充動作選單（單一真相源 = MOTIONS）+ 首次參數渲染
-(function initMotions(){
-  const sel = document.getElementById('motion-sel');
-  MOTIONS.forEach(m => { const o = document.createElement('option'); o.value = m.id; o.textContent = m.label; sel.appendChild(o); });
-  const savedId = platformConfig?.uiState?.motion?.selectedId;
-  if (savedId && MOTIONS.some(m => m.id === savedId)) sel.value = savedId;
-  renderMotionParams();
-})();
-document.getElementById('motion-loops')?.addEventListener('input', savePlatformConfigSoon);
-['vf-t','vf-r'].forEach(id => document.getElementById(id)?.addEventListener('input', () => {
-  const vt = parseFloat(document.getElementById('vf-t').value) || 60;
-  const vr = parseFloat(document.getElementById('vf-r').value) || 45;
-  if (platformConfig) platformConfig.followLimits = { vmaxT: vt, vmaxR: vr };
-  savePlatformConfigSoon();
-}));
+function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } updateFollowUI(); }
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
   const Apt = computeA(motorAngles);
   const pose = solveFK(motorAngles);
-  const [x,y,z,roll,pitch,yaw] = pose;
-  const cr=Math.cos(roll*DEG),sr=Math.sin(roll*DEG);
-  const cp=Math.cos(pitch*DEG),sp=Math.sin(pitch*DEG);
-  const cy2=Math.cos(yaw*DEG),sy2=Math.sin(yaw*DEG);
-  const R=[[cy2*cp,cy2*sp*sr-sy2*cr,cy2*sp*cr+sy2*sr],[sy2*cp,sy2*sp*sr+cy2*cr,sy2*sp*cr-cy2*sr],[-sp,cp*sr,cp*cr]];
-  const Q = P.map(p => new THREE.Vector3(
-    R[0][0]*p.x+R[0][1]*p.y+R[0][2]*p.z+x,
-    R[1][0]*p.x+R[1][1]*p.y+R[1][2]*p.z+y,
-    R[2][0]*p.x+R[2][1]*p.y+R[2][2]*p.z+z
-  ));
-
-  for(let i=0;i<6;i++){
-    bSpheres[i].position.copy(B[i]);
-    aSpheres[i].position.copy(Apt[i]);
-    qSpheres[i].position.copy(Q[i]);
-    updateLine(lowerLines[i], B[i], Apt[i]);
-    updateLine(upperLines[i], Apt[i], Q[i]);
-  }
-  updatePlatform(Q);
+  const Q = platformPointsFromPose(pose, stewartModel);
+  stewartRig.updateFromPoints(Apt, Q);
 
   setPoseErrorLive(pose);
 
@@ -1856,14 +1424,14 @@ function updateViz(motorAngles) {
 {
   const testPose = [0, 0, NEUTRAL_Z, 0, 10, 0];
   const testAngles = ik(testPose);
-  lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
+  window.Kin.resetFK([0, 0, Z_LEGS_UP, 0, 0, 0]);
   const recovered = solveFK(testAngles);
   console.log('FK self-test:');
   console.log('  input pose:', testPose);
   console.log('  IK angles:', testAngles.map(a=>a.toFixed(2)));
   console.log('  FK recovered:', recovered.map(v=>v.toFixed(2)));
   console.log('  status:', fkStatus);
-  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+  window.Kin.resetFK([0, 0, NEUTRAL_Z, 0, 0, 0]);
 }
 
 // ===== 動畫迴圈 =====
@@ -1887,6 +1455,45 @@ new ResizeObserver(fitCanvas).observe(canvasZone);
 
 // ===== WebSocket =====
 let ws = null;
+let wsConnected = false;
+let sessionState = { active: false, owner: 'manual', phase: 'idle' };
+
+function updateSessionBadge(s = sessionState) {
+  const el = document.getElementById('session-badge');
+  if (!el) return;
+  const active = !!s.active;
+  el.classList.toggle('active', active);
+  el.textContent = active ? `SESSION · ${(s.phase || 'running').toUpperCase()}` : 'MANUAL';
+  el.title = active
+    ? `Program/session 正在執行：${s.label || 'program'} · 即時姿態控制已鎖定`
+    : 'Manual immediate control enabled when platform transport is connected';
+}
+
+function sessionBlocksCommand(cmd) {
+  if (!sessionState.active) return false;
+  const op = String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+  if (op === 'D' || op === 'S') return false;
+  return [
+    'H', 'E', 'P', 'PF', 'FOLLOW',
+    'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
+    'L', 'AR', 'A', 'C', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
+    'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
+  ].includes(op);
+}
+
+function refreshCommandLocks() {
+  const manualEnabled = wsConnected && !sessionState.active;
+  document.querySelectorAll('.zbtn').forEach(b => b.disabled = !manualEnabled);
+  const poseStatus = document.getElementById('pose-ctl-status');
+  if (poseStatus && sessionState.active) {
+    poseStatus.textContent = 'session 執行中：即時控制鎖定';
+    poseStatus.style.color = 'var(--dual)';
+  } else if (poseStatus && poseStatus.textContent.includes('session 執行中')) {
+    poseStatus.textContent = '';
+    poseStatus.style.color = 'var(--sub)';
+  }
+  updateSessionBadge();
+}
 
 // 傳輸鏈 badge：{kind:'serial'|'wifi', state, detail}。selecting/connecting/switching=busy、connected=up、down=down。
 function updateTransportBadge(t) {
@@ -1910,9 +1517,10 @@ function connectWS() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    wsConnected = true;
     document.getElementById('status').textContent = 'CONNECTED';
     document.getElementById('status').className = 'nav-status connected';
-    document.querySelectorAll('.zbtn').forEach(b => b.disabled = false);
+    refreshCommandLocks();
   };
 
   ws.onmessage = (e) => {
@@ -1921,6 +1529,16 @@ function connectWS() {
 
       // 傳輸鏈狀態（server↔ESP32）：非遙測，獨立路由更新 badge
       if (data.evt === 'transport') { updateTransportBadge(data); return; }
+      if (data.evt === 'session_event') return;
+      if (data.evt === 'session') {
+        const wasActive = sessionState.active;
+        sessionState = { active: !!data.active, owner: data.owner || 'manual', phase: data.phase || 'idle', label: data.label || '' };
+        if (sessionState.active && !wasActive) {
+          followReset();
+        }
+        refreshCommandLocks();
+        return;
+      }
       if (data.evt === 'cmd_dropped') {
         logEv(`未送出 ${data.c} · ${data.reason}`, 'bad');
         btnResolve('fail');
@@ -1949,7 +1567,6 @@ function connectWS() {
       // STATE card: mode + hmax + button
       if (data.pos !== undefined) {
         const holding = !!(data.pos && data.hold);
-        platHolding = holding;          // 動作播放前置條件
         setHoldingUI(holding, data.hmax);
       }
       // 韌體 followMode（"fl"）為權威，獨立於 pos 判斷：前端以為在跟隨但韌體已退出
@@ -1988,7 +1605,7 @@ function connectWS() {
         if (data.status === 'follow on' && Array.isArray(data.pose)) onFollowOn(data.pose);
         if (data.status === 'follow off') followReset();
         if (data.status.includes('zeroed')) {
-          lastPose = [0, 0, Z_LEGS_UP, 0, 0, 0];
+          window.Kin.resetFK([0, 0, Z_LEGS_UP, 0, 0, 0]);
         }
         // enCnt < 6 表示部分 enable frame 失敗 → 按鈕走 fail
         const enableFailed = (data.enCnt !== undefined && data.enCnt < 6);
@@ -2036,10 +1653,11 @@ function connectWS() {
   };
 
   ws.onclose = () => {
+    wsConnected = false;
     document.getElementById('status').textContent = 'DISCONNECTED';
     document.getElementById('status').className = 'nav-status disconnected';
     updateTransportBadge({ kind: null, state: 'selecting', detail: '' });  // server 斷 → 傳輸狀態未知，轉灰
-    document.querySelectorAll('.zbtn').forEach(b => b.disabled = true);
+    refreshCommandLocks();
     followReset();   // 斷線 → 韌體跟隨態不可知，前端歸零（重連後須重按 HOLD+跟隨）
     setTimeout(connectWS, 1000);
   };
@@ -2079,6 +1697,11 @@ window.sendCmd = function(cmd) {
       const b = pendingBtn; pendingBtn = null; pendingTimer = null;
       btnSetState(b, 'fail');
     }, 3000);
+  }
+  if (sessionBlocksCommand(cmd)) {
+    logEv(`未送出 ${cmd} · session 正在執行`, 'bad');
+    btnResolve('fail');
+    return;
   }
   if (ws && ws.readyState === 1) ws.send(cmd);
   else {
@@ -2231,7 +1854,7 @@ window.showCal = function() {
 };
 
 window.resetFK = function() {
-  lastPose = [0, 0, NEUTRAL_Z, 0, 0, 0];
+  window.Kin.resetFK([0, 0, NEUTRAL_Z, 0, 0, 0]);
   fkStatus = 'FK reset';
   document.getElementById('fk-debug').textContent = fkStatus;
   document.getElementById('fk-debug').style.color = 'var(--sub)';
@@ -2387,11 +2010,11 @@ function drawCanSpark() {
 }
 scope.on('render', drawCanSpark);
 
-// 擾動卡即時 HOLD 指示（純資訊：未鎖位時脈衝/battery 無效，提醒不鎖死按鈕）
+// 擾動卡即時 HOLD 指示（純資訊：未鎖位時隨機擾動無效，提醒不鎖死按鈕）
 scope.on('telemetry', d => {
   const el = $o('dist-hold'); if (!el) return;
   const holding = !!(d.pos && d.hold);
-  el.textContent = holding ? '● HOLD 中' : '○ 未鎖位 · 脈衝無效';
+  el.textContent = holding ? '● HOLD 中' : '○ 未鎖位 · 擾動無效';
   el.style.color = holding ? 'var(--contra)' : 'var(--dual)';
 });
 
@@ -2459,73 +2082,53 @@ scope.on('render', ()=>{
   if(r.f){ fctx.fillStyle=scope.COLORS[scope.selectedMotor]; fctx.fillText('peak '+r.f.toFixed(2),W-72*dpr,12*dpr); }
 });
 
-// 錄製（server-side JSONL）
-let recording=false;
-window.recToggle = async function(){
-  const rest=p=>fetch(`http://${HOST}/api/${p}`).then(r=>r.json()).catch(()=>({}));
-  if(!recording){ const r=await rest(`rec/start?name=${encodeURIComponent($o('rec-name').value||'run')}`); recording=true;
-    $o('rec-go').textContent='■ STOP'; $o('rec-stat').textContent=(r.path||'').split('/').pop()||''; logEv('● 錄製開始','cmd'); }
-  else { const r=await rest('rec/stop'); recording=false; $o('rec-go').textContent='● REC'; $o('rec-stat').textContent=''; logEv(`■ 停止 ${r.lines??''}行`,'cmd'); }
-};
-
-// ===== 繞擾動控制（U 單軸 / W 模態 / battery；複用 window.DisturbModes，client 看門狗）=====
-window.disturbU = function() {
-  const m = +$o('u-motor').value, deg = +$o('u-deg').value, ms = +$o('u-ms').value;
-  sendCmd(`U ${m} ${deg} ${ms}`);
-};
-function wDelta() { return window.DisturbModes.encDelta($o('w-mode').value, +$o('w-sev').value); }
-function wPreview() {
-  try { const d = wDelta(), mx = Math.max(...d.map(Math.abs));
-    $o('w-preview').textContent = 'Δ° ' + d.map(x=>x.toFixed(1)).join(' ');
-    $o('w-preview').style.color = mx > 12 ? 'var(--dev)' : 'var(--sub)';
-  } catch(e){ $o('w-preview').textContent = e.message; $o('w-preview').style.color = 'var(--dev)'; }
+// ===== 隨機擾動控制（主頁只做即時手動擾動；數學 SoT 仍是 window.DisturbModes）=====
+const RANDOM_DISTURB_MS = 120;
+const RANDOM_DISTURB_MODES = ['roll', 'pitch', 'tilt', 'surge', 'sway', 'heave', 'yaw', 'mixed', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6'];
+function distStrength() {
+  return Math.max(0.5, Math.min(8, Number($o('dist-sev')?.value) || 3));
 }
-window.disturbW = function() {
-  const d = wDelta(); sendCmd(`W ${d.map(x=>x.toFixed(3)).join(' ')} ${+$o('w-ms').value}`);
-};
-['u-motor','u-deg','u-ms','w-mode','w-sev','w-ms','bat-backstop','rec-name'].forEach(id => {
-  const el=$o(id);
-  if (el) el.addEventListener('input', () => { if (id.startsWith('w-')) wPreview(); savePlatformConfigSoon(); });
-});
-wPreview();
-
-// battery：瀏覽器 replay 共用 SEQ + client 看門狗（herr 超 backstop → D 中止；韌體 U/W 自限為真正保底）
-let batteryAbort = false, batteryRunning = false;
-window.batteryStop = function() { batteryAbort = true; };
-window.batteryRun = async function() {
-  if (batteryRunning) return;
-  const DM = window.DisturbModes, SEQ = DM.BATTERY, backstop = +$o('bat-backstop').value || 15;
+function updateDisturbUi() {
+  const sev = distStrength();
+  const out = $o('dist-sev-v');
+  if (out) out.textContent = sev.toFixed(1);
+}
+function randomDisturbMode() {
+  const available = window.DisturbModes?.ALL_MODES || RANDOM_DISTURB_MODES;
+  const modes = available.filter((m) => RANDOM_DISTURB_MODES.includes(m));
+  return modes[Math.floor(Math.random() * modes.length)] || 'tilt';
+}
+window.randomDisturb = function() {
+  const status = $o('dist-status');
   const last = scope.last;
-  if (!last || last.pos !== 1) { $o('bat-progress').textContent = '⚠ 需先 HOLD 鎖位再跑'; $o('bat-progress').style.color = 'var(--dev)'; return; }
-  batteryRunning = true; batteryAbort = false;
-  $o('bat-run').style.display = 'none'; $o('bat-stop').style.display = '';
-  const rest = p => fetch(`http://${HOST}/api/${p}`).then(r=>r.json()).catch(()=>({}));
-  const sleep = ms => new Promise(r=>setTimeout(r, ms));
-  const pid = (last.pid||[]).join('-');
-  const name = `battery_pid${pid}_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'').slice(0,13)}`;
-  await rest(`rec/start?name=${encodeURIComponent(name)}`);
-  logEv(`● battery ${SEQ.length}事件 backstop>${backstop}°`, 'cmd');
-  let maxAbs = 0, tripped = false;
-  const watch = setInterval(() => {
-    const h = scope.last && scope.last.herr;
-    if (!Array.isArray(h)) return;
-    const cur = Math.max(...h.map(Math.abs)); if (cur > maxAbs) maxAbs = cur;
-    if (cur > backstop && !tripped) { tripped = true; batteryAbort = true; sendCmd('D'); logEv(`⛔ |herr|=${cur.toFixed(1)}>${backstop}° → 斷電中止 battery`, 'bad'); }
-  }, 80);
-  for (let i = 0; i < SEQ.length && !batteryAbort; i++) {
-    const e = SEQ[i], d = DM.encDelta(e.mode, e.sev);
-    sendCmd(`W ${d.map(x=>x.toFixed(3)).join(' ')} ${e.ms}`);
-    $o('bat-progress').textContent = `${i+1}/${SEQ.length} ${e.p} · ${e.mode} sev=${e.sev} · max|herr|≈${maxAbs.toFixed(1)}°`;
-    $o('bat-progress').style.color = 'var(--sub)';
-    await sleep(e.ms + 80); await sleep(e.gap * 1000);
+  if (!last || last.pos !== 1 || !Array.isArray(last.hold)) {
+    if (status) { status.textContent = '需先 HOLD 鎖位'; status.style.color = 'var(--dev)'; }
+    return;
   }
-  clearInterval(watch);
-  await rest('rec/stop');
-  if (tripped) { $o('bat-progress').textContent = `⛔ 發散中止 · 最大漂移 ${maxAbs.toFixed(1)}°`; $o('bat-progress').style.color = 'var(--dev)'; }
-  else if (batteryAbort) { $o('bat-progress').textContent = `■ 手動停止 · max ${maxAbs.toFixed(1)}°`; $o('bat-progress').style.color = 'var(--sub)'; }
-  else { $o('bat-progress').textContent = `✓ 完成 · 最大漂移 ${maxAbs.toFixed(1)}°`; $o('bat-progress').style.color = 'var(--contra)'; logEv(`✓ battery 完成 max|herr|=${maxAbs.toFixed(1)}°`, 'cmd'); }
-  batteryRunning = false; $o('bat-run').style.display = ''; $o('bat-stop').style.display = 'none';
+  const mode = randomDisturbMode();
+  const sev = distStrength();
+  let d;
+  try {
+    d = window.DisturbModes.encDelta(mode, sev);
+  } catch (e) {
+    if (status) { status.textContent = e.message; status.style.color = 'var(--dev)'; }
+    return;
+  }
+  const maxDelta = Math.max(...d.map(Math.abs));
+  if (maxDelta > 30) {
+    if (status) { status.textContent = `${mode} Δmax ${maxDelta.toFixed(1)}° 超過安全上限`; status.style.color = 'var(--dev)'; }
+    return;
+  }
+  sendCmd(`W ${d.map(x => x.toFixed(3)).join(' ')} ${RANDOM_DISTURB_MS}`);
+  if (status) {
+    status.textContent = `${mode} · 強度 ${sev.toFixed(1)} · ${RANDOM_DISTURB_MS}ms`;
+    status.style.color = 'var(--sub)';
+  }
+  logEv(`↯ random disturb ${mode} sev=${sev.toFixed(1)} maxΔ=${maxDelta.toFixed(1)}°`, 'cmd');
 };
+const distSev = $o('dist-sev');
+if (distSev) distSev.addEventListener('input', () => { updateDisturbUi(); savePlatformConfigSoon(); });
+updateDisturbUi();
 
 connectWS();
 </script>

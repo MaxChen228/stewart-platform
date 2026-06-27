@@ -6,6 +6,7 @@ const net = require('net');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { NEUTRAL_Z, solveFK, resetFK } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
 
@@ -36,6 +37,7 @@ const RELEASE_HOLD_MAX_MS = 180000;
 // 最新一筆「遙測」資料（供 REST API 用）。ack/status 不可覆蓋這裡，否則 /api/latest 會失去
 // 「即時姿態」語意。
 let lastTelemetry = null;
+let lastTelemetryAt = 0;
 let lastLine = null;
 
 // ===== Phase 0 系統辨識：資料記錄器 =====
@@ -49,6 +51,112 @@ let recStream = null;
 let recPath = null;
 let recCount = 0;
 let recT0 = 0;
+let recOwner = null;
+
+// UI/session ownership gate. Manual pose controls and program sessions share the
+// same WebSocket transport, so the server owns the final arbitration. A future
+// workspace runner will start a session, send commands with the returned token,
+// and finish/abort the session when safe landing is complete.
+let activeSession = null;
+let sessionEvents = [];
+let sessionSeq = 0;
+
+function makeSessionToken() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function publicSessionState() {
+  return activeSession
+    ? {
+        active: true,
+        owner: activeSession.owner,
+        label: activeSession.label,
+        phase: activeSession.phase,
+        startedAt: activeSession.startedAt,
+        program: activeSession.program || null,
+        condition: activeSession.condition || null,
+      }
+    : { active: false, owner: 'manual', phase: 'idle' };
+}
+
+function broadcastSessionState() {
+  broadcast(JSON.stringify({ evt: 'session', ...publicSessionState() }));
+}
+
+function pushSessionEvent(type, detail = {}) {
+  const event = {
+    seq: ++sessionSeq,
+    at: new Date().toISOString(),
+    type,
+    session: publicSessionState(),
+    ...detail,
+  };
+  sessionEvents.push(event);
+  if (sessionEvents.length > 400) sessionEvents = sessionEvents.slice(-400);
+  broadcast(JSON.stringify({ evt: 'session_event', event }));
+  return event;
+}
+
+function publicRecOwner(owner = recOwner) {
+  if (!owner) return null;
+  return {
+    type: owner.type || 'manual',
+    label: owner.label || null,
+    startedAt: owner.startedAt || null,
+    program: owner.program || null,
+    condition: owner.condition || null,
+  };
+}
+
+function sanitizeProgramMeta(program) {
+  if (!program || typeof program !== 'object') return null;
+  const id = typeof program.id === 'string' ? program.id.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80) : '';
+  if (!id) return null;
+  return {
+    id,
+    name: typeof program.name === 'string' ? program.name.slice(0, 120) : id,
+    hash: typeof program.hash === 'string' ? program.hash.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 40) : null,
+    blocks: Number.isFinite(Number(program.blocks)) ? Number(program.blocks) : null,
+    durationS: Number.isFinite(Number(program.durationS)) ? Number(program.durationS) : null,
+    draft: program.draft === true,
+  };
+}
+
+function sanitizeConditionMeta(condition) {
+  if (!condition || typeof condition !== 'object') return null;
+  const out = {};
+  for (const [key, value] of Object.entries(condition)) {
+    const safeKey = key.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 48);
+    if (!safeKey) continue;
+    if (typeof value === 'number' && Number.isFinite(value)) out[safeKey] = value;
+    else if (typeof value === 'boolean') out[safeKey] = value;
+    else if (typeof value === 'string') out[safeKey] = value.slice(0, 120);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function publicRecState() {
+  return { recording: !!recStream, path: recPath, lines: recCount, owner: publicRecOwner() };
+}
+
+function movementCommand(cmd) {
+  const op = String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+  return [
+    'H', 'E', 'P', 'PF', 'FOLLOW',
+    'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
+    'L', 'AR', 'A', 'C', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
+    'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
+  ].includes(op);
+}
+
+function commandAllowed(cmd, token) {
+  if (!activeSession) return { ok: true };
+  const op = String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+  if (token && token === activeSession.token) return { ok: true };
+  if (op === 'D' || op === 'S') return { ok: true, emergency: true };
+  if (!movementCommand(cmd)) return { ok: true };
+  return { ok: false, reason: `session active: ${activeSession.label || activeSession.owner}` };
+}
 
 function recWrite(dir, payload) {
   if (!recStream) return;
@@ -56,8 +164,13 @@ function recWrite(dir, payload) {
   recCount++;
 }
 
-function recStart(name) {
-  if (recStream) recStop();
+function recEvent(type, payload = {}) {
+  if (!recStream) return;
+  recWrite('event', { type, ...payload });
+}
+
+function recStart(name, owner = null) {
+  if (recStream) throw new Error('recorder already running');
   fs.mkdirSync(REC_DIR, { recursive: true });
   const safe = (name || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -65,19 +178,75 @@ function recStart(name) {
   recStream = fs.createWriteStream(recPath);
   recT0 = performance.now();
   recCount = 0;
+  recOwner = owner ? { ...owner, startedAt: new Date().toISOString() } : null;
   // 第一行寫 meta（牆鐘時間 + 標籤），方便事後辨識
-  recStream.write(JSON.stringify({ meta: { name: safe, wallClock: new Date().toISOString(), baud: BAUD } }) + '\n');
+  recStream.write(JSON.stringify({ meta: { name: safe, wallClock: new Date().toISOString(), baud: BAUD, owner: publicRecOwner() } }) + '\n');
   console.log(`[Rec] started: ${recPath}`);
   return recPath;
 }
 
 function recStop() {
   if (!recStream) return null;
-  const p = recPath, n = recCount;
-  recStream.end();
+  const p = recPath, n = recCount, owner = publicRecOwner(), stream = recStream;
   recStream = null;
-  console.log(`[Rec] stopped: ${p} (${n} lines)`);
-  return { path: p, lines: n };
+  recOwner = null;
+  return new Promise((resolve, reject) => {
+    stream.once('error', reject);
+    stream.end(() => {
+      console.log(`[Rec] stopped: ${p} (${n} lines)`);
+      resolve({ path: p, lines: n, owner });
+    });
+  });
+}
+
+function runSysidNode(script, args) {
+  return execFileSync(process.execPath, [path.join(__dirname, 'sysid', script), ...args], {
+    cwd: __dirname,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2));
+}
+
+function createRecordingArtifacts(recordingPath, { session = null, program = null, condition = null } = {}) {
+  if (!recordingPath || !fs.existsSync(recordingPath)) return null;
+  const stem = recordingPath.replace(/\.jsonl$/, '');
+  const manifestPath = `${stem}.manifest.json`;
+  const summaryPath = `${stem}.summary.json`;
+  const stabilityPath = `${stem}.stability.json`;
+  const bundlePath = `${stem}.bundle.json`;
+  const existingManifest = safeReadJson(manifestPath);
+  const manifest = {
+    name: path.basename(stem),
+    wallClock: new Date().toISOString(),
+    kind: 'workspace-session',
+    program: program || existingManifest?.program || null,
+    session: session || existingManifest?.session || null,
+    condition: sanitizeConditionMeta(condition) || existingManifest?.condition || null,
+    platformConfig: (() => {
+      try { return PlatformSoT.mergeConfig(loadPlatformConfig()); } catch { return null; }
+    })(),
+  };
+  writeJson(manifestPath, manifest);
+
+  const summary = JSON.parse(runSysidNode('telemetry_summary.js', [recordingPath]));
+  writeJson(summaryPath, summary);
+  const plot = JSON.parse(runSysidNode('plot_motion6.js', [recordingPath, '--out-dir', path.join(REC_DIR, 'plots')]));
+  const stability = JSON.parse(runSysidNode('stability_score.js', [recordingPath]));
+  writeJson(stabilityPath, stability);
+  const bundle = { recording: recordingPath, manifest: manifestPath, summary: summaryPath, stability: stabilityPath, plot };
+  writeJson(bundlePath, bundle);
+  return { manifest: manifestPath, summary: summaryPath, stability: stabilityPath, bundle: bundlePath, plot };
+}
+
+function analyzeRun(id, opts = {}) {
+  const file = findRunJsonl(id);
+  if (!file) return null;
+  return createRecordingArtifacts(file, opts);
 }
 
 function finitePose(p) {
@@ -164,6 +333,20 @@ function dataFileFromRel(rel) {
   return roots.some((root) => p === root || p.startsWith(root + path.sep)) ? p : null;
 }
 
+function latestTelemetryBody() {
+  if (!lastTelemetry) return '{}';
+  try {
+    const d = JSON.parse(lastTelemetry);
+    d._server = {
+      receivedAt: lastTelemetryAt || null,
+      telemetryAgeMs: lastTelemetryAt ? Date.now() - lastTelemetryAt : null,
+    };
+    return JSON.stringify(d);
+  } catch {
+    return lastTelemetry;
+  }
+}
+
 function runIdFromJsonl(file) {
   return path.basename(file, '.jsonl');
 }
@@ -210,8 +393,12 @@ function collectRuns() {
     const summary = safeReadJson(`${stem}.summary.json`);
     const stability = safeReadJson(`${stem}.stability.json`);
     const bundle = safeReadJson(`${stem}.bundle.json`);
-    const manifest = bundle?.manifest ? safeReadJson(bundle.manifest) : null;
+    const directManifest = `${stem}.manifest.json`;
+    const manifest = fs.existsSync(directManifest)
+      ? safeReadJson(directManifest)
+      : (bundle?.manifest ? safeReadJson(bundle.manifest) : null);
     const meta = summarizeJsonlMeta(file);
+    const program = meta.meta?.owner?.program || manifest?.program || null;
     const plotBase = path.basename(stem);
     const planePlot = bundle?.plot?.planeOut || path.join(REC_DIR, 'plots', `${plotBase}_plane6.svg`);
     const motorPlot = bundle?.plot?.motorOut || path.join(REC_DIR, 'plots', `${plotBase}_motor6.svg`);
@@ -226,7 +413,8 @@ function collectRuns() {
       cmdCount: meta.cmdCount,
       score: stability?.score?.stability ?? null,
       profile: manifest?.condition?.profile || (id.includes('z_sweep') ? 'z-sweep' : id.includes('heave-step') ? 'heave-step' : null),
-      condition: manifest?.condition || null,
+      program,
+      condition: manifest?.condition || meta.meta?.owner?.condition || null,
       health: {
         okFailFrac: summary?.encoders?.failFrac ?? null,
         canEfOr: summary?.canHealth?.efOr ?? stability?.quality?.can?.efOr ?? null,
@@ -237,7 +425,7 @@ function collectRuns() {
         recording: safeRelPath(file),
         summary: fs.existsSync(`${stem}.summary.json`) ? safeRelPath(`${stem}.summary.json`) : null,
         stability: fs.existsSync(`${stem}.stability.json`) ? safeRelPath(`${stem}.stability.json`) : null,
-        manifest: bundle?.manifest && fs.existsSync(bundle.manifest) ? safeRelPath(bundle.manifest) : null,
+        manifest: fs.existsSync(directManifest) ? safeRelPath(directManifest) : (bundle?.manifest && fs.existsSync(bundle.manifest) ? safeRelPath(bundle.manifest) : null),
         bundle: fs.existsSync(`${stem}.bundle.json`) ? safeRelPath(`${stem}.bundle.json`) : null,
         planePlot: fs.existsSync(planePlot) ? safeRelPath(planePlot) : null,
         motorPlot: fs.existsSync(motorPlot) ? safeRelPath(motorPlot) : null,
@@ -253,7 +441,10 @@ function loadRunDetail(id) {
   const summary = safeReadJson(`${stem}.summary.json`);
   const stability = safeReadJson(`${stem}.stability.json`);
   const bundle = safeReadJson(`${stem}.bundle.json`);
-  const manifest = bundle?.manifest ? safeReadJson(bundle.manifest) : null;
+  const directManifest = `${stem}.manifest.json`;
+  const manifest = fs.existsSync(directManifest)
+    ? safeReadJson(directManifest)
+    : (bundle?.manifest ? safeReadJson(bundle.manifest) : null);
   const commands = [];
   const samples = [];
   const rawRows = [];
@@ -296,6 +487,7 @@ function relatedRunFiles(id) {
   const bundle = safeReadJson(`${stem}.bundle.json`);
   const candidates = new Set([
     file,
+    `${stem}.manifest.json`,
     `${stem}.summary.json`,
     `${stem}.stability.json`,
     `${stem}.bundle.json`,
@@ -307,9 +499,15 @@ function relatedRunFiles(id) {
     path.join(REC_DIR, 'plots', `${path.basename(stem)}_plane6.svg`),
     path.join(REC_DIR, 'plots', `${path.basename(stem)}_motor6.svg`),
   ].filter(Boolean));
-  return [...candidates]
-    .map((x) => path.resolve(x))
-    .filter((x) => fs.existsSync(x) && !fs.statSync(x).isDirectory());
+  const out = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) out.push(resolved);
+  }
+  return out;
 }
 
 function moveRunFiles(id, bucket) {
@@ -323,6 +521,7 @@ function moveRunFiles(id, bucket) {
   fs.mkdirSync(destDir, { recursive: true });
   const moved = [];
   for (const file of files) {
+    if (!fs.existsSync(file)) continue;
     const dest = path.join(destDir, path.basename(file));
     fs.renameSync(file, dest);
     moved.push({ from: safeRelPath(file), to: safeRelPath(dest) });
@@ -340,12 +539,17 @@ const server = http.createServer((req, res) => {
   // REST: 最新資料
   if (req.url === '/api/latest') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(lastTelemetry || '{}');
+    res.end(latestTelemetryBody());
     return;
   }
   if (req.url === '/api/transport') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ...currentTransport, lastLineAt: lastLine ? lastLine.t : null }));
+    res.end(JSON.stringify({
+      ...currentTransport,
+      lastLineAt: lastLine ? lastLine.t : null,
+      lastTelemetryAt: lastTelemetryAt || null,
+      telemetryAgeMs: lastTelemetryAt ? Date.now() - lastTelemetryAt : null,
+    }));
     return;
   }
   if (req.url.split('?')[0] === '/api/transport/reconnect') {
@@ -378,6 +582,38 @@ const server = http.createServer((req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+  }
+  {
+    const urlPath = req.url.split('?')[0];
+    const m = urlPath.match(/^\/api\/runs\/([^/]+)\/analyze$/);
+    if (m && req.method === 'POST') {
+      readRequestBody(req).then((body) => {
+        let incoming = {};
+        try { incoming = JSON.parse(body || '{}'); } catch {}
+        const id = decodeURIComponent(m[1]);
+        try {
+          const artifacts = analyzeRun(id, {
+            session: incoming.session || null,
+            program: sanitizeProgramMeta(incoming.program) || null,
+            condition: sanitizeConditionMeta(incoming.condition) || null,
+          });
+          if (!artifacts) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'run not found' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ artifacts, detail: loadRunDetail(id) }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      }).catch((err) => {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      });
       return;
     }
   }
@@ -424,11 +660,17 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.url === '/api/platform-config' && req.method === 'POST') {
-    readRequestBody(req).then((body) => {
+    readRequestBody(req).then(async (body) => {
       const current = loadPlatformConfig();
       const incoming = JSON.parse(body || '{}');
-      if (finitePose(incoming.homePose)) incoming.homeRelative = absoluteToRelativePose(incoming.homePose);
-      if (finitePose(incoming.landingPose)) incoming.landingRelative = absoluteToRelativePose(incoming.landingPose);
+      const wantsHomeUpdate = finitePose(incoming.homePose);
+      const wantsLandingUpdate = finitePose(incoming.landingPose);
+      if (wantsHomeUpdate) incoming.homeRelative = absoluteToRelativePose(incoming.homePose);
+      else delete incoming.homeRelative;
+      if (wantsLandingUpdate) incoming.landingRelative = absoluteToRelativePose(incoming.landingPose);
+      else delete incoming.landingRelative;
+      delete incoming.homePose;
+      delete incoming.landingPose;
       const saved = savePlatformConfig({ ...current, ...incoming });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -470,21 +712,218 @@ const server = http.createServer((req, res) => {
 
   // 系統辨識記錄器控制
   if (req.url.startsWith('/api/rec/start')) {
-    const name = new URL(req.url, 'http://x').searchParams.get('name');
-    const p = recStart(name);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ recording: true, path: p }));
+    if (activeSession) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'session active; use /api/session/rec/start', session: publicSessionState(), recorder: publicRecState() }));
+      return;
+    }
+    try {
+      const name = new URL(req.url, 'http://x').searchParams.get('name');
+      const p = recStart(name, { type: 'manual', label: name || 'capture' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...publicRecState(), path: p }));
+    } catch (err) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, recorder: publicRecState() }));
+    }
     return;
   }
   if (req.url === '/api/rec/stop') {
-    const r = recStop();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ recording: false, ...(r || {}) }));
+    if (recOwner && recOwner.type === 'session') {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'recorder is owned by active session', recorder: publicRecState() }));
+      return;
+    }
+    Promise.resolve(recStop()).then((r) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ recording: false, ...(r || {}) }));
+    }).catch((err) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, recording: false }));
+    });
     return;
   }
   if (req.url === '/api/rec/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ recording: !!recStream, path: recPath, lines: recCount }));
+    res.end(JSON.stringify(publicRecState()));
+    return;
+  }
+
+  if (req.url === '/api/session/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(publicSessionState()));
+    return;
+  }
+  if (req.url === '/api/session/events') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ events: sessionEvents.slice(-120), session: publicSessionState() }));
+    return;
+  }
+  if (req.url === '/api/session/start' && req.method === 'POST') {
+    readRequestBody(req).then(async (body) => {
+      if (activeSession) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session already active', session: publicSessionState() }));
+        return;
+      }
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      activeSession = {
+        token: makeSessionToken(),
+        owner: 'session',
+        label: typeof incoming.label === 'string' ? incoming.label.slice(0, 80) : 'program',
+        phase: typeof incoming.phase === 'string' ? incoming.phase.slice(0, 40) : 'starting',
+        program: sanitizeProgramMeta(incoming.program),
+        condition: sanitizeConditionMeta(incoming.condition),
+        startedAt: new Date().toISOString(),
+      };
+      pushSessionEvent('session_start', { label: activeSession.label, phase: activeSession.phase, program: activeSession.program, condition: activeSession.condition });
+      broadcastSessionState();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...publicSessionState(), token: activeSession.token }));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+  if (req.url === '/api/session/phase' && req.method === 'POST') {
+    readRequestBody(req).then((body) => {
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      if (!activeSession) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no active session', session: publicSessionState() }));
+        return;
+      }
+      if (incoming.token !== activeSession.token) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad session token', session: publicSessionState() }));
+        return;
+      }
+      activeSession.phase = typeof incoming.phase === 'string' ? incoming.phase.slice(0, 40) : activeSession.phase;
+      pushSessionEvent('phase', { phase: activeSession.phase });
+      recEvent('session_phase', { phase: activeSession.phase });
+      broadcastSessionState();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(publicSessionState()));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+  if (req.url === '/api/session/rec/start' && req.method === 'POST') {
+    readRequestBody(req).then((body) => {
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      if (!activeSession) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no active session', session: publicSessionState(), recorder: publicRecState() }));
+        return;
+      }
+      if (incoming.token !== activeSession.token) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad session token', session: publicSessionState(), recorder: publicRecState() }));
+        return;
+      }
+      try {
+        const label = typeof incoming.name === 'string' ? incoming.name.slice(0, 80) : activeSession.label;
+        const p = recStart(label, { type: 'session', label: activeSession.label, token: activeSession.token, program: activeSession.program, condition: activeSession.condition });
+        pushSessionEvent('rec_start', { path: safeRelPath(p), recorder: publicRecState() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(publicRecState()));
+      } catch (err) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message, recorder: publicRecState() }));
+      }
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+  if (req.url === '/api/session/rec/stop' && req.method === 'POST') {
+    readRequestBody(req).then(async (body) => {
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      if (!activeSession) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no active session', session: publicSessionState(), recorder: publicRecState() }));
+        return;
+      }
+      if (incoming.token !== activeSession.token) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad session token', session: publicSessionState(), recorder: publicRecState() }));
+        return;
+      }
+      if (recOwner && recOwner.type === 'session' && recOwner.token !== activeSession.token) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'recorder belongs to another session', recorder: publicRecState() }));
+        return;
+      }
+      const stopped = await recStop();
+      let artifacts = null;
+      let artifactError = null;
+      if (incoming.analyze !== false) {
+        try {
+          artifacts = stopped?.path ? createRecordingArtifacts(stopped.path, { session: publicSessionState(), program: activeSession.program || null, condition: activeSession.condition || null }) : null;
+        } catch (err) {
+          artifactError = err.message;
+        }
+      }
+      pushSessionEvent('rec_stop', { recorder: stopped, artifacts, artifactError });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ recording: false, ...(stopped || {}), artifacts, artifactError }));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+  if ((req.url === '/api/session/finish' || req.url === '/api/session/abort') && req.method === 'POST') {
+    readRequestBody(req).then(async (body) => {
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      if (!activeSession) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(publicSessionState()));
+        return;
+      }
+      const abortReq = req.url === '/api/session/abort';
+      const emergencyAbort = abortReq && incoming.emergency === true;
+      if (!emergencyAbort && incoming.token !== activeSession.token) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad session token', session: publicSessionState() }));
+        return;
+      }
+      const endedSession = publicSessionState();
+      let stopped = null;
+      let artifacts = null;
+      let artifactError = null;
+      if (recOwner && recOwner.type === 'session' && (!recOwner.token || recOwner.token === activeSession.token)) {
+        stopped = await recStop();
+        try {
+          artifacts = stopped?.path ? createRecordingArtifacts(stopped.path, { session: endedSession, program: activeSession.program || null, condition: activeSession.condition || null }) : null;
+        } catch (err) {
+          artifactError = err.message;
+        }
+      }
+      activeSession = null;
+      pushSessionEvent(abortReq ? (emergencyAbort ? 'session_emergency_abort' : 'session_abort') : 'session_finish', {
+        reason: incoming.reason || null,
+        session: { ...endedSession, active: false, endedAt: new Date().toISOString() },
+        recorder: stopped,
+        artifacts,
+        artifactError,
+      });
+      broadcastSessionState();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(publicSessionState()));
+    }).catch((err) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    });
     return;
   }
 
@@ -548,18 +987,38 @@ wss.on('connection', (ws, req) => {
   // 立即送出最新資料 + 當前傳輸鏈狀態（新 client 不必等下次切換才知道走哪條路）
   if (lastTelemetry) ws.send(lastTelemetry);
   ws.send(JSON.stringify({ evt: 'transport', ...currentTransport }));
+  ws.send(JSON.stringify({ evt: 'session', ...publicSessionState() }));
 
   ws.on('message', (msg) => {
-    const cmd = msg.toString().trim();
+    const raw = msg.toString().trim();
+    let cmd = raw;
+    let sessionToken = null;
+    if (raw.startsWith('{')) {
+      try {
+        const d = JSON.parse(raw);
+        if (typeof d.cmd === 'string') cmd = d.cmd.trim();
+        if (typeof d.sessionToken === 'string') sessionToken = d.sessionToken;
+      } catch {}
+    }
     if (!cmd) return;
+    const gate = commandAllowed(cmd, sessionToken);
+    if (!gate.ok) {
+      console.warn(`[WS] blocked cmd (${gate.reason}): ${cmd}`);
+      pushSessionEvent('command_blocked', { cmd, reason: gate.reason, transport: currentTransport });
+      recWrite('drop', { cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() });
+      broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() }));
+      return;
+    }
     console.log(`[WS] cmd: ${cmd}`);
     const wr = transport.write(cmd);     // '\n' 由 transport 內部補；未連線則明確回 dropped
     if (wr.ok) {
+      if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_sent', { cmd, via: wr.kind });
       recWrite('cmd', cmd);
       // echo 給所有 client（含其他來源）→ 操作對等可見，monitor 用此唯一來源畫指令標記
       broadcast(JSON.stringify({ evt: 'cmd', c: cmd, via: wr.kind }));
     } else {
       console.warn(`[WS] dropped cmd (${wr.reason}): ${cmd}`);
+      if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_dropped', { cmd, reason: wr.reason, transport: currentTransport });
       recWrite('drop', { cmd, reason: wr.reason, transport: currentTransport });
       broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: wr.reason, transport: currentTransport }));
     }
@@ -580,7 +1039,10 @@ function onLine(line) {
   lastLine = { t: Date.now(), line };
   try {
     const d = JSON.parse(line);
-    if (d && Array.isArray(d.a)) lastTelemetry = line;
+    if (d && Array.isArray(d.a)) {
+      lastTelemetry = line;
+      lastTelemetryAt = Date.now();
+    }
   } catch {}
   recWrite('in', line);
   broadcast(line);

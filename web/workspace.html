@@ -1,0 +1,1522 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>Stewart Workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/app-ui.css">
+<style>
+body { min-height: 100vh; overflow: hidden; }
+.workspace-shell {
+  height: calc(100vh - 48px);
+  display: grid;
+  grid-template-columns: 320px minmax(360px, 1fr) 420px;
+  gap: 14px;
+  min-height: 0;
+}
+.rail,
+.stage,
+.inspector { min-height: 0; overflow: auto; }
+.stage { display: grid; grid-template-rows: minmax(260px, 1fr) auto; gap: 14px; }
+.sequence-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+.sequence-card .ui-card-head { min-height: 0; }
+.library-grid { display: grid; gap: 7px; }
+.library-section { display: grid; gap: 7px; }
+.library-section + .library-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--borderL); }
+.library-section-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--sub);
+}
+.rail-stack { display: grid; gap: 14px; }
+.program-list { display: grid; gap: 7px; }
+.program-card {
+  width: 100%;
+  border: 1px solid var(--borderBase);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.program-card.active { border-color: var(--dual); box-shadow: inset 3px 0 0 var(--dual); }
+.program-card b { display:block; font-family:var(--font-mono); font-size:12px; color:var(--ink); }
+.program-card span { display:block; margin-top:3px; font-family:var(--font-mono); font-size:10px; color:var(--sub); }
+.program-open {
+  min-width:0; text-align:left; padding:0; border:0; background:transparent; cursor:pointer;
+}
+.program-card .program-delete { padding: 3px 8px; line-height: 18px; }
+.program-editor { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; align-items:center; margin-top:6px; }
+.program-editor input {
+  width:100%;
+  border:1px solid var(--borderBase);
+  border-radius:4px;
+  padding:8px 10px;
+  background:var(--surface);
+  font-family:var(--font-mono);
+}
+.motion-card {
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--borderBase);
+  border-radius: 4px;
+  padding: 10px;
+  cursor: pointer;
+  display: block;
+}
+.motion-card.active { border-color: var(--contra); box-shadow: inset 3px 0 0 var(--contra); }
+.motion-card b { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+.motion-card span { display: block; margin-top: 2px; font-family: var(--font-mono); font-size: 10px; color: var(--sub); }
+.motion-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  display: block;
+  border: 1px solid var(--borderL);
+  border-radius: 3px;
+  background: var(--paper);
+}
+.motion-copy { display:block; min-width: 0; margin-top: 8px; }
+.param-list { display: grid; gap: 9px; }
+.param-row { display: grid; grid-template-columns: 64px minmax(0,1fr) 54px; gap: 8px; align-items: center; font-family: var(--font-mono); font-size: 11px; }
+.param-row output { text-align: right; color: var(--inkLight); font-variant-numeric: tabular-nums; }
+.sequence {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.sequence-step {
+  border: 1px solid var(--borderBase);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+}
+.sequence-step.fixed { border-left: 4px solid var(--sub); color: var(--inkLight); }
+.sequence-step.block {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border-left: 4px solid var(--contra);
+  cursor: pointer;
+}
+.sequence-step.block.active { border-color: var(--dual); box-shadow: inset 0 0 0 1px rgba(211,84,0,.16); }
+.step-index {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--borderL);
+  border-radius: 50%;
+  color: var(--sub);
+}
+.step-title { font-weight: 700; color: var(--ink); }
+.step-meta { margin-top: 2px; color: var(--sub); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-actions { display: flex; gap: 4px; }
+.mini-actions .chip { padding: 2px 7px; line-height: 18px; }
+.empty-flow {
+  border: 1px dashed var(--borderBase);
+  border-radius: 4px;
+  padding: 28px;
+  text-align: center;
+  color: var(--sub);
+  font-family: var(--font-mono);
+}
+.preview-card { position: relative; min-height: 260px; overflow: hidden; }
+#preview-3d { width: 100%; height: 100%; min-height: 360px; display: block; background: var(--paper); border-radius: 3px; }
+.preview-hud {
+  position: absolute;
+  left: 14px;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  pointer-events: none;
+}
+.status-pill {
+  border: 1px solid var(--borderBase);
+  border-radius: 999px;
+  background: rgba(252,251,250,.9);
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--sub);
+}
+.status-pill.good { color: var(--contra); border-color: var(--contra); }
+.status-pill.warn { color: var(--dual); border-color: var(--dual); }
+.status-pill.bad { color: var(--dev); border-color: var(--dev); }
+.timeline { border: 1px solid var(--borderL); background: var(--bg); border-radius: 4px; padding: 10px; font-family: var(--font-mono); }
+.timeline-top { display: flex; justify-content: space-between; color: var(--sub); font-size: 10px; margin-bottom: 8px; }
+.timeline-bar { position: relative; height: 10px; border-radius: 999px; background: #e9e4da; overflow: hidden; }
+.timeline-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: linear-gradient(90deg, var(--contra), var(--accent)); }
+.run-panel { display: grid; gap: 12px; }
+.metric-row { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; }
+.metric { border: 1px solid var(--borderL); border-radius: 4px; padding: 10px; font-family: var(--font-mono); }
+.metric b { display: block; font-size: 10px; color: var(--sub); text-transform: uppercase; letter-spacing: .08em; }
+.metric span { display: block; margin-top: 4px; color: var(--ink); font-size: 16px; }
+.target-list { display: grid; gap: 8px; }
+.target-row {
+  border: 1px solid var(--borderL);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 9px 10px;
+  font-family: var(--font-mono);
+}
+.target-row b { display: block; font-size: 10px; color: var(--sub); letter-spacing: .08em; }
+.target-row span { display: block; margin-top: 4px; color: var(--ink); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.session-events { display: grid; gap: 5px; max-height: 150px; overflow: auto; font-family: var(--font-mono); font-size: 10px; }
+.event-row { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 8px; color: var(--sub); }
+.event-row span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-list-mini { display:grid; gap:7px; max-height:220px; overflow:auto; }
+.run-card {
+  width:100%;
+  text-align:left;
+  border:1px solid var(--borderL);
+  border-radius:4px;
+  background:var(--surface);
+  padding:9px 10px;
+  font-family:var(--font-mono);
+  cursor:pointer;
+}
+.run-card.active { border-color:var(--contra); box-shadow:inset 3px 0 0 var(--contra); }
+.run-card b { display:block; color:var(--ink); font-size:11px; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.run-card span { display:block; margin-top:4px; color:var(--sub); font-size:10px; }
+.run-detail-mini { border:1px solid var(--borderL); border-radius:4px; padding:10px; font-family:var(--font-mono); color:var(--sub); font-size:10px; }
+.run-score { color:var(--contra); font-size:18px; font-weight:700; }
+.button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.button-row.three { grid-template-columns: 1fr 1fr 1fr; }
+.chip.primary { background: var(--contra); border-color: transparent; color: #fff; }
+.chip.primary:hover { background: #395b78; color: #fff; }
+@media (max-width: 1180px) {
+  body { overflow: auto; }
+  .workspace-shell { height: auto; grid-template-columns: 1fr; }
+  #preview-3d { min-height: 340px; }
+}
+</style>
+</head>
+<body>
+<div class="app-page">
+  <div class="app-top">
+    <div class="app-top-left">
+      <div class="app-title">Program Workspace</div>
+    </div>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a class="app-link" href="/">主控</a>
+      <a class="app-link active" href="/workspace.html">Workspace</a>
+      <a class="app-link" href="/research/runs.html">Runs</a>
+    </nav>
+    <div class="app-top-left">
+      <span id="session-badge" class="status-pill">MANUAL</span>
+      <span id="transport-badge" class="status-pill">TRANSPORT</span>
+      <span id="ws-badge" class="status-pill bad">OFFLINE</span>
+    </div>
+  </div>
+
+  <main class="workspace-shell">
+    <section class="rail rail-stack">
+      <div class="ui-card">
+        <div class="ui-card-title">閉環 Programs</div>
+        <div id="program-list" class="program-list"></div>
+      </div>
+      <div class="ui-card">
+        <div class="ui-card-title">動作庫</div>
+        <div id="motion-library" class="library-grid"></div>
+      </div>
+    </section>
+
+    <section class="stage">
+      <div class="ui-card flush sequence-card">
+        <div class="ui-card-head">
+          <div>
+            <div class="dev-label">流程</div>
+            <div class="app-title" style="letter-spacing:.08em">TAKE OFF → BLOCKS → CLOSE → LAND</div>
+            <div class="program-editor">
+              <input id="program-name" value="Scratch" aria-label="Program name">
+              <button id="new-program-btn" class="chip">新建</button>
+              <button id="save-program-btn" class="chip">保存 Program</button>
+            </div>
+          </div>
+          <div class="button-row three" style="width:330px">
+            <button id="save-btn" class="chip">保存草稿</button>
+            <button id="preview-btn" class="chip">預覽</button>
+            <button id="run-btn" class="chip primary" disabled>Run</button>
+          </div>
+        </div>
+        <div class="sequence" id="sequence"></div>
+      </div>
+
+      <div class="ui-card preview-card">
+        <canvas id="preview-3d"></canvas>
+        <div class="preview-hud">
+          <span id="preview-status" class="status-pill">READY</span>
+          <span id="preview-pose" class="status-pill">HOME</span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="inspector">
+      <div class="ui-card">
+        <div class="ui-card-title">目前 Block</div>
+        <div class="param-list" id="param-list"></div>
+        <div style="height:10px"></div>
+        <div class="param-row">
+          <span>圈數</span>
+          <input id="loops" type="number" min="1" max="999" value="1">
+          <output id="loops-v">1</output>
+        </div>
+        <div class="button-row" style="margin-top:12px">
+          <button id="preview-block-btn" class="chip">預覽 Block</button>
+          <button id="add-btn" class="chip primary">加入流程</button>
+        </div>
+      </div>
+
+      <div class="ui-card" style="margin-top:14px">
+        <div class="ui-card-title">Session</div>
+        <div class="metric-row">
+          <div class="metric"><b>blocks</b><span id="m-blocks">0</span></div>
+          <div class="metric"><b>time</b><span id="m-time">0.0s</span></div>
+          <div class="metric"><b>loop</b><span id="m-loop">—</span></div>
+          <div class="metric"><b>ok</b><span id="m-ok">—</span></div>
+        </div>
+        <div class="timeline" style="margin-top:12px">
+          <div class="timeline-top"><strong id="clock">00.0 / 00.0s</strong><span id="phase">ready</span></div>
+          <div class="timeline-bar"><div class="timeline-fill" id="timeline-fill"></div></div>
+        </div>
+        <div class="button-row" style="margin-top:12px">
+          <button id="abort-btn" class="chip danger" style="display:none">Abort</button>
+          <button id="reload-btn" class="chip">重載設定</button>
+        </div>
+        <div id="run-status" class="dev-label" style="margin-top:10px;text-transform:none;letter-spacing:0">ready</div>
+      </div>
+
+      <div class="ui-card" style="margin-top:14px">
+        <div class="ui-card-title">姿態目標</div>
+        <div class="target-list">
+          <div class="target-row"><b>HOME</b><span id="target-home">—</span></div>
+          <div class="target-row"><b>RELEASE</b><span id="target-release">—</span></div>
+        </div>
+        <div class="button-row" style="margin-top:12px">
+          <button id="save-current-home-btn" class="chip target-save">存目前為 HOME</button>
+          <button id="save-current-release-btn" class="chip target-save">存目前為 RELEASE</button>
+        </div>
+        <div class="dev-label" id="target-status" style="margin-top:10px;text-transform:none;letter-spacing:0">只保存設定，不送動作指令。</div>
+      </div>
+
+      <div class="ui-card" style="margin-top:14px">
+        <div class="ui-card-title">Runs / Results</div>
+        <div class="metric-row">
+          <div class="metric"><b>runs</b><span id="r-count">0</span></div>
+          <div class="metric"><b>best</b><span id="r-best">—</span></div>
+          <div class="metric"><b>latest</b><span id="r-latest">—</span></div>
+          <div class="metric"><b>scope</b><span id="r-scope">all</span></div>
+        </div>
+        <div id="run-list-mini" class="run-list-mini" style="margin-top:12px"></div>
+        <div id="run-detail-mini" class="run-detail-mini" style="margin-top:10px">選一筆 run 看分數與資料。</div>
+      </div>
+
+      <div class="ui-card" style="margin-top:14px">
+        <div class="ui-card-title">事件</div>
+        <div id="events" class="session-events">
+          <div class="event-row"><b>--:--</b><span>waiting for session events</span></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script src="/sysid/kin.js"></script>
+<script src="/sysid/platform_sot.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  StewartStyle,
+  createStewartModel,
+  computeActuatorPoints,
+  platformPointsFromPose,
+  createStewartRig,
+  createGhostRig,
+} from '/shared/stewart-renderer.js';
+import {
+  MOTIONS,
+  MOTION_HZ,
+  clampLoops,
+  formatMotionParams,
+  motionDefaults,
+  motionParams,
+  motionPeriod,
+  motionPoseAt,
+  smoothstep,
+} from '/shared/motion-library.js';
+import {
+  blockMeta,
+  closedLoopAudit,
+  motionById,
+  normalizeBlocks,
+  normalizePrograms,
+  programDuration,
+  programHash,
+  workspaceProgramMeta,
+  serializeBlocks,
+  serializePrograms,
+  slugifyProgramName,
+  totalSeconds as workspaceTotalSeconds,
+  workspacePreviewTimeline,
+} from '/shared/workspace-core.js';
+
+const Kin = window.Kin;
+const PlatformSoT = window.PlatformSoT;
+const { NEUTRAL_Z } = Kin;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const poseLine = (pose) => pose.map((x) => Number(x || 0).toFixed(3)).join(' ');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+let config = PlatformSoT.mergeConfig({});
+let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
+let landingPose = [0, 0, NEUTRAL_Z - 10, 0, 0, 34];
+let selectedId = 'helix';
+let draftParams = {};
+let blocks = [];
+let programs = [];
+let currentProgramId = 'scratch';
+let activeBlock = -1;
+let ws = null;
+let wsConnected = false;
+let liveTelemetry = null;
+let liveTelemetryAt = 0;
+let actualPose = null;
+let followActive = false;
+let sessionState = { active: false, phase: 'idle', label: '' };
+let sessionEvents = [];
+let runs = [];
+let selectedRunId = null;
+let runner = { active: false, preview: false, abort: false, token: null, recording: false };
+let motionThumbRaf = null;
+const motionThumbs = new Map();
+let motionThumbRenderer = null;
+let motionThumbScene = null;
+let motionThumbCamera = null;
+let motionThumbRig = null;
+let motionThumbTrace = null;
+
+const el = (id) => document.getElementById(id);
+const motionLib = { clampLoops, formatMotionParams, motionDefaults, motionParams, motionPeriod, motionPoseAt, smoothstep };
+const selectedDef = () => motionById(MOTIONS, selectedId) || MOTIONS[0];
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(StewartStyle.scene.lightBg);
+const canvas = el('preview-3d');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+const camera = new THREE.PerspectiveCamera(50, 1, 1, 2000);
+camera.up.set(0, 0, 1);
+camera.position.set(300, -300, 250);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 0, 60);
+controls.enableDamping = true;
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const light = new THREE.DirectionalLight(0xffffff, 0.6);
+light.position.set(200, -200, 300);
+scene.add(light);
+const grid = new THREE.GridHelper(400, 20, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+const model = createStewartModel(Kin);
+const actualRig = createStewartRig(scene, model, { labels: false });
+const ghostRig = createGhostRig(scene, model);
+const ghostMat = ghostRig.lineMaterial;
+const ghostPlatMesh = ghostRig.plateMesh;
+
+function fitCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, Math.floor(rect.width));
+  const h = Math.max(1, Math.floor(rect.height));
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+}
+new ResizeObserver(fitCanvas).observe(canvas);
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+function poseLabel(prefix, pose) {
+  return `${prefix} X ${pose[0].toFixed(0)} Y ${pose[1].toFixed(0)} Z ${(pose[2] - NEUTRAL_Z).toFixed(0)}`;
+}
+
+function rigPointsFromPose(pose) {
+  const ik = Kin.ik(pose);
+  const A = computeActuatorPoints(ik.angles, model);
+  const Q = platformPointsFromPose(pose, model);
+  return { ik, A, Q };
+}
+
+function setActualPose(pose, status = 'ACTUAL') {
+  actualPose = [...pose];
+  const { ik, A, Q } = rigPointsFromPose(actualPose);
+  actualRig.platformMesh.material.color.setHex(ik.valid ? StewartStyle.colors.platformPlate : StewartStyle.colors.baseJoint);
+  actualRig.updateFromPoints(A, Q);
+  if (!runner.active) el('preview-pose').textContent = poseLabel(status, actualPose);
+}
+
+function setActualFromAngles(angles) {
+  const r = Kin.solveFK(angles);
+  actualPose = [...r.pose];
+  const A = computeActuatorPoints(angles, model);
+  const Q = platformPointsFromPose(actualPose, model);
+  actualRig.platformMesh.material.color.setHex(r.converged ? StewartStyle.colors.platformPlate : StewartStyle.colors.baseJoint);
+  actualRig.updateFromPoints(A, Q);
+  if (!runner.active) el('preview-pose').textContent = poseLabel(r.converged ? 'ACTUAL' : 'FK?', actualPose);
+}
+
+function setGhostPose(pose, ok = true, label = 'GHOST') {
+  const { ik, A, Q } = rigPointsFromPose(pose);
+  const color = ok && ik.valid ? StewartStyle.colors.ghost : StewartStyle.colors.baseJoint;
+  if (ghostMat) ghostMat.color.setHex(color);
+  if (ghostPlatMesh) ghostPlatMesh.material.color.setHex(color);
+  ghostRig.updateFromPoints(A, Q);
+  el('preview-pose').textContent = poseLabel(label, pose);
+}
+
+function hideGhost() {
+  ghostRig.hide();
+}
+
+async function json(path, body = null) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${path} failed`);
+  return data;
+}
+
+function loadDraftFromConfig() {
+  selectedId = config.uiState?.motion?.selectedId || selectedId;
+  if (!MOTIONS.some((m) => m.id === selectedId)) selectedId = MOTIONS[0].id;
+  const def = selectedDef();
+  draftParams = { ...motionDefaults(def), ...(config.uiState?.motion?.paramsById?.[def.id] || {}) };
+  el('loops').value = clampLoops(config.uiState?.motion?.loops || 1);
+  programs = normalizePrograms(config, MOTIONS, motionLib);
+  currentProgramId = config.uiState?.workspace?.currentProgramId || 'scratch';
+  blocks = normalizeBlocks(config, MOTIONS, motionLib);
+  const current = currentProgram();
+  el('program-name').value = current ? current.name : 'Scratch';
+}
+
+function currentProgram() {
+  return programs.find((p) => p.id === currentProgramId) || null;
+}
+
+function programName() {
+  return (el('program-name')?.value || currentProgram()?.name || 'Scratch').trim() || 'Scratch';
+}
+
+function upsertCurrentProgram() {
+  const now = new Date().toISOString();
+  const name = programName();
+  let id = currentProgramId;
+  let existing = programs.find((p) => p.id === id);
+  if (!existing || id === 'scratch') {
+    id = `${slugifyProgramName(name)}_${Date.now().toString(36)}`;
+    existing = { id, createdAt: now };
+    programs.unshift(existing);
+  }
+  existing.id = id;
+  existing.name = name;
+  existing.notes = existing.notes || '';
+  existing.blocks = normalizeBlocks({ uiState: { workspace: { blocks } } }, MOTIONS, motionLib);
+  existing.hash = programHash(existing, motionLib);
+  existing.createdAt = existing.createdAt || now;
+  existing.updatedAt = now;
+  currentProgramId = id;
+  return existing;
+}
+
+function workspacePayload(extraWorkspace = {}) {
+  return {
+    blocks: serializeBlocks(blocks, motionLib),
+    currentProgramId,
+    programs: serializePrograms(programs, motionLib),
+    ...extraWorkspace,
+  };
+}
+
+function currentProgramMeta() {
+  const program = currentProgram();
+  return workspaceProgramMeta({
+    program,
+    blocks,
+    name: program ? program.name : 'Scratch Draft',
+    motions: MOTIONS,
+    motionLib,
+  });
+}
+
+async function loadConfig() {
+  config = PlatformSoT.mergeConfig(await json('/api/platform-config').catch(() => ({})));
+  homePose = PlatformSoT.relToAbs(config.homeRelative, NEUTRAL_Z);
+  landingPose = PlatformSoT.relToAbs(config.landingRelative, NEUTRAL_Z);
+  loadDraftFromConfig();
+  renderAll();
+}
+
+function relativePoseLabel(pose) {
+  const rel = PlatformSoT.absToRel(pose, NEUTRAL_Z);
+  return `[${rel.map((x) => Number(x || 0).toFixed(Math.abs(x) >= 10 ? 1 : 2)).join(', ')}]`;
+}
+
+function renderTargetPoses() {
+  const home = el('target-home');
+  const release = el('target-release');
+  if (home) home.textContent = relativePoseLabel(homePose);
+  if (release) release.textContent = relativePoseLabel(landingPose);
+}
+
+async function saveTargetPose(kind) {
+  if (runner.active) return;
+  const status = el('target-status');
+  try {
+    const pose = currentActualPose();
+    const body = kind === 'home'
+      ? { homePose: pose }
+      : { landingPose: pose };
+    config = PlatformSoT.mergeConfig(await json('/api/platform-config', body));
+    homePose = PlatformSoT.relToAbs(config.homeRelative, NEUTRAL_Z);
+    landingPose = PlatformSoT.relToAbs(config.landingRelative, NEUTRAL_Z);
+    renderTargetPoses();
+    if (status) {
+      status.textContent = `已存目前實際姿態為 ${kind === 'home' ? 'HOME' : 'RELEASE'} ${relativePoseLabel(pose)}`;
+      status.style.color = 'var(--contra)';
+    }
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message || '保存失敗';
+      status.style.color = 'var(--dev)';
+    }
+  }
+}
+
+async function saveConfig() {
+  const paramsById = { ...(config.uiState?.motion?.paramsById || {}) };
+  paramsById[selectedId] = { ...draftParams };
+  const body = {
+    uiState: {
+      ...(config.uiState || {}),
+      motion: { ...(config.uiState?.motion || {}), selectedId, loops: clampLoops(el('loops').value), paramsById },
+      workspace: workspacePayload(),
+    },
+  };
+  config = PlatformSoT.mergeConfig(await json('/api/platform-config', body));
+  programs = normalizePrograms(config, MOTIONS, motionLib);
+  currentProgramId = config.uiState?.workspace?.currentProgramId || currentProgramId;
+  setStatus('saved', 'good');
+  renderTargetPoses();
+  renderPrograms();
+  renderRuns();
+}
+
+async function saveProgram() {
+  const program = upsertCurrentProgram();
+  await saveConfig();
+  setStatus(`program saved · ${program.name}`, 'good');
+  renderAll();
+}
+
+async function newProgram() {
+  currentProgramId = 'scratch';
+  blocks = [];
+  activeBlock = -1;
+  el('program-name').value = 'New Program';
+  renderAll();
+  await saveConfig();
+}
+
+async function loadProgram(id) {
+  const program = programs.find((p) => p.id === id);
+  if (!program || runner.active) return;
+  currentProgramId = program.id;
+  blocks = normalizeBlocks({ uiState: { workspace: { blocks: program.blocks } } }, MOTIONS, motionLib);
+  el('program-name').value = program.name;
+  activeBlock = -1;
+  renderAll();
+  await saveConfig();
+}
+
+async function deleteProgram(id) {
+  const program = programs.find((p) => p.id === id);
+  if (!program || runner.active) return;
+  const count = runs.filter((run) => {
+    const p = run.program || {};
+    return p.id === program.id || (p.hash && program.hash && p.hash === program.hash);
+  }).length;
+  const suffix = count ? `\n\n${count} 筆既有 session 會保留，並在目前 UI 歸到「未歸類」。` : '';
+  if (!confirm(`刪除 Program「${program.name}」？${suffix}`)) return;
+  programs = programs.filter((p) => p.id !== id);
+  if (currentProgramId === id) {
+    currentProgramId = 'scratch';
+    el('program-name').value = 'Scratch';
+  }
+  await saveConfig();
+  setStatus(`program deleted · ${program.name}`, 'warn');
+  renderAll();
+}
+
+function setStatus(text, kind = '') {
+  const pill = el('preview-status');
+  pill.textContent = text;
+  pill.className = `status-pill ${kind}`;
+  el('run-status').textContent = text;
+  el('run-status').style.color = kind === 'bad' ? 'var(--dev)' : kind === 'warn' ? 'var(--dual)' : kind === 'good' ? 'var(--contra)' : 'var(--sub)';
+}
+
+function setTimeline(frac, t, per, label) {
+  el('timeline-fill').style.width = `${Math.max(0, Math.min(1, frac || 0)) * 100}%`;
+  el('clock').textContent = `${fmtSec(t)} / ${fmtSec(per)}s`;
+  el('phase').textContent = label || 'ready';
+}
+
+function fmtSec(s) {
+  if (!Number.isFinite(s)) return '00.0';
+  return s < 100 ? s.toFixed(1).padStart(4, '0') : String(Math.round(s));
+}
+
+function motionThumbSamples(def, params) {
+  const per = Math.max(0.1, motionPeriod(def, params));
+  const n = 90;
+  const samples = [];
+  for (let i = 0; i <= n; i++) {
+    const t = per * i / n;
+    const s = motionPoseAt(def, params, t, homePose, Kin);
+    const p = s.pose || homePose;
+    samples.push([Number(p[0] || 0), Number(p[1] || 0), Number(p[2] || homePose[2]), Number(p[3] || 0), Number(p[4] || 0), Number(p[5] || 0)]);
+  }
+  return { per, samples };
+}
+
+function fitThumb(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const w = Math.max(1, Math.round(rect.width || 260));
+  const h = Math.max(1, Math.round(rect.height || w));
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return { ctx, W: w, H: h, dpr };
+}
+
+function ensureMotionThumbRenderer(width, height) {
+  if (!motionThumbRenderer) {
+    motionThumbScene = new THREE.Scene();
+    motionThumbScene.background = new THREE.Color(StewartStyle.scene.lightBg);
+    motionThumbCamera = new THREE.PerspectiveCamera(50, 1, 1, 2000);
+    motionThumbCamera.up.set(0, 0, 1);
+    motionThumbCamera.position.set(300, -300, 250);
+    motionThumbCamera.lookAt(0, 0, 60);
+    motionThumbScene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const thumbLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    thumbLight.position.set(200, -200, 300);
+    motionThumbScene.add(thumbLight);
+    const thumbGrid = new THREE.GridHelper(400, 20, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor);
+    thumbGrid.rotation.x = Math.PI / 2;
+    motionThumbScene.add(thumbGrid);
+    motionThumbRig = createStewartRig(motionThumbScene, model, { labels: false });
+    const traceGeo = new THREE.BufferGeometry();
+    traceGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(3), 3));
+    motionThumbTrace = new THREE.Line(
+      traceGeo,
+      new THREE.LineBasicMaterial({ color: StewartStyle.colors.trace, transparent: true, opacity: 0.85 })
+    );
+    motionThumbScene.add(motionThumbTrace);
+    motionThumbRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    motionThumbRenderer.setPixelRatio(1);
+  }
+  motionThumbRenderer.setSize(width, height, false);
+  motionThumbCamera.aspect = width / Math.max(1, height);
+  motionThumbCamera.updateProjectionMatrix();
+}
+
+function updateMotionThumbTrace(samples) {
+  const points = new Float32Array(samples.length * 3);
+  samples.forEach((pose, i) => {
+    points[i * 3] = Number(pose[0] || 0);
+    points[i * 3 + 1] = Number(pose[1] || 0);
+    points[i * 3 + 2] = Number(pose[2] || homePose[2]);
+  });
+  const attr = motionThumbTrace.geometry.getAttribute('position');
+  if (!attr || attr.array.length !== points.length) {
+    motionThumbTrace.geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+  } else {
+    attr.array.set(points);
+    attr.needsUpdate = true;
+  }
+  motionThumbTrace.geometry.setDrawRange(0, samples.length);
+}
+
+function drawMotionThumb(item, now) {
+  const { canvas, samples, per, active } = item;
+  const { ctx, W, H, dpr } = fitThumb(canvas);
+  ensureMotionThumbRenderer(canvas.width, canvas.height);
+  const phasePer = per > 0 ? Math.min(per, 4) : 1;
+  const phase = phasePer > 0 ? ((now / 1000) % phasePer) / phasePer : 0;
+  const index = Math.min(samples.length - 1, Math.max(0, Math.round(phase * (samples.length - 1))));
+  const pose = samples[index] || homePose;
+  const ik = Kin.ik?.(pose);
+  const angles = ik?.angles || new Array(6).fill(90);
+  motionThumbRig.update(angles, pose);
+  updateMotionThumbTrace(samples);
+  motionThumbTrace.material.color.setHex(active ? StewartStyle.colors.trace : StewartStyle.colors.lowerLeg);
+  motionThumbTrace.material.opacity = active ? 0.9 : 0.62;
+  motionThumbRenderer.render(motionThumbScene, motionThumbCamera);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(motionThumbRenderer.domElement, 0, 0, canvas.width, canvas.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.fillStyle = '#7A756C';
+  ctx.fillText('3D TRACE', 10, H - 10);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function drawMotionThumbs(now = performance.now()) {
+  for (const item of motionThumbs.values()) drawMotionThumb(item, now);
+  motionThumbRaf = requestAnimationFrame(drawMotionThumbs);
+}
+
+function refreshMotionThumbs() {
+  motionThumbs.clear();
+  el('motion-library').querySelectorAll('.motion-thumb').forEach((canvas) => {
+    const def = motionById(MOTIONS, canvas.dataset.motion);
+    if (!def) return;
+    const params = { ...motionDefaults(def), ...(config.uiState?.motion?.paramsById?.[def.id] || {}) };
+    if (def.id === selectedId) Object.assign(params, draftParams);
+    const sampled = motionThumbSamples(def, params);
+    motionThumbs.set(def.id, {
+      canvas,
+      samples: sampled.samples,
+      per: sampled.per,
+      active: def.id === selectedId,
+    });
+  });
+  if (!motionThumbRaf) motionThumbRaf = requestAnimationFrame(drawMotionThumbs);
+}
+
+function workspaceDurationSeconds() {
+  return workspaceTotalSeconds(blocks, MOTIONS, motionLib);
+}
+
+function renderPrograms() {
+  const scratchActive = currentProgramId === 'scratch' || !currentProgram();
+  const scratchMeta = `${blocks.length} blocks · ${workspaceDurationSeconds().toFixed(1)}s · draft`;
+  const saved = programs.map((program) => {
+    const active = program.id === currentProgramId;
+    const dur = programDuration(program, MOTIONS, motionLib);
+    return `<div class="program-card ${active ? 'active' : ''}">
+      <button class="program-open" data-program="${esc(program.id)}">
+        <b>${esc(program.name)}</b>
+        <span>${program.blocks.length} blocks · ${fmtSec(dur)}s${program.updatedAt ? ' · ' + esc(new Date(program.updatedAt).toLocaleDateString()) : ''}</span>
+      </button>
+      <button class="chip danger program-delete" data-delete-program="${esc(program.id)}" title="刪除 Program">×</button>
+    </div>`;
+  }).join('');
+  el('program-list').innerHTML = `
+    <div class="program-card ${scratchActive ? 'active' : ''}">
+      <button class="program-open" data-program="scratch">
+        <b>Scratch Draft</b>
+        <span>${esc(scratchMeta)}</span>
+      </button>
+    </div>
+    ${saved || '<div class="empty-flow" style="padding:14px">保存 Program 後會出現在這裡</div>'}`;
+  el('program-list').querySelectorAll('[data-program]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.program === 'scratch') {
+        currentProgramId = 'scratch';
+        el('program-name').value = 'Scratch';
+        renderPrograms();
+        renderRuns();
+      } else {
+        loadProgram(btn.dataset.program);
+      }
+    });
+  });
+  el('program-list').querySelectorAll('[data-delete-program]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteProgram(btn.dataset.deleteProgram);
+    });
+  });
+}
+
+function renderLibrary() {
+  const groups = new Map();
+  for (const motion of MOTIONS) {
+    const key = motion.category || '其他';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(motion);
+  }
+  el('motion-library').innerHTML = [...groups.entries()].map(([category, motions]) => `
+    <div class="library-section">
+      <div class="library-section-title">${esc(category)}</div>
+      ${motions.map((m) => {
+        const params = {
+          ...motionDefaults(m),
+          ...(config.uiState?.motion?.paramsById?.[m.id] || {}),
+          ...(m.id === selectedId ? draftParams : {}),
+        };
+        return `<button class="motion-card ${m.id === selectedId ? 'active' : ''}" data-motion="${m.id}">
+          <canvas class="motion-thumb" data-motion="${m.id}" width="260" height="260" aria-hidden="true"></canvas>
+          <span class="motion-copy">
+            <b>${esc(m.label)}</b>
+            <span>${fmtSec(motionPeriod(m, params))}s · ${esc(formatMotionParams(m, params))}</span>
+          </span>
+        </button>`;
+      }).join('')}
+    </div>`).join('');
+  el('motion-library').querySelectorAll('.motion-card[data-motion]').forEach((btn) => {
+    btn.addEventListener('click', () => selectMotion(btn.dataset.motion));
+  });
+  refreshMotionThumbs();
+}
+
+function renderParams() {
+  const def = selectedDef();
+  draftParams = { ...motionDefaults(def), ...draftParams };
+  el('param-list').innerHTML = def.params.map((p) => {
+    const v = Number.isFinite(Number(draftParams[p.k])) ? draftParams[p.k] : p.def;
+    return `<label class="param-row">
+      <span>${esc(p.l)}</span>
+      <input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${v}" data-param="${p.k}">
+      <output id="param-${p.k}">${v}${esc(p.u)}</output>
+    </label>`;
+  }).join('');
+  el('param-list').querySelectorAll('[data-param]').forEach((input) => {
+    input.addEventListener('input', () => {
+      draftParams[input.dataset.param] = Number(input.value);
+      el(`param-${input.dataset.param}`).textContent = `${input.value}${selectedDef().params.find((p) => p.k === input.dataset.param)?.u || ''}`;
+      previewCurrentBlock();
+      renderLibrary();
+    });
+  });
+  el('loops-v').textContent = clampLoops(el('loops').value);
+}
+
+function renderSequence() {
+  const mid = blocks.length
+    ? blocks.map((block, i) => {
+      const def = motionById(MOTIONS, block.id);
+      return `<div class="sequence-step block ${i === activeBlock ? 'active' : ''}" data-block="${i}">
+        <div class="step-index">${i + 1}</div>
+        <div>
+          <div class="step-title">${esc(def.label)}</div>
+          <div class="step-meta">${esc(blockMeta(block, MOTIONS, motionLib))}</div>
+        </div>
+        <div class="mini-actions">
+          <button class="chip" data-act="up" data-i="${i}">↑</button>
+          <button class="chip" data-act="down" data-i="${i}">↓</button>
+          <button class="chip danger" data-act="delete" data-i="${i}">×</button>
+        </div>
+      </div>`;
+    }).join('')
+    : '<div class="empty-flow">從左邊選動作，調好參數後加入流程</div>';
+  el('sequence').innerHTML = `
+    <div class="sequence-step fixed"><b>TAKE OFF</b><div class="step-meta">HOLD → HOME → FOLLOW · not recorded</div></div>
+    ${mid}
+    <div class="sequence-step fixed"><b>CLOSE LOOP</b><div class="step-meta">return HOME → stop recording</div></div>
+    <div class="sequence-step fixed"><b>LAND</b><div class="step-meta">FOLLOW OFF → configured LANDING</div></div>`;
+  el('sequence').querySelectorAll('[data-block]').forEach((row) => {
+    row.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
+      editBlock(Number(row.dataset.block));
+    });
+  });
+  el('sequence').querySelectorAll('[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => blockAction(btn.dataset.act, Number(btn.dataset.i)));
+  });
+}
+
+function renderMetrics() {
+  const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
+  el('m-blocks').textContent = blocks.length;
+  el('m-time').textContent = `${workspaceDurationSeconds().toFixed(1)}s`;
+  el('m-loop').textContent = audit.ok ? (blocks.length ? 'PASS' : 'SMOKE') : 'FAIL';
+  el('m-loop').style.color = audit.ok ? (blocks.length ? 'var(--contra)' : 'var(--dual)') : 'var(--dev)';
+  el('m-ok').textContent = liveTelemetry ? String(liveTelemetry.ok ?? '—') : '—';
+  if (!audit.ok && blocks.length) setStatus(audit.issues[0], 'bad');
+}
+
+function runScoreClass(score) {
+  const n = Number(score);
+  if (!Number.isFinite(n)) return '';
+  return n >= 70 ? 'good' : n >= 45 ? 'warn' : 'bad';
+}
+
+function fmtMaybe(value, digits = 1) {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : '—';
+}
+
+function activeProgramMeta() {
+  return currentProgramMeta();
+}
+
+function savedProgramForMeta(meta) {
+  if (!meta) return null;
+  return programs.find((program) =>
+    (meta.id && program.id === meta.id) ||
+    (meta.hash && program.hash && program.hash === meta.hash)
+  ) || null;
+}
+
+function runProgramMeta(run) {
+  if (run.program) {
+    if (run.program.draft) return run.program;
+    const program = savedProgramForMeta(run.program);
+    return program ? {
+      id: program.id,
+      name: program.name,
+      hash: program.hash,
+      blocks: program.blocks?.length ?? run.program.blocks ?? null,
+      durationS: programDuration(program, MOTIONS, motionLib),
+      draft: false,
+    } : null;
+  }
+  const label = `${run.id || ''} ${run.name || ''}`;
+  const scratchHash = label.match(/\bscratch[_-]([a-f0-9]{8})[_-]workspace/i)?.[1];
+  if (scratchHash) return { id: `scratch_${scratchHash}`, name: 'Scratch Draft', hash: scratchHash, draft: true };
+  if (/scratch[_-]workspace/i.test(label)) return activeProgramMeta();
+  return null;
+}
+
+function runMatchesCurrentProgram(run) {
+  const program = activeProgramMeta();
+  const runProgram = runProgramMeta(run);
+  if (!runProgram) return false;
+  if (runProgram?.id && runProgram.id === program.id) return true;
+  if (runProgram?.hash && program.hash && runProgram.hash === program.hash) return true;
+  const hay = `${run.id || ''} ${run.name || ''} ${run.profile || ''}`.toLowerCase();
+  return hay.includes(program.id.toLowerCase()) || hay.includes(slugifyProgramName(program.name));
+}
+
+function scopedRuns() {
+  const matched = runs.filter(runMatchesCurrentProgram);
+  return matched.length ? matched : runs;
+}
+
+function renderRuns() {
+  const list = scopedRuns();
+  const best = list
+    .filter((r) => Number.isFinite(Number(r.score)))
+    .sort((a, b) => Number(b.score) - Number(a.score))[0] || null;
+  const latest = list[0] || null;
+  el('r-count').textContent = list.length;
+  el('r-best').textContent = best ? Number(best.score).toFixed(1) : '—';
+  el('r-latest').textContent = latest ? fmtSec(latest.durationS || 0) + 's' : '—';
+  el('r-scope').textContent = 'program';
+  el('r-best').style.color = best ? `var(--${runScoreClass(best.score) === 'good' ? 'contra' : runScoreClass(best.score) === 'warn' ? 'dual' : 'dev'})` : '';
+  const rows = list.slice(0, 8);
+  el('run-list-mini').innerHTML = rows.length ? rows.map((run) => `
+    <button class="run-card ${selectedRunId === run.id ? 'active' : ''}" data-run="${esc(run.id)}">
+      <b>${esc(run.name || run.id)}</b>
+      <span>score ${Number.isFinite(Number(run.score)) ? Number(run.score).toFixed(1) : '—'} · ${fmtSec(run.durationS || 0)}s · ${run.samples || 0} samples</span>
+    </button>`).join('') : '<div class="empty-flow" style="padding:14px">還沒有 recorded runs</div>';
+  el('run-list-mini').querySelectorAll('[data-run]').forEach((btn) => {
+    btn.addEventListener('click', () => selectRun(btn.dataset.run));
+  });
+}
+
+async function loadRuns() {
+  const data = await json('/api/runs').catch(() => ({ runs: [] }));
+  runs = Array.isArray(data.runs) ? data.runs : [];
+  renderRuns();
+}
+
+async function selectRun(id) {
+  selectedRunId = id;
+  renderRuns();
+  const detail = await json(`/api/runs/${encodeURIComponent(id)}`).catch((err) => ({ error: err.message }));
+  if (detail.error) {
+    el('run-detail-mini').textContent = `讀取失敗：${detail.error}`;
+    return;
+  }
+  const run = detail.run || {};
+  const st = detail.stability || {};
+  const files = run.files || {};
+  const program = runProgramMeta(run);
+  el('run-detail-mini').innerHTML = `
+    <div><b>${esc(run.name || run.id || id)}</b></div>
+    <div class="run-score">score ${fmtMaybe(run.score, 2)}</div>
+    <div>program ${esc(program?.name || program?.id || '未歸類')} ${program?.hash ? '· ' + esc(program.hash) : ''}</div>
+    <div>tracking ${fmtMaybe(st.score?.trackingCost)} · cross ${fmtMaybe(st.score?.crossAxisCost)} · osc ${fmtMaybe(st.score?.oscillationCost)}</div>
+    <div>${run.samples || 0} samples · ${fmtSec(run.durationS || 0)}s · drop/s ${fmtMaybe(run.health?.rxDropPerS)}</div>
+    <div style="margin-top:7px">
+      ${files.recording ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.recording)}">jsonl</a>` : ''}
+      ${files.planePlot ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.planePlot)}">plane</a>` : ''}
+      ${files.motorPlot ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.motorPlot)}">motor</a>` : ''}
+    </div>`;
+}
+
+function runIdFromRecordingPath(p) {
+  const name = String(p || '').split('/').pop() || '';
+  return name.endsWith('.jsonl') ? name.slice(0, -6) : null;
+}
+
+function runDetailComplete(detail) {
+  const run = detail?.run || {};
+  const files = run.files || {};
+  return Number.isFinite(Number(run.score)) && files.summary && files.stability && files.bundle;
+}
+
+async function waitForRunAnalysis(runId, program) {
+  if (!runId) return null;
+  setStatus('analyzing run', 'warn');
+  await json(`/api/runs/${encodeURIComponent(runId)}/analyze`, { program }).catch(() => null);
+  const started = performance.now();
+  let detail = null;
+  while (performance.now() - started < 12000) {
+    detail = await json(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
+    if (runDetailComplete(detail)) return detail;
+    await sleep(500);
+  }
+  return detail;
+}
+
+function renderAll() {
+  renderPrograms();
+  renderLibrary();
+  renderParams();
+  renderSequence();
+  renderMetrics();
+  renderTargetPoses();
+  if (!actualPose) setActualPose(homePose, 'HOME');
+  hideGhost();
+  refreshButtons();
+  renderRuns();
+}
+
+function selectMotion(id) {
+  selectedId = id;
+  const def = selectedDef();
+  draftParams = { ...motionDefaults(def), ...(config.uiState?.motion?.paramsById?.[id] || {}) };
+  activeBlock = -1;
+  renderLibrary();
+  renderParams();
+  previewCurrentBlock();
+}
+
+function addBlock() {
+  const def = selectedDef();
+  blocks.push({ id: def.id, params: { ...draftParams }, loops: clampLoops(el('loops').value) });
+  activeBlock = blocks.length - 1;
+  renderSequence();
+  renderMetrics();
+  renderPrograms();
+  saveConfig();
+}
+
+function editBlock(i) {
+  const block = blocks[i];
+  if (!block) return;
+  activeBlock = i;
+  selectedId = block.id;
+  draftParams = { ...block.params };
+  el('loops').value = clampLoops(block.loops);
+  renderLibrary();
+  renderParams();
+  renderSequence();
+  previewCurrentBlock();
+}
+
+function blockAction(action, i) {
+  if (runner.active) return;
+  if (action === 'delete') blocks.splice(i, 1);
+  if (action === 'up' && i > 0) [blocks[i - 1], blocks[i]] = [blocks[i], blocks[i - 1]];
+  if (action === 'down' && i < blocks.length - 1) [blocks[i + 1], blocks[i]] = [blocks[i], blocks[i + 1]];
+  activeBlock = Math.min(blocks.length - 1, Math.max(-1, activeBlock));
+  renderSequence();
+  renderMetrics();
+  renderPrograms();
+  saveConfig();
+}
+
+function previewCurrentBlock() {
+  const def = selectedDef();
+  const sample = motionPoseAt(def, draftParams, motionPeriod(def, draftParams) * 0.25, homePose, Kin);
+  setGhostPose(sample.pose, sample.ok, 'GHOST');
+  setTimeline(sample.frac, sample.tCycle, sample.per, sample.ok ? 'preview' : 'limit');
+}
+
+async function previewDraftBlock() {
+  if (runner.active) return;
+  const def = selectedDef();
+  const block = {
+    id: def.id,
+    params: { ...motionDefaults(def), ...draftParams },
+    loops: clampLoops(el('loops').value),
+  };
+  runner = { active: true, preview: true, abort: false, token: null, recording: false };
+  activeBlock = -1;
+  refreshButtons();
+  try {
+    setStatus(`preview block · ${def.label}`, '');
+    await playBlock(block, -1, true);
+    setStatus('block preview complete', 'good');
+    setGhostPose(homePose, true, 'GHOST');
+    setTimeline(0, 0, motionPeriod(def, block.params), 'ready');
+  } catch (err) {
+    setStatus(err.message === 'aborted' ? 'aborted' : err.message, 'bad');
+  } finally {
+    runner = { active: false, preview: false, abort: false, token: null, recording: false };
+    activeBlock = -1;
+    renderSequence();
+    refreshButtons();
+  }
+}
+
+function live(maxAgeMs = 1500) {
+  const age = performance.now() - liveTelemetryAt;
+  if (!liveTelemetry || !Number.isFinite(age) || age > maxAgeMs) return null;
+  return { data: liveTelemetry, age };
+}
+
+function requireHealthyTelemetry() {
+  const cur = live();
+  if (!cur) throw new Error('live telemetry stale');
+  if (Number(cur.data.ok) !== 6) throw new Error(`encoder ok=${cur.data.ok ?? 'missing'}, expected 6`);
+  return cur;
+}
+
+function currentActualPose() {
+  return actualPose || homePose;
+}
+
+async function preflight() {
+  const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
+  if (!audit.ok) throw new Error(`closed-loop audit failed: ${audit.issues[0]}`);
+  const [latest, transport, rec, cfg] = await Promise.all([
+    json('/api/latest').catch(() => ({})),
+    json('/api/transport').catch(() => ({})),
+    json('/api/rec/status').catch(() => ({})),
+    json('/api/platform-config').catch(() => ({})),
+  ]);
+  if (transport.state !== 'connected') throw new Error(`transport not connected (${transport.state || 'unknown'})`);
+  if (rec.recording) throw new Error('recorder already running');
+  if (!Array.isArray(latest.a) || latest.a.length !== 6) throw new Error('no fresh telemetry');
+  if (Number(latest.ok) !== 6) throw new Error(`encoder ok=${latest.ok ?? 'missing'}, expected 6`);
+  const ageMs = Number(latest._server?.telemetryAgeMs ?? transport.telemetryAgeMs);
+  if (!Number.isFinite(ageMs) || ageMs > 1500) throw new Error(`telemetry stale (${Number.isFinite(ageMs) ? Math.round(ageMs) : 'unknown'}ms)`);
+  const ok = confirm([
+    'Run Workspace session?',
+    '',
+    `blocks: ${blocks.length}`,
+    `motion time: ${workspaceDurationSeconds().toFixed(1)}s`,
+    `closed loop: PASS (${blocks.length ? 'HOME → blocks → HOME' : 'HOME smoke window'})`,
+    `transport: ${transport.kind || 'unknown'} connected`,
+    `telemetry: ok ${latest.ok}, age ${Math.round(ageMs)}ms`,
+    `home: ${config.homeRelative.join(', ')}`,
+    `landing: ${config.landingRelative.join(', ')}`,
+    '',
+    '請確認你人在平台旁，活動空間安全，急停/斷電可及。',
+  ].join('\n'));
+  if (!ok) throw new Error('preflight cancelled');
+  return PlatformSoT.mergeConfig(cfg);
+}
+
+function send(cmd) {
+  if (!runner.token || !ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify({ cmd, sessionToken: runner.token }));
+  return true;
+}
+
+async function phase(name) {
+  if (!runner.token) return;
+  await json('/api/session/phase', { token: runner.token, phase: name }).catch(() => ({}));
+}
+
+async function waitUntil(fn, timeoutMs, label) {
+  const t0 = performance.now();
+  while (!fn()) {
+    if (runner.abort) throw new Error('aborted');
+    if (performance.now() - t0 > timeoutMs) throw new Error(label || 'timeout');
+    await sleep(80);
+  }
+}
+
+async function playBlock(block, index, preview) {
+  activeBlock = index >= 0 ? index : -1;
+  renderSequence();
+  const def = motionById(MOTIONS, block.id);
+  const params = motionParams(def, block.params);
+  const per = Math.max(0.1, motionPeriod(def, params));
+  const loops = clampLoops(block.loops);
+  const totalMs = per * loops * 1000;
+  const t0 = performance.now();
+  while (performance.now() - t0 <= totalMs) {
+    if (runner.abort) throw new Error('aborted');
+    const t = (performance.now() - t0) / 1000;
+    const sample = motionPoseAt(def, params, t, homePose, Kin);
+    setGhostPose(sample.pose, sample.ok, 'GHOST');
+    const label = index >= 0 ? `${index + 1}. ${def.label}` : `BLOCK · ${def.label}`;
+    setTimeline(sample.frac, sample.tCycle, sample.per, sample.ok ? label : 'limit');
+    if (!preview && sample.ok) {
+      requireHealthyTelemetry();
+      send(`PF ${poseLine(sample.pose)}`);
+    }
+    await sleep(1000 / MOTION_HZ);
+  }
+}
+
+async function previewWorkspaceFlow() {
+  const startPose = currentActualPose();
+  const timeline = workspacePreviewTimeline({
+    blocks,
+    startPose,
+    homePose,
+    landingPose: startPose,
+    motions: MOTIONS,
+    motionLib,
+    kin: Kin,
+    takeoffSec: 1.5,
+    closeSec: 1.2,
+    landSec: 1.5,
+  });
+  const t0 = performance.now();
+  while (performance.now() - t0 <= timeline.duration * 1000) {
+    if (runner.abort) throw new Error('aborted');
+    const sample = timeline.sample((performance.now() - t0) / 1000);
+    setGhostPose(sample.pose, sample.ok, 'GHOST');
+    setTimeline(sample.t / sample.total, sample.t, sample.total, sample.ok ? sample.label : 'limit');
+    await sleep(1000 / MOTION_HZ);
+  }
+  const finalSample = timeline.sample(timeline.duration);
+  setGhostPose(finalSample.pose, finalSample.ok, 'GHOST');
+  setTimeline(1, timeline.duration, timeline.duration, 'preview complete');
+}
+
+async function runWorkspace(preview) {
+  const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
+  if (runner.active || !audit.ok) {
+    if (!audit.ok) setStatus(audit.issues[0], 'bad');
+    return;
+  }
+  runner = { active: true, preview, abort: false, token: null, recording: false };
+  refreshButtons();
+  try {
+    if (preview) {
+      setStatus('preview flow', '');
+      await previewWorkspaceFlow();
+      setStatus('preview complete', 'good');
+      return;
+    } else {
+      setStatus('preflight', 'warn');
+      const cfg = await preflight();
+      const program = currentProgramMeta();
+      const programSlug = program.id;
+      const label = `${programSlug}_workspace_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+      const started = await json('/api/session/start', { label, phase: 'takeoff', program });
+      runner.token = started.token;
+      runner.config = cfg;
+      runner.landingPose = Array.isArray(cfg.landingPose) ? cfg.landingPose : PlatformSoT.relToAbs(cfg.landingRelative, NEUTRAL_Z);
+      setStatus('takeoff', 'warn');
+      send('H');
+      await waitUntil(() => live()?.data?.pos === 1 && Array.isArray(live()?.data?.hold), 3000, 'HOLD did not arm');
+      send(`VF ${cfg.followLimits?.vmaxT || 60} ${cfg.followLimits?.vmaxR || 45}`);
+      send(`P ${poseLine(homePose)} 1500`);
+      await sleep(1900);
+      send('FOLLOW 1');
+      await waitUntil(() => followActive, 3500, 'FOLLOW did not arm');
+      await phase('recording');
+      await json('/api/session/rec/start', { token: runner.token, name: label });
+      runner.recording = true;
+    }
+    for (let i = 0; i < blocks.length; i++) {
+      if (!preview) await phase(`block ${i + 1}/${blocks.length}`);
+      await playBlock(blocks[i], i, preview);
+    }
+    activeBlock = -1;
+    renderSequence();
+    if (!preview) {
+      await phase('close loop');
+      setStatus('closing loop at HOME', 'warn');
+      const t0 = performance.now();
+      while (performance.now() - t0 < 1200) {
+        if (runner.abort) throw new Error('aborted');
+        send(`PF ${poseLine(homePose)}`);
+        setGhostPose(homePose, true, 'GHOST');
+        await sleep(1000 / MOTION_HZ);
+      }
+      const stopped = await json('/api/session/rec/stop', { token: runner.token, analyze: false }).catch((err) => ({ error: err.message }));
+      runner.recording = false;
+      const runId = runIdFromRecordingPath(stopped.path);
+      await phase('landing');
+      setStatus('landing', 'warn');
+      send('FOLLOW 0');
+      await waitUntil(() => !followActive && live(), 2500, 'FOLLOW did not disarm');
+      const landMs = Math.max(500, Number(runner.config?.trialDefaults?.landMs) || 1500);
+      setGhostPose(runner.landingPose || landingPose, true, 'GHOST');
+      send(`P ${poseLine(runner.landingPose || landingPose)} ${landMs}`);
+      await sleep(landMs + 300);
+      send('D');
+      await sleep(150);
+      await json('/api/session/finish', { token: runner.token });
+      const analyzed = await waitForRunAnalysis(runId, currentProgramMeta());
+      await loadRuns();
+      if (analyzed?.run?.id) await selectRun(analyzed.run.id);
+      setStatus(runDetailComplete(analyzed) ? 'complete · analyzed · released' : 'complete · released · analysis pending', runDetailComplete(analyzed) ? 'good' : 'warn');
+    }
+  } catch (err) {
+    if (!preview && runner.token) {
+      send(`PF ${poseLine(homePose)}`);
+      send('FOLLOW 0');
+      await sleep(150);
+      send(`P ${poseLine(runner.landingPose || landingPose)} 1500`);
+      await sleep(1800);
+      send('D');
+      if (runner.recording) await json('/api/session/rec/stop', { token: runner.token, analyze: false }).catch(() => ({}));
+      await json('/api/session/abort', { token: runner.token }).catch(() => ({}));
+    }
+    setStatus(err.message === 'aborted' ? 'aborted · landing requested' : err.message, 'bad');
+  } finally {
+    runner = { active: false, preview: false, abort: false, token: null, recording: false };
+    activeBlock = -1;
+    renderSequence();
+    refreshButtons();
+  }
+}
+
+function refreshButtons() {
+  const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
+  const canRun = wsConnected && !sessionState.active && audit.ok && !runner.active;
+  el('run-btn').disabled = !canRun;
+  el('preview-btn').disabled = runner.active;
+  el('add-btn').disabled = runner.active;
+  el('save-btn').disabled = runner.active;
+  document.querySelectorAll('.target-save').forEach((button) => { button.disabled = runner.active; });
+  el('abort-btn').style.display = runner.active && !runner.preview ? '' : 'none';
+  el('session-badge').textContent = sessionState.active ? `SESSION · ${(sessionState.phase || 'running').toUpperCase()}` : 'MANUAL';
+  el('session-badge').className = `status-pill ${sessionState.active ? 'warn' : 'good'}`;
+}
+
+function renderEvents() {
+  const rows = sessionEvents.slice(-12).reverse();
+  el('events').innerHTML = rows.length ? rows.map((e) => {
+    const t = e.at ? new Date(e.at).toLocaleTimeString([], { hour12: false }) : '--:--:--';
+    const detail = e.cmd ? `${e.type} · ${e.cmd}` : e.phase ? `${e.type} · ${e.phase}` : e.type || 'event';
+    return `<div class="event-row"><b>${t}</b><span>${esc(detail)}</span></div>`;
+  }).join('') : '<div class="event-row"><b>--:--</b><span>waiting for session events</span></div>';
+}
+
+async function loadEvents() {
+  const d = await json('/api/session/events').catch(() => ({}));
+  sessionEvents = Array.isArray(d.events) ? d.events : [];
+  if (d.session) sessionState = { active: !!d.session.active, phase: d.session.phase || 'idle', label: d.session.label || '' };
+  renderEvents();
+  refreshButtons();
+}
+
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}`);
+  ws.onopen = () => {
+    wsConnected = true;
+    el('ws-badge').textContent = 'ONLINE';
+    el('ws-badge').className = 'status-pill good';
+    loadEvents();
+    refreshButtons();
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    el('ws-badge').textContent = 'OFFLINE';
+    el('ws-badge').className = 'status-pill bad';
+    refreshButtons();
+    setTimeout(connectWS, 1200);
+  };
+  ws.onmessage = (msg) => {
+    let data;
+    try { data = JSON.parse(msg.data); } catch { return; }
+    if (data.evt === 'transport') {
+      el('transport-badge').textContent = `${data.kind || 'transport'} · ${data.state || 'unknown'}`.toUpperCase();
+      el('transport-badge').className = `status-pill ${data.state === 'connected' ? 'good' : data.state === 'down' ? 'bad' : 'warn'}`;
+      return;
+    }
+    if (data.evt === 'session') {
+      sessionState = { active: !!data.active, phase: data.phase || 'idle', label: data.label || '' };
+      if (sessionState.active) followActive = false;
+      refreshButtons();
+      return;
+    }
+    if (data.evt === 'session_event') {
+      if (data.event) sessionEvents.push(data.event);
+      sessionEvents = sessionEvents.slice(-120);
+      renderEvents();
+      return;
+    }
+    if (Array.isArray(data.a)) {
+      liveTelemetry = data;
+      liveTelemetryAt = performance.now();
+      setActualFromAngles(data.a);
+      renderMetrics();
+    }
+    if (data.fl !== undefined && !data.fl) followActive = false;
+    if (data.status === 'follow on') followActive = true;
+    if (data.status === 'follow off') followActive = false;
+  };
+}
+
+el('add-btn').addEventListener('click', addBlock);
+el('save-btn').addEventListener('click', saveConfig);
+el('save-program-btn').addEventListener('click', saveProgram);
+el('new-program-btn').addEventListener('click', newProgram);
+el('program-name').addEventListener('input', renderPrograms);
+el('preview-btn').addEventListener('click', () => runWorkspace(true));
+el('preview-block-btn').addEventListener('click', previewDraftBlock);
+el('run-btn').addEventListener('click', () => runWorkspace(false));
+el('abort-btn').addEventListener('click', () => { runner.abort = true; setStatus('aborting', 'bad'); });
+el('reload-btn').addEventListener('click', loadConfig);
+el('save-current-home-btn').addEventListener('click', () => saveTargetPose('home'));
+el('save-current-release-btn').addEventListener('click', () => saveTargetPose('release'));
+el('loops').addEventListener('input', () => {
+  el('loops').value = clampLoops(el('loops').value);
+  el('loops-v').textContent = el('loops').value;
+});
+
+await loadConfig();
+await loadRuns();
+connectWS();
+setTimeline(0, 0, workspaceDurationSeconds(), 'ready');
+</script>
+</body>
+</html>

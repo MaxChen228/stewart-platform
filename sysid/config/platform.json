@@ -11,10 +11,10 @@
   "landingRelative": [
     0,
     0,
-    10,
+    -65,
     0,
     0,
-    0
+    65
   ],
   "followLimits": {
     "vmaxT": 60,
@@ -34,31 +34,63 @@
     "poseTargetRelative": [
       0,
       0,
-      9,
+      28,
       0,
       0,
       0
     ],
-    "poseMoveMs": 1000,
+    "poseMoveMs": 1200,
     "motion": {
-      "selectedId": "helix",
-      "loops": 0,
+      "selectedId": "hold",
+      "loops": 1,
       "paramsById": {
         "helix": {
           "r": 15,
           "zlo": -8,
           "zhi": 8,
-          "T": 6,
+          "T": 20,
           "dir": 1
         },
         "poke": {},
         "yaw": {},
         "coning": {},
-        "idle": {},
+        "idle": {
+          "tr": 8,
+          "rr": 4,
+          "spd": 1,
+          "T": 16
+        },
         "fig8": {},
-        "buoy": {},
-        "heartbeat": {}
+        "buoy": {
+          "A": 12,
+          "H": 25,
+          "T": 7,
+          "dir": 1
+        },
+        "heartbeat": {},
+        "z-step": {
+          "A": 10,
+          "T": 3,
+          "edge": 0.8,
+          "hold": 1.5
+        },
+        "hold": {
+          "T": 0.5
+        }
       }
+    },
+    "workspace": {
+      "blocks": [
+        {
+          "id": "hold",
+          "params": {
+            "T": 1
+          },
+          "loops": 1
+        }
+      ],
+      "currentProgramId": "scratch",
+      "programs": []
     },
     "disturbance": {
       "uMotor": 3,
@@ -82,5 +114,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-27T06:09:58.275Z"
+  "updatedAt": "2026-06-27T13:18:59.570Z"
 }

@@ -4,86 +4,107 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stewart 執行紀錄</title>
-<link rel="stylesheet" href="lab.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/app-ui.css">
 <style>
-body { align-items:stretch; padding:18px; background:#0b0d0e; }
-.lab-top, .wrap { max-width:1440px; margin-left:auto; margin-right:auto; }
+.wrap { width:100%; max-width:none; margin-left:auto; margin-right:auto; }
+.run-layout, .detail, .panel.hero, .metric-grid, .tabs, .tab-body { min-width:0; }
 .run-layout { display:grid; grid-template-columns:minmax(320px,380px) minmax(0,1fr); gap:14px; align-items:start; }
-.panel { border:1px solid #2b3032; border-radius:8px; background:#121516; overflow:hidden; }
-.panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 14px; border-bottom:1px solid var(--line2); }
-.panel-title { font-weight:700; letter-spacing:.06em; color:var(--ink); }
-.toolbar { display:flex; flex-wrap:wrap; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line2); }
+.panel { border:1px solid var(--borderBase); border-radius:4px; background:var(--surface); overflow:hidden; }
+.panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 14px; border-bottom:1px solid var(--borderL); }
+.panel-title { font-family:var(--font-mono); font-weight:500; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink); }
+.toolbar { display:flex; flex-wrap:wrap; gap:8px; padding:12px 14px; border-bottom:1px solid var(--borderL); }
 .toolbar input, .toolbar select {
-  min-width:0; padding:9px 10px; border:1px solid var(--line2); border-radius:7px;
-  background:#0d0d0d; color:var(--ink); font-family:var(--mono);
+  min-width:0; padding:9px 10px; border:1px solid var(--borderBase); border-radius:2px;
+  background:var(--surface); color:var(--ink); font-family:var(--font-mono);
 }
 .toolbar input { flex:1 1 160px; }
-.toolbar select { flex:0 0 128px; }
+.toolbar select { flex:0 0 190px; }
+.compare-note {
+  padding:8px 14px;
+  border-bottom:1px solid var(--borderL);
+  color:var(--sub);
+  font-size:12px;
+  line-height:1.45;
+}
 .run-list { max-height:calc(100vh - 206px); overflow:auto; }
-.run-item { width:100%; display:block; text-align:left; padding:12px 14px; border:0; border-bottom:1px solid #1f1f1f;
+.run-item { width:100%; display:block; text-align:left; padding:12px 14px; border:0; border-bottom:1px solid var(--borderL);
   border-radius:0; background:transparent; color:var(--ink); cursor:pointer; font:inherit; }
-.run-item:hover { background:#171b1c; }
-.run-item.sel { background:#13201c; box-shadow:inset 3px 0 0 var(--go); }
-.run-name { font-weight:700; line-height:1.35; color:#e5e5e5; word-break:break-word; }
-.run-meta { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; color:var(--dim); font-size:11px; }
-.pill { display:inline-flex; align-items:center; min-height:22px; padding:2px 7px; border:1px solid var(--line2); border-radius:999px; color:var(--dim); background:#0f0f0f; }
-.pill.good { border-color:#27583b; color:#8fd; }
-.pill.warn { border-color:#6b3b1e; color:#fb8; }
-.pill.bad { border-color:#733; color:#f99; }
+.run-item:hover { background:var(--bg); }
+.run-item.sel { background:#eef3f6; box-shadow:inset 3px 0 0 var(--contra); }
+.run-name { font-family:var(--font-mono); font-weight:700; line-height:1.35; color:var(--ink); word-break:break-word; }
+.run-meta { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; color:var(--sub); font-size:11px; }
+.pill { display:inline-flex; align-items:center; min-height:22px; padding:2px 7px; border:1px solid var(--borderBase); border-radius:999px; color:var(--sub); background:var(--bg); font-family:var(--font-mono); }
+.pill.good { border-color:var(--contra); color:var(--contra); }
+.pill.warn { border-color:var(--dual); color:var(--dual); }
+.pill.bad { border-color:var(--dev); color:var(--dev); }
 .detail { display:flex; flex-direction:column; gap:16px; }
 .hero { padding:14px 16px; }
 .hero h1 { font-size:17px; line-height:1.35; margin-bottom:8px; word-break:break-word; letter-spacing:0; }
-.hero-sub { color:var(--dim); font-size:12px; line-height:1.55; }
+.hero-sub { color:var(--sub); font-size:12px; line-height:1.55; }
 .run-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
-.run-actions button { flex:0 0 auto; padding:9px 12px; font-size:12px; border-radius:7px; }
-.run-actions button.archive { color:var(--warn-ink); border-color:var(--warn); background:var(--warn-bg); }
-.run-actions button.delete { color:var(--bad-ink); border-color:var(--bad); background:var(--bad-bg); }
-.notice { margin-top:10px; color:var(--dim); font-size:12px; min-height:18px; }
+.run-actions button { flex:0 0 auto; padding:7px 12px; font-size:12px; border-radius:12px; }
+.run-actions button.archive { color:var(--dual); border-color:var(--dual); background:transparent; }
+.run-actions button.delete { color:var(--dev); border-color:var(--dev); background:transparent; }
+.notice { margin-top:10px; color:var(--sub); font-size:12px; min-height:18px; }
 .metric-grid { display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)); gap:10px; padding:14px; }
-.metric { border:1px solid #2b3032; border-radius:7px; background:#0d1011; padding:12px; min-height:78px; }
-.metric .k { color:var(--dim); font-size:11px; letter-spacing:.08em; margin-bottom:8px; }
-.metric .v { font-size:22px; color:#e8e8e8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.metric .s { margin-top:5px; color:var(--faint); font-size:11px; line-height:1.4; }
-.tabs { display:flex; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line2); }
-.tabs button { flex:0 0 auto; padding:8px 12px; font-size:12px; border-radius:7px; }
-.tabs button.active { background:var(--go-bg); border-color:var(--go); color:var(--go-ink); }
+.metric { border:1px solid var(--borderL); border-radius:3px; background:var(--bg); padding:12px; min-height:78px; }
+.metric .k { color:var(--sub); font-family:var(--font-mono); font-size:11px; letter-spacing:.08em; margin-bottom:8px; }
+.metric .v { font-family:var(--font-mono); font-size:22px; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.metric .s { margin-top:5px; color:var(--sub); font-size:11px; line-height:1.4; }
+.tabs { display:flex; gap:8px; padding:10px 12px; border-bottom:1px solid var(--borderL); }
+.tabs button { flex:0 0 auto; padding:7px 12px; font-size:12px; border-radius:12px; }
+.tabs button.active { background:var(--contra); border-color:transparent; color:#fff; }
 .tab-body { padding:12px; }
 .plots { display:grid; grid-template-columns:1fr; gap:14px; }
-.plot-card { border:1px solid var(--line2); border-radius:8px; overflow:hidden; background:#050505; }
-.plot-card .cap { padding:9px 11px; border-bottom:1px solid var(--line2); color:var(--dim); font-size:12px; }
+.plot-card { border:1px solid var(--borderL); border-radius:4px; overflow:hidden; background:#050505; }
+.plot-card .cap { padding:9px 11px; border-bottom:1px solid var(--borderL); color:var(--sub); font-size:12px; background:var(--surface); }
 .plot-card img { width:100%; display:block; background:#050505; }
-.replay-grid { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:12px; align-items:start; }
+.replay-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,300px); gap:12px; align-items:start; }
 .replay-main { display:grid; gap:12px; min-width:0; }
 .plane-row { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
-.plane-card, .replay-stage { border:1px solid #2b3032; border-radius:8px; background:#050707; overflow:hidden; min-width:0; }
-.plane-cap { display:flex; justify-content:space-between; gap:10px; padding:8px 10px; border-bottom:1px solid #202628; color:#c7d0d2; font-size:11px; letter-spacing:.08em; }
-.plane-cap span:last-child { color:#6f797c; letter-spacing:0; white-space:nowrap; }
-.plane-canvas { width:100%; aspect-ratio:1.18/1; height:auto; min-height:210px; background:#050707; display:block; }
-.replay-stage { aspect-ratio:1/1; position:relative; }
+.plane-card, .replay-stage { border:1px solid var(--borderBase); border-radius:4px; background:var(--surface); overflow:hidden; min-width:0; }
+.plane-cap { display:flex; justify-content:space-between; gap:10px; padding:8px 10px; border-bottom:1px solid var(--borderL); color:var(--ink); font-size:11px; letter-spacing:.08em; }
+.plane-cap span:last-child { color:var(--sub); letter-spacing:0; white-space:nowrap; }
+.plane-canvas { width:100%; aspect-ratio:1.18/1; height:auto; min-height:210px; background:var(--surface); display:block; }
+.plane-zoom { display:flex; align-items:center; gap:8px; padding:7px 10px; border-top:1px solid var(--borderL); }
+.plane-zoom span {
+  flex:0 0 auto; font-family:var(--font-mono); font-size:10px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--sub);
+}
+.plane-zoom input { flex:1 1 auto; min-width:0; }
+.plane-zoom output {
+  flex:0 0 34px; text-align:right; font-family:var(--font-mono); font-size:10px;
+  color:var(--inkLight); font-variant-numeric:tabular-nums;
+}
+.replay-stage { aspect-ratio:1.35/1; position:relative; }
 .replay-stage canvas { width:100% !important; height:100% !important; display:block; }
 .replay-stage .stage-empty { position:absolute; inset:0; display:grid; place-items:center; color:#777; font-size:12px; pointer-events:none; }
 .replay-side { display:flex; flex-direction:column; gap:10px; }
-.replay-controls { border:1px solid #2b3032; border-radius:8px; background:#0d1011; padding:12px; }
-.replay-controls button { flex:0 0 auto; width:100%; padding:11px 0; font-size:13px; border-radius:7px; }
+.replay-controls { border:1px solid var(--borderBase); border-radius:4px; background:var(--surface); padding:12px; }
+.replay-controls button { flex:0 0 auto; width:100%; min-width:0; padding:8px 10px; font-size:12px; border-radius:12px; }
 .replay-control-row { display:flex; gap:8px; margin-top:10px; }
-.replay-control-row button { padding:9px 0; font-size:11px; }
+.replay-control-row button { flex:1 1 0; width:auto; padding:7px 8px; font-size:11px; }
 .replay-side input[type="range"] { width:100%; }
-.replay-readout { border:1px solid #2b3032; border-radius:8px; background:#0d1011; padding:12px; }
-.replay-note { color:#777; font-size:12px; line-height:1.55; }
+.trace-toggle {
+  display:flex; align-items:center; gap:8px; margin-top:10px;
+  font-family:var(--font-mono); font-size:11px; color:var(--ink);
+}
+.trace-toggle input { width:auto; }
+.replay-readout { border:1px solid var(--borderBase); border-radius:4px; background:var(--bg); padding:12px; }
+.replay-readout.kv { grid-template-columns:52px minmax(0,1fr) !important; }
 .motor-label {
   padding:3px 5px; border:1px solid rgba(255,255,255,.22); border-radius:4px;
   background:rgba(10,12,13,.72); color:#d7dcdd; font-size:11px; pointer-events:none;
 }
 .kv { display:grid; grid-template-columns:170px minmax(0,1fr); gap:8px 12px; align-items:start; font-size:12px; }
-.kv .key { color:var(--dim); }
-.kv .val { color:#ddd; word-break:break-word; }
-pre { max-height:430px; overflow:auto; padding:14px; border:1px solid var(--line2); border-radius:8px; background:#080808; color:#ccc;
-  white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.45; }
+.kv .key { color:var(--sub); }
+.kv .val { color:var(--ink); word-break:break-word; }
 .file-links { display:flex; flex-wrap:wrap; gap:8px; }
-.file-links a { display:inline-flex; padding:7px 9px; border:1px solid var(--line2); border-radius:7px; color:#9df; background:#0d0d0d; font-size:12px; }
-.empty-state { padding:36px; text-align:center; color:var(--dim); border:1px dashed var(--line2); border-radius:10px; }
+.file-links a { display:inline-flex; padding:7px 9px; border:1px solid var(--borderBase); border-radius:12px; color:var(--contra); background:transparent; font-size:12px; font-family:var(--font-mono); }
 @media (max-width: 900px) {
-  body { padding:14px; }
   .run-layout, .replay-grid, .plane-row { grid-template-columns:1fr; }
   .run-list { max-height:360px; }
   .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -91,11 +112,20 @@ pre { max-height:430px; overflow:auto; padding:14px; border:1px solid var(--line
 }
 </style>
 </head>
-<body>
-<div id="lab-header"></div>
+<body class="app-page">
 <div class="wrap">
-  <div class="lab-status" style="font-size:20px;">執行紀錄</div>
-  <div class="lab-hint">每筆實驗的波形、軌跡回放、參數、摘要與原始檔集中查閱。</div>
+  <div class="app-top">
+    <div class="app-top-left">
+      <span class="app-title">執行紀錄</span>
+    </div>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a class="app-link" href="/">主控</a>
+      <a class="app-link" href="/workspace.html">Workspace</a>
+      <a class="app-link active" href="/research/runs.html">Runs</a>
+    </nav>
+  </div>
+  <div class="app-heading">執行紀錄</div>
+  <div class="app-hint">每筆 session 的波形、軌跡回放、參數、摘要與原始檔集中查閱。</div>
 
   <div class="run-layout">
     <section class="panel">
@@ -104,9 +134,10 @@ pre { max-height:430px; overflow:auto; padding:14px; border:1px solid var(--line
         <button id="refresh" style="flex:0 0 auto;padding:8px 12px;font-size:12px;">刷新</button>
       </div>
       <div class="toolbar">
-        <input id="search" placeholder="搜尋 run / 條件 / profile">
-        <select id="profile"><option value="">全部類型</option></select>
+        <input id="search" placeholder="搜尋 run / program / 條件">
+        <select id="program-filter"><option value="">全部 Program</option></select>
       </div>
+      <div class="compare-note" id="compare-note">選一個 Program 後才進入同題比較；全部 Program 只用來瀏覽資料。</div>
       <div class="run-list" id="run-list"><div class="empty-state">讀取中...</div></div>
     </section>
 
@@ -116,7 +147,6 @@ pre { max-height:430px; overflow:auto; padding:14px; border:1px solid var(--line
   </div>
 </div>
 
-<script src="lab.js"></script>
 <script src="/sysid/kin.js"></script>
 <script type="importmap">
 {
@@ -130,15 +160,41 @@ pre { max-height:430px; overflow:auto; padding:14px; border:1px solid var(--line
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import {
+  StewartStyle,
+  createStewartModel,
+  computeActuatorPoints,
+  platformPointsFromPose,
+  createStewartRig,
+} from '/shared/stewart-renderer.js';
+import * as motionLib from '/shared/motion-library.js';
+import {
+  normalizeBlocks,
+  workspaceProgramMeta,
+} from '/shared/workspace-core.js';
 
-Lab.mountHeader('執行紀錄', { back: { text: '‹ 研究首頁', href: './' }, showWs: false });
-
-const state = { runs: [], filtered: [], selected: null, detail: null, tab: 'overview', replayIndex: 0, playing: false, raf: null, replay3d: null };
+const $ = (id) => document.getElementById(id);
+const state = {
+  runs: [],
+  filtered: [],
+  selected: null,
+  detail: null,
+  tab: 'overview',
+  replayIndex: 0,
+  playing: false,
+  raf: null,
+  replay3d: null,
+  draftProgram: null,
+  savedPrograms: [],
+  planeZoom: { xy: 1, yz: 1, xz: 1 },
+  showReplayTrace: true,
+};
+function present(v) { return v !== null && v !== undefined && v !== ''; }
 const fmt = {
-  n(v, d = 2) { return Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—'; },
-  int(v) { return Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : '—'; },
-  pct(v) { return Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : '—'; },
-  time(s) { return Number.isFinite(Number(s)) ? `${Number(s).toFixed(1)}s` : '—'; },
+  n(v, d = 2) { return present(v) && Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—'; },
+  int(v) { return present(v) && Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : '—'; },
+  pct(v) { return present(v) && Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : '—'; },
+  time(s) { return present(s) && Number.isFinite(Number(s)) ? `${Number(s).toFixed(1)}s` : '—'; },
   date(x) { if (!x) return '—'; const d = new Date(x); return Number.isNaN(d.getTime()) ? x : d.toLocaleString(); },
 };
 
@@ -148,7 +204,7 @@ function esc(s) {
 function fileUrl(p) { return `/api/run-file?p=${encodeURIComponent(p)}`; }
 function jsonBlock(x) { return `<pre>${esc(JSON.stringify(x ?? {}, null, 2))}</pre>`; }
 function scoreClass(s) {
-  if (!Number.isFinite(Number(s))) return '';
+  if (!present(s) || !Number.isFinite(Number(s))) return '';
   if (s >= 75) return 'good';
   if (s >= 55) return 'warn';
   return 'bad';
@@ -160,29 +216,105 @@ function shortRunName(r) {
 async function loadRuns(selectId = null) {
   const box = $('run-list');
   box.innerHTML = '<div class="empty-state">讀取中...</div>';
-  const res = await fetch('/api/runs');
+  const [res, cfgRes] = await Promise.all([
+    fetch('/api/runs'),
+    fetch('/api/platform-config').catch(() => null),
+  ]);
   const data = await res.json();
+  const cfg = cfgRes && cfgRes.ok ? await cfgRes.json().catch(() => null) : null;
+  const draftBlocks = normalizeBlocks(cfg || {}, motionLib.MOTIONS, motionLib);
+  state.draftProgram = workspaceProgramMeta({
+    blocks: draftBlocks,
+    name: 'Scratch Draft',
+    motions: motionLib.MOTIONS,
+    motionLib,
+  });
+  state.savedPrograms = Array.isArray(cfg?.uiState?.workspace?.programs)
+    ? cfg.uiState.workspace.programs
+        .filter((p) => p && typeof p.id === 'string')
+        .map((p) => ({
+          id: p.id,
+          name: typeof p.name === 'string' && p.name.trim() ? p.name.trim() : p.id,
+          hash: typeof p.hash === 'string' ? p.hash : null,
+        }))
+    : [];
   state.runs = data.runs || [];
-  syncProfiles();
+  syncPrograms();
   applyFilter();
   const pick = selectId || state.selected || state.filtered[0]?.id;
   if (pick) await selectRun(pick);
 }
 
-function syncProfiles() {
-  const cur = $('profile').value;
-  const profiles = [...new Set(state.runs.map(r => r.profile || 'unknown'))].sort();
-  $('profile').innerHTML = '<option value="">全部類型</option>' + profiles.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-  $('profile').value = profiles.includes(cur) ? cur : '';
+function runProgram(r) {
+  const p = r?.program || null;
+  const label = `${r?.name || r?.id || ''}`;
+  if (!p) {
+    const scratchHash = label.match(/^scratch[_-]([a-f0-9]{8})[_-]workspace/i)?.[1];
+    if (scratchHash) return { id: `scratch_${scratchHash}`, name: 'Scratch Draft', hash: scratchHash, draft: true };
+    if (state.draftProgram && /^scratch(?:_|-)?workspace/i.test(label)) return state.draftProgram;
+  }
+  if (!p) return null;
+  if (p.draft) {
+    return {
+      key: p.hash || p.id || 'scratch',
+      label: p.name || 'Scratch Draft',
+      draft: true,
+    };
+  }
+  const saved = state.savedPrograms.find((program) =>
+    (p.id && program.id === p.id) ||
+    (p.hash && program.hash && program.hash === p.hash)
+  );
+  if (!saved) return null;
+  return {
+    key: saved.hash || saved.id,
+    label: saved.name || saved.id,
+  };
+}
+
+function programLabel(r) {
+  return runProgram(r)?.label || '未歸類';
+}
+
+function programKey(r) {
+  return runProgram(r)?.key || '__unclassified__';
+}
+
+function syncPrograms() {
+  const cur = $('program-filter').value;
+  const map = new Map();
+  for (const r of state.runs) {
+    const key = programKey(r);
+    const current = map.get(key) || { label: programLabel(r), count: 0 };
+    current.count += 1;
+    map.set(key, current);
+  }
+  const items = [...map.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label));
+  $('program-filter').innerHTML = `<option value="">全部 Program (${state.runs.length})</option>` +
+    items.map(([k, item]) => `<option value="${esc(k)}">${esc(item.label)} (${item.count})</option>`).join('');
+  $('program-filter').value = map.has(cur) ? cur : '';
 }
 
 function applyFilter() {
   const q = $('search').value.trim().toLowerCase();
-  const p = $('profile').value;
+  const selectedProgram = $('program-filter').value;
   state.filtered = state.runs.filter(r => {
-    const hay = `${r.id} ${r.name} ${r.profile || ''} ${JSON.stringify(r.condition || {})}`.toLowerCase();
-    return (!p || (r.profile || 'unknown') === p) && (!q || hay.includes(q));
+    const prog = runProgram(r);
+    const hay = `${r.id} ${r.name} ${programLabel(r)} ${prog?.key || ''} ${r.profile || ''} ${JSON.stringify(r.condition || {})}`.toLowerCase();
+    return (!selectedProgram || programKey(r) === selectedProgram) && (!q || hay.includes(q));
   });
+  if (selectedProgram) {
+    state.filtered.sort((a, b) => {
+      const as = Number(a.score);
+      const bs = Number(b.score);
+      if (Number.isFinite(as) && Number.isFinite(bs) && bs !== as) return bs - as;
+      return Number(new Date(b.wallClock || 0)) - Number(new Date(a.wallClock || 0));
+    });
+    const label = state.filtered[0] ? programLabel(state.filtered[0]) : $('program-filter').selectedOptions[0]?.textContent;
+    $('compare-note').textContent = `${label || 'Program'} leaderboard：只和同一個 program / reference 互比。`;
+  } else {
+    $('compare-note').textContent = '全部 Program 只用來瀏覽資料；tracking / cross-axis / oscillation 分數不要跨 program 比較。';
+  }
   renderList();
 }
 
@@ -193,15 +325,16 @@ function renderList() {
     return;
   }
   box.innerHTML = state.filtered.map(r => {
-    const score = Number(r.score);
+    const rank = $('program-filter').value ? state.filtered.findIndex((x) => x.id === r.id) + 1 : 0;
     const health = r.health || {};
     const can = Number.isFinite(Number(health.rxDropPerS)) ? `${fmt.n(health.rxDropPerS, 1)} drop/s` :
                 Number.isFinite(Number(health.rxDropSum)) ? `drop ${fmt.int(health.rxDropSum)}` : 'CAN —';
     return `<button class="run-item ${state.selected === r.id ? 'sel' : ''}" data-id="${esc(r.id)}">
       <div class="run-name">${esc(shortRunName(r))}</div>
       <div class="run-meta">
-        <span class="pill ${scoreClass(score)}">score ${fmt.n(score, 1)}</span>
-        <span class="pill">${esc(r.profile || 'unknown')}</span>
+        <span class="pill ${scoreClass(r.score)}">score ${fmt.n(r.score, 1)}</span>
+        ${rank ? `<span class="pill good">#${rank}</span>` : ''}
+        <span class="pill">${esc(programLabel(r))}</span>
         <span class="pill">${fmt.time(r.durationS)}</span>
         <span class="pill">${fmt.int(r.samples)} samples</span>
         <span class="pill">${esc(can)}</span>
@@ -238,11 +371,11 @@ function renderDetail() {
     <section class="panel hero">
       <h1>${esc(r.id || state.selected)}</h1>
       <div class="hero-sub">
-        ${esc(fmt.date(r.wallClock))} · ${esc(r.profile || 'unknown')} · ${fmt.int(r.samples)} samples · ${fmt.time(r.durationS)}
+        ${esc(fmt.date(r.wallClock))} · ${esc(programLabel(r))} · ${fmt.int(r.samples)} samples · ${fmt.time(r.durationS)}
       </div>
       <div class="run-meta" style="margin-top:12px;">
         <span class="pill ${scoreClass(r.score)}">stability ${fmt.n(r.score, 1)}</span>
-        <span class="pill">profile ${esc(r.profile || 'unknown')}</span>
+        <span class="pill">program ${esc(programLabel(r))}</span>
         <span class="pill">PID ${esc((cond.pid || d.manifest?.latest?.pid || []).join?.('/') || '—')}</span>
         <span class="pill">CAN ${fmt.n(health.rxDropPerS, 1)} drop/s</span>
       </div>
@@ -309,7 +442,8 @@ function overviewHtml(d) {
   return `<div class="kv">
     <div class="key">Run ID</div><div class="val">${esc(r.id)}</div>
     <div class="key">時間</div><div class="val">${esc(fmt.date(r.wallClock))}</div>
-    <div class="key">類型</div><div class="val">${esc(r.profile || 'unknown')}</div>
+    <div class="key">Program</div><div class="val">${esc(programLabel(r))}</div>
+    <div class="key">Profile</div><div class="val">${esc(r.profile || 'unknown')}</div>
     <div class="key">錄製長度</div><div class="val">${fmt.time(r.durationS)} · ${fmt.int(r.samples)} samples · ${fmt.int(r.cmdCount)} commands</div>
     <div class="key">穩定分數</div><div class="val">${fmt.n(r.score, 2)}</div>
     <div class="key">成本</div><div class="val">tracking ${fmt.n(st.score?.trackingCost)} / cross ${fmt.n(st.score?.crossAxisCost)} / osc ${fmt.n(st.score?.oscillationCost)} / quality ${fmt.n(st.score?.qualityPenalty)}</div>
@@ -334,14 +468,17 @@ function replayHtml(d) {
         <div class="plane-card">
           <div class="plane-cap"><span>XY PLANE</span><span>top view</span></div>
           <canvas class="plane-canvas" id="plane-xy" width="520" height="440"></canvas>
+          <label class="plane-zoom"><span>zoom</span><input class="plane-zoom-input" data-plane="xy" type="range" min="0.6" max="6" step="0.1" value="${state.planeZoom.xy}"><output id="zoom-xy">${state.planeZoom.xy.toFixed(1)}x</output></label>
         </div>
         <div class="plane-card">
           <div class="plane-cap"><span>YZ PLANE</span><span>front side</span></div>
           <canvas class="plane-canvas" id="plane-yz" width="520" height="440"></canvas>
+          <label class="plane-zoom"><span>zoom</span><input class="plane-zoom-input" data-plane="yz" type="range" min="0.6" max="6" step="0.1" value="${state.planeZoom.yz}"><output id="zoom-yz">${state.planeZoom.yz.toFixed(1)}x</output></label>
         </div>
         <div class="plane-card">
           <div class="plane-cap"><span>XZ PLANE</span><span>right side</span></div>
           <canvas class="plane-canvas" id="plane-xz" width="520" height="440"></canvas>
+          <label class="plane-zoom"><span>zoom</span><input class="plane-zoom-input" data-plane="xz" type="range" min="0.6" max="6" step="0.1" value="${state.planeZoom.xz}"><output id="zoom-xz">${state.planeZoom.xz.toFixed(1)}x</output></label>
         </div>
       </div>
       <div class="replay-stage" id="replay3d">
@@ -356,13 +493,13 @@ function replayHtml(d) {
           <button id="view-home" type="button">重置視角</button>
           <button id="view-top" type="button">俯視</button>
         </div>
+        <label class="trace-toggle"><input id="trace3d-toggle" type="checkbox" ${state.showReplayTrace ? 'checked' : ''}> 中心軌跡</label>
       </div>
       <div class="replay-readout kv" style="grid-template-columns:72px 1fr;">
         <div class="key">t</div><div class="val" id="rt">—</div>
         <div class="key">pose</div><div class="val" id="rp">—</div>
         <div class="key">CAN</div><div class="val" id="rc">—</div>
       </div>
-      <div class="replay-note">上排三圖追蹤平台中心在 XY / YZ / XZ 平面的軌跡；下方 3D 用同一套幾何重建平台姿態，可拖曳旋轉、滾輪縮放、播放或拖曳時間軸。</div>
     </aside>
   </div>`;
 }
@@ -411,12 +548,28 @@ function setupReplay() {
   const play = $('play');
   const home = $('view-home');
   const top = $('view-top');
+  const traceToggle = $('trace3d-toggle');
   initReplay3d();
   if (!samples.length) { drawReplay(); return; }
   scrub.oninput = () => { state.replayIndex = Number(scrub.value); drawReplay(); };
   play.onclick = () => state.playing ? stopReplay() : startReplay();
   if (home) home.onclick = () => setReplayView('home');
   if (top) top.onclick = () => setReplayView('top');
+  if (traceToggle) {
+    traceToggle.onchange = () => {
+      state.showReplayTrace = !!traceToggle.checked;
+      drawReplay();
+    };
+  }
+  document.querySelectorAll('.plane-zoom-input').forEach((input) => {
+    input.addEventListener('input', () => {
+      const key = input.dataset.plane;
+      state.planeZoom[key] = Number(input.value);
+      const out = $(`zoom-${key}`);
+      if (out) out.textContent = `${state.planeZoom[key].toFixed(1)}x`;
+      drawReplay();
+    });
+  });
   drawReplay();
 }
 
@@ -443,66 +596,28 @@ function stopReplay() {
   if (play) play.textContent = '播放';
 }
 
-const DEG = Math.PI / 180;
 const kin = window.Kin || {};
-const KIN_B = [];
-const KIN_P = [];
-for (let i = 0; i < 6; i++) {
-  const ba = (kin.BASE_ANGLES?.[i] ?? 0) * DEG;
-  const pa = (kin.PLATFORM_ANGLES?.[i] ?? 0) * DEG;
-  KIN_B.push({ x: (kin.BASE_RADIUS || 152) * Math.cos(ba), y: (kin.BASE_RADIUS || 152) * Math.sin(ba), z: 0 });
-  KIN_P.push({ x: (kin.PLATFORM_RADIUS || 103) * Math.cos(pa), y: (kin.PLATFORM_RADIUS || 103) * Math.sin(pa), z: 0 });
-}
-
-function bounds(vals, pad = 1) {
-  const finite = vals.filter(Number.isFinite);
-  if (!finite.length) return [-1, 1];
-  let lo = Math.min(...finite), hi = Math.max(...finite);
-  if (Math.abs(hi - lo) < 1e-6) { lo -= pad; hi += pad; }
-  const m = (hi - lo) * 0.12 + pad;
-  return [lo - m, hi + m];
-}
-
-function poseRotation(pose) {
-  const roll = Number(pose?.[3] || 0), pitch = Number(pose?.[4] || 0), yaw = Number(pose?.[5] || 0);
-  const cr = Math.cos(roll * DEG), sr = Math.sin(roll * DEG);
-  const cp = Math.cos(pitch * DEG), sp = Math.sin(pitch * DEG);
-  const cy = Math.cos(yaw * DEG), sy = Math.sin(yaw * DEG);
-  return [
-    [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-    [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-    [-sp, cp * sr, cp * cr],
-  ];
-}
-
-function poseQ(pose) {
-  const R = poseRotation(pose);
-  const x = Number(pose?.[0] || 0), y = Number(pose?.[1] || 0), z = Number(pose?.[2] || kin.NEUTRAL_Z || 105);
-  return KIN_P.map(p => ({
-    x: R[0][0] * p.x + R[0][1] * p.y + R[0][2] * p.z + x,
-    y: R[1][0] * p.x + R[1][1] * p.y + R[1][2] * p.z + y,
-    z: R[2][0] * p.x + R[2][1] * p.y + R[2][2] * p.z + z,
-  }));
-}
-
-function computeAPlain(angles) {
-  return angles.map((ang, i) => {
-    const a = Number(ang || 0) * DEG;
-    const th = (kin.MOTOR_PLANE_ANGLE?.[i] ?? 0) * DEG;
-    return {
-      x: (kin.LOWER_LEG || 65) * Math.cos(a) * Math.cos(th) + KIN_B[i].x,
-      y: (kin.LOWER_LEG || 65) * Math.cos(a) * Math.sin(th) + KIN_B[i].y,
-      z: (kin.LOWER_LEG || 65) * Math.sin(a) + KIN_B[i].z,
-    };
-  });
-}
+const stewartModel = createStewartModel(kin);
+const KIN_B = stewartModel.B;
+const cssHex = (hex) => `#${hex.toString(16).padStart(6, '0')}`;
+const cssRgba = (hex, alpha) => {
+  const r = (hex >> 16) & 255;
+  const g = (hex >> 8) & 255;
+  const b = hex & 255;
+  return `rgba(${r},${g},${b},${alpha})`;
+};
 
 function modelFromSample(sample) {
   const pose = sample?.pose || [0, 0, kin.NEUTRAL_Z || 105, 0, 0, 0];
   const angles = Array.isArray(sample?.a) && sample.a.length === 6
     ? sample.a.map(Number)
     : (kin.ik?.(pose)?.angles || new Array(6).fill(90));
-  return { pose, B: KIN_B, A: computeAPlain(angles), Q: poseQ(pose) };
+  return {
+    pose,
+    B: KIN_B,
+    A: computeActuatorPoints(angles, stewartModel),
+    Q: platformPointsFromPose(pose, stewartModel),
+  };
 }
 
 function axisValue(point, axis) {
@@ -535,14 +650,14 @@ function drawPlane(spec, samples) {
   if (!canvas) return;
   const { ctx, W, H } = fitCanvas(canvas);
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#050707';
+  ctx.fillStyle = '#FCFBFA';
   ctx.fillRect(0, 0, W, H);
   ctx.font = '11px SF Mono, Consolas, monospace';
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
   if (!samples.length) {
-    ctx.fillStyle = '#6f797c';
+    ctx.fillStyle = '#9A948A';
     ctx.fillText('no samples', 20, 30);
     return;
   }
@@ -550,30 +665,29 @@ function drawPlane(spec, samples) {
   const idx = Math.max(0, Math.min(samples.length - 1, state.replayIndex));
   const model = modelFromSample(samples[idx]);
   const poses = samples.map(s => s.pose || []).filter(p => p.length >= 3);
-  const modelPts = [...model.B, ...model.A, ...model.Q];
-  const hVals = [
-    ...poses.map(p => poseAxis(p, spec.h)),
-    ...modelPts.map(p => axisValue(p, spec.h)),
-  ];
-  const vVals = [
-    ...poses.map(p => poseAxis(p, spec.v)),
-    ...modelPts.map(p => axisValue(p, spec.v)),
-  ];
-  const [h0, h1] = bounds(hVals, spec.v === 'z' ? 16 : 12);
-  const [v0, v1] = bounds(vVals, spec.v === 'z' ? 16 : 12);
+  const hVals = poses.map(p => poseAxis(p, spec.h)).filter(Number.isFinite);
+  const vVals = poses.map(p => poseAxis(p, spec.v)).filter(Number.isFinite);
+  const hMin = hVals.length ? Math.min(...hVals) : 0;
+  const hMax = hVals.length ? Math.max(...hVals) : 0;
+  const vMin = vVals.length ? Math.min(...vVals) : 0;
+  const vMax = vVals.length ? Math.max(...vVals) : 0;
+  const zoom = Math.max(0.1, Number(state.planeZoom?.[spec.key]) || 1);
   const pad = { l: 34, r: 16, t: 18, b: 30 };
   const pw = Math.max(1, W - pad.l - pad.r);
   const ph = Math.max(1, H - pad.t - pad.b);
-  const scale = Math.min(pw / Math.max(1e-6, h1 - h0), ph / Math.max(1e-6, v1 - v0));
-  const midH = (h0 + h1) / 2;
-  const midV = (v0 + v1) / 2;
+  const hSpan = Math.max(18, hMax - hMin);
+  const vSpan = Math.max(spec.v === 'z' ? 18 : 12, vMax - vMin);
+  const viewSpan = Math.max(hSpan, vSpan) * 1.25;
+  const scale = Math.min(pw, ph) / Math.max(1e-6, viewSpan) * zoom;
+  const midH = (hMin + hMax) / 2;
+  const midV = (vMin + vMax) / 2;
   const cx = pad.l + pw / 2;
   const cy = pad.t + ph / 2;
   const project = (h, v) => [cx + (h - midH) * scale, cy - (v - midV) * scale];
   const pp = (point) => project(axisValue(point, spec.h), axisValue(point, spec.v));
   const cp = (pose) => project(poseAxis(pose, spec.h), poseAxis(pose, spec.v));
 
-  ctx.strokeStyle = '#172022';
+  ctx.strokeStyle = '#E8E4DB';
   ctx.lineWidth = 1;
   for (let i = -4; i <= 4; i++) {
     const x = cx + i * pw / 8;
@@ -581,9 +695,9 @@ function drawPlane(spec, samples) {
     ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, H - pad.b); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
   }
-  ctx.strokeStyle = '#2b3032';
+  ctx.strokeStyle = '#DBD6CD';
   ctx.strokeRect(pad.l, pad.t, pw, ph);
-  ctx.fillStyle = '#6f797c';
+  ctx.fillStyle = '#7A756C';
   ctx.fillText(spec.hLabel, W - pad.r - 54, H - 10);
   ctx.save();
   ctx.translate(12, pad.t + 48);
@@ -629,99 +743,47 @@ function drawPlane(spec, samples) {
     ctx.globalAlpha = 1;
   }
 
-  drawPoly(model.B, 'rgba(94, 104, 101, 0.12)', '#404849', spec.title === 'XY' ? 1 : 0.55);
+  drawPoly(model.B, cssRgba(StewartStyle.colors.basePlate, 0.22), cssHex(StewartStyle.colors.basePlate), spec.title === 'XY' ? 0.65 : 0.35);
   for (let i = 0; i < 6; i++) {
-    drawSegment(model.B[i], model.A[i], '#4b7890', 1.2, 0.72);
-    drawSegment(model.A[i], model.Q[i], '#d6853e', 1.2, 0.82);
+    drawSegment(model.B[i], model.A[i], cssHex(StewartStyle.colors.lowerLeg), 1, 0.32);
+    drawSegment(model.A[i], model.Q[i], cssHex(StewartStyle.colors.upperLeg), 1, 0.38);
   }
-  drawPoly(model.Q, 'rgba(90, 184, 150, 0.22)', '#65d5b0', 1);
-  model.B.forEach(p => drawPoint(p, '#9b3030', 2.6, 0.85));
-  model.A.forEach(p => drawPoint(p, '#d0a321', 2.3, 0.9));
-  model.Q.forEach(p => drawPoint(p, '#587c9a', 2.7, 0.9));
+  drawPoly(model.Q, cssRgba(StewartStyle.colors.platformPlate, 0.18), cssHex(StewartStyle.colors.platformPlate), 0.58);
+  model.B.forEach(p => drawPoint(p, cssHex(StewartStyle.colors.baseJoint), 2.2, 0.52));
+  model.A.forEach(p => drawPoint(p, cssHex(StewartStyle.colors.actuatorJoint), 2, 0.58));
+  model.Q.forEach(p => drawPoint(p, cssHex(StewartStyle.colors.platformJoint), 2.2, 0.62));
 
   const step = Math.max(1, Math.ceil(poses.length / 260));
   ctx.beginPath();
+  let moved = false;
   for (let i = 0; i < poses.length; i += step) {
     const [x, y] = cp(poses[i]);
-    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    if (moved) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    moved = true;
   }
-  ctx.strokeStyle = 'rgba(236,132,66,.18)';
-  ctx.lineWidth = 1;
+  if (poses.length > 1 && (poses.length - 1) % step !== 0) {
+    const [x, y] = cp(poses[poses.length - 1]);
+    if (moved) ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = cssHex(StewartStyle.colors.trace);
+  ctx.lineWidth = 2.4;
   ctx.stroke();
-
-  const tailStart = Math.max(0, idx - 120);
-  for (let i = tailStart + 1; i <= idx; i++) {
-    const [x0p, y0p] = cp(poses[i - 1]);
-    const [x1p, y1p] = cp(poses[i]);
-    const a = 0.12 + 0.76 * ((i - tailStart) / Math.max(1, idx - tailStart));
-    ctx.strokeStyle = `rgba(92,199,242,${a.toFixed(3)})`;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x0p, y0p);
-    ctx.lineTo(x1p, y1p);
-    ctx.stroke();
-  }
 
   const [px, py] = cp(model.pose);
-  const glow = ctx.createRadialGradient(px, py, 1, px, py, 24);
-  glow.addColorStop(0, 'rgba(92,199,242,.9)');
-  glow.addColorStop(1, 'rgba(92,199,242,0)');
+  const glow = ctx.createRadialGradient(px, py, 1, px, py, 15);
+  glow.addColorStop(0, cssRgba(StewartStyle.colors.trace, 0.72));
+  glow.addColorStop(1, cssRgba(StewartStyle.colors.trace, 0));
   ctx.fillStyle = glow;
   ctx.beginPath();
-  ctx.arc(px, py, 24, 0, Math.PI * 2);
+  ctx.arc(px, py, 15, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#5cc7f2';
-  ctx.strokeStyle = '#d9fbff';
-  ctx.lineWidth = 1;
+  ctx.fillStyle = cssHex(StewartStyle.colors.trace);
+  ctx.strokeStyle = '#FCFBFA';
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(px, py, 5, 0, Math.PI * 2);
+  ctx.arc(px, py, 4.2, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-}
-
-function makeThreeVec(p) {
-  return new THREE.Vector3(Number(p.x), Number(p.y), Number(p.z));
-}
-
-function makeLineObject(scene, color, opacity = 1) {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-  const mat = new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  return line;
-}
-
-function setLineObject(line, a, b) {
-  const arr = line.geometry.attributes.position.array;
-  arr[0] = a.x; arr[1] = a.y; arr[2] = a.z;
-  arr[3] = b.x; arr[4] = b.y; arr[5] = b.z;
-  line.geometry.attributes.position.needsUpdate = true;
-}
-
-function makeSphereObject(scene, color, radius) {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 14, 10),
-    new THREE.MeshPhongMaterial({ color })
-  );
-  scene.add(mesh);
-  return mesh;
-}
-
-function updatePlateGeometry(geo, points) {
-  const arr = geo.attributes.position.array;
-  let cx = 0, cy = 0, cz = 0;
-  points.forEach(p => { cx += p.x; cy += p.y; cz += p.z; });
-  cx /= points.length; cy /= points.length; cz /= points.length;
-  for (let i = 0; i < 6; i++) {
-    const j = (i + 1) % 6;
-    const k = i * 9;
-    arr[k] = cx; arr[k + 1] = cy; arr[k + 2] = cz;
-    arr[k + 3] = points[i].x; arr[k + 4] = points[i].y; arr[k + 5] = points[i].z;
-    arr[k + 6] = points[j].x; arr[k + 7] = points[j].y; arr[k + 8] = points[j].z;
-  }
-  geo.attributes.position.needsUpdate = true;
-  geo.computeVertexNormals();
 }
 
 function initReplay3d() {
@@ -730,8 +792,8 @@ function initReplay3d() {
   if (!host) return;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x050707);
-  const camera = new THREE.PerspectiveCamera(48, 1, 1, 1600);
+  scene.background = new THREE.Color(StewartStyle.scene.lightBg);
+  const camera = new THREE.PerspectiveCamera(50, 1, 1, 2000);
   camera.up.set(0, 0, 1);
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -743,69 +805,43 @@ function initReplay3d() {
   host.appendChild(labelRenderer.domElement);
 
   const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 0, kin.NEUTRAL_Z || 105);
+  controls.target.set(0, 0, 60);
   controls.enableDamping = false;
   controls.addEventListener('change', () => renderReplay3d(false));
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
-  const key = new THREE.DirectionalLight(0xffffff, 0.85);
-  key.position.set(220, -260, 320);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const key = new THREE.DirectionalLight(0xffffff, 0.6);
+  key.position.set(200, -200, 300);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0x7fd6ff, 0.28);
-  fill.position.set(-240, 120, 190);
-  scene.add(fill);
 
-  const grid = new THREE.GridHelper(420, 21, 0x263034, 0x151d20);
+  const grid = new THREE.GridHelper(400, 20, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor);
   grid.rotation.x = Math.PI / 2;
   scene.add(grid);
 
-  const baseShape = new THREE.Shape();
-  baseShape.moveTo(KIN_B[0].x, KIN_B[0].y);
-  for (let i = 1; i < 6; i++) baseShape.lineTo(KIN_B[i].x, KIN_B[i].y);
-  baseShape.closePath();
-  const baseMesh = new THREE.Mesh(
-    new THREE.ShapeGeometry(baseShape),
-    new THREE.MeshPhongMaterial({ color: 0x5e6865, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
+  const rig = createStewartRig(scene, stewartModel, {
+    CSS2DObject,
+    labels: true,
+    labelClassName: 'motor-label',
+  });
+  const traceGeo = new THREE.BufferGeometry();
+  traceGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(3), 3));
+  traceGeo.setDrawRange(0, 0);
+  const centerTrace = new THREE.Line(
+    traceGeo,
+    new THREE.LineBasicMaterial({ color: StewartStyle.colors.trace, transparent: true, opacity: 0.82 })
   );
-  scene.add(baseMesh);
-
-  const platformGeo = new THREE.BufferGeometry();
-  platformGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(54), 3));
-  const platformMesh = new THREE.Mesh(
-    platformGeo,
-    new THREE.MeshPhongMaterial({ color: 0x4cc49b, transparent: true, opacity: 0.34, side: THREE.DoubleSide })
+  centerTrace.visible = state.showReplayTrace;
+  scene.add(centerTrace);
+  const centerDot = new THREE.Mesh(
+    new THREE.SphereGeometry(4.5, 14, 10),
+    new THREE.MeshPhongMaterial({ color: StewartStyle.colors.trace })
   );
-  scene.add(platformMesh);
-
-  const baseDots = [], motorDots = [], platformDots = [], lowerLines = [], upperLines = [], labels = [];
-  for (let i = 0; i < 6; i++) {
-    baseDots.push(makeSphereObject(scene, 0xa53b3b, 4.8));
-    motorDots.push(makeSphereObject(scene, 0xd4a62a, 4.1));
-    platformDots.push(makeSphereObject(scene, 0x547d9f, 4.5));
-    lowerLines.push(makeLineObject(scene, 0x4b8aa8, 0.86));
-    upperLines.push(makeLineObject(scene, 0xd6853e, 0.92));
-    const div = document.createElement('div');
-    div.className = 'motor-label';
-    div.textContent = `M${i + 1}`;
-    const label = new CSS2DObject(div);
-    scene.add(label);
-    labels.push(label);
-  }
-
-  const centerDot = makeSphereObject(scene, 0x5cc7f2, 6);
-  const trailGeo = new THREE.BufferGeometry();
-  trailGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(180 * 3), 3));
-  trailGeo.setDrawRange(0, 0);
-  const trail = new THREE.Line(
-    trailGeo,
-    new THREE.LineBasicMaterial({ color: 0x5cc7f2, transparent: true, opacity: 0.72 })
-  );
-  scene.add(trail);
+  centerDot.visible = state.showReplayTrace;
+  scene.add(centerDot);
 
   const ro = new ResizeObserver(fitReplay3d);
   ro.observe(host);
-  state.replay3d = { host, scene, camera, renderer, labelRenderer, controls, ro, platformGeo, platformMesh,
-    baseDots, motorDots, platformDots, lowerLines, upperLines, labels, centerDot, trail };
+  state.replay3d = { host, scene, camera, renderer, labelRenderer, controls, ro, rig, centerTrace, centerDot, traceKey: '' };
   setReplayView('home');
   const empty = $('replay3d-empty');
   if (empty) empty.remove();
@@ -830,10 +866,10 @@ function setReplayView(view) {
   if (!r) return;
   if (view === 'top') {
     r.camera.position.set(0, 0, 560);
-    r.controls.target.set(0, 0, kin.NEUTRAL_Z || 105);
+    r.controls.target.set(0, 0, 60);
   } else {
-    r.camera.position.set(310, -330, 260);
-    r.controls.target.set(0, 0, kin.NEUTRAL_Z || 105);
+    r.camera.position.set(300, -300, 250);
+    r.controls.target.set(0, 0, 60);
   }
   r.controls.update();
   renderReplay3d();
@@ -858,48 +894,48 @@ function destroyReplay3d() {
   state.replay3d = null;
 }
 
-function updateReplay3d(sample, samples, idx) {
+function updateReplayTrace(samples) {
+  const r = state.replay3d;
+  if (!r) return;
+  const key = `${state.detail?.run?.id || ''}:${samples.length}`;
+  if (r.traceKey !== key) {
+    const poses = samples.map(s => s.pose || []).filter(p => p.length >= 3);
+    const points = new Float32Array(Math.max(1, poses.length) * 3);
+    poses.forEach((p, i) => {
+      points[i * 3] = Number(p[0] || 0);
+      points[i * 3 + 1] = Number(p[1] || 0);
+      points[i * 3 + 2] = Number(p[2] || kin.NEUTRAL_Z || 105);
+    });
+    r.centerTrace.geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    r.centerTrace.geometry.setDrawRange(0, poses.length);
+    r.traceKey = key;
+  }
+  r.centerTrace.visible = state.showReplayTrace;
+  r.centerDot.visible = state.showReplayTrace;
+}
+
+function updateReplay3d(sample) {
   const r = state.replay3d;
   if (!r || !sample) return;
+  const samples = state.detail?.samples || [];
+  updateReplayTrace(samples);
   const model = modelFromSample(sample);
-  const Bv = model.B.map(makeThreeVec);
-  const Av = model.A.map(makeThreeVec);
-  const Qv = model.Q.map(makeThreeVec);
-  updatePlateGeometry(r.platformGeo, Qv);
-  for (let i = 0; i < 6; i++) {
-    r.baseDots[i].position.copy(Bv[i]);
-    r.motorDots[i].position.copy(Av[i]);
-    r.platformDots[i].position.copy(Qv[i]);
-    r.labels[i].position.copy(Qv[i]).add(new THREE.Vector3(0, 0, 12));
-    setLineObject(r.lowerLines[i], Bv[i], Av[i]);
-    setLineObject(r.upperLines[i], Av[i], Qv[i]);
-  }
-  const center = new THREE.Vector3(
-    Number(model.pose?.[0] || 0),
-    Number(model.pose?.[1] || 0),
-    Number(model.pose?.[2] || kin.NEUTRAL_Z || 105)
+  r.rig.updateFromPoints(model.A, model.Q);
+  const p = sample.pose || [];
+  r.centerDot.position.set(
+    Number(p[0] || 0),
+    Number(p[1] || 0),
+    Number(p[2] || kin.NEUTRAL_Z || 105)
   );
-  r.centerDot.position.copy(center);
-
-  const arr = r.trail.geometry.attributes.position.array;
-  const tail = samples.slice(Math.max(0, idx - 179), idx + 1);
-  tail.forEach((s, i) => {
-    const p = s.pose || [];
-    arr[i * 3] = Number(p[0] || 0);
-    arr[i * 3 + 1] = Number(p[1] || 0);
-    arr[i * 3 + 2] = Number(p[2] || kin.NEUTRAL_Z || 105);
-  });
-  r.trail.geometry.setDrawRange(0, tail.length);
-  r.trail.geometry.attributes.position.needsUpdate = true;
   renderReplay3d();
 }
 
 function drawReplay() {
   const samples = state.detail?.samples || [];
   const planes = [
-    { id: 'plane-xy', h: 'x', v: 'y', hLabel: 'X mm', vLabel: 'Y mm', title: 'XY' },
-    { id: 'plane-yz', h: 'y', v: 'z', hLabel: 'Y mm', vLabel: 'Z mm', title: 'YZ' },
-    { id: 'plane-xz', h: 'x', v: 'z', hLabel: 'X mm', vLabel: 'Z mm', title: 'XZ' },
+    { id: 'plane-xy', key: 'xy', h: 'x', v: 'y', hLabel: 'X mm', vLabel: 'Y mm', title: 'XY' },
+    { id: 'plane-yz', key: 'yz', h: 'y', v: 'z', hLabel: 'Y mm', vLabel: 'Z mm', title: 'YZ' },
+    { id: 'plane-xz', key: 'xz', h: 'x', v: 'z', hLabel: 'X mm', vLabel: 'Z mm', title: 'XZ' },
   ];
   planes.forEach(spec => drawPlane(spec, samples));
   if (!samples.length) {
@@ -916,12 +952,12 @@ function drawReplay() {
   if (rt) rt.textContent = timeText;
   if (rp) rp.textContent = `X ${fmt.n(p[0], 1)} Y ${fmt.n(p[1], 1)} Z ${fmt.n(p[2], 1)} R ${fmt.n(p[3], 1)} P ${fmt.n(p[4], 1)} Y ${fmt.n(p[5], 1)}`;
   if (rc) rc.textContent = `ok ${s.ok ?? '—'} · hz ${fmt.n(s.lhz, 0)} · ef ${s.ef ?? '—'} · drop ${s.rxDrop ?? 0}`;
-  updateReplay3d(s, samples, idx);
+  updateReplay3d(s);
 }
 
 $('refresh').onclick = () => loadRuns(state.selected);
 $('search').oninput = applyFilter;
-$('profile').onchange = applyFilter;
+$('program-filter').onchange = applyFilter;
 window.RunPanel = { state, renderTab, loadRuns, selectRun };
 loadRuns().catch(err => {
   $('run-list').innerHTML = `<div class="empty-state">讀取失敗：${esc(err.message)}</div>`;

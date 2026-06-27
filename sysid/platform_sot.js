@@ -8,7 +8,7 @@
 const DEFAULT_PLATFORM_CONFIG = Object.freeze({
   version: 1,
   homeRelative: [0, 0, 28, 0, 0, 0],
-  landingRelative: [0, 0, 10, 0, 0, 0],
+  landingRelative: [0, 0, -10, 0, 0, 34],
   followLimits: { vmaxT: 60, vmaxR: 45 },
   trialDefaults: {
     profile: 'heave-step',
@@ -28,14 +28,13 @@ const DEFAULT_PLATFORM_CONFIG = Object.freeze({
       loops: 0,
       paramsById: {},
     },
+    workspace: {
+      blocks: [],
+      currentProgramId: 'scratch',
+      programs: [],
+    },
     disturbance: {
-      uMotor: 3,
-      uDeg: 8,
-      uMs: 150,
-      wMode: 'tilt',
-      wSev: 3,
-      wMs: 120,
-      batteryBackstop: 15,
+      randomSev: 3,
     },
     recorderName: 'run',
   },
@@ -87,13 +86,34 @@ function mergeConfig(input = {}) {
         out.uiState.motion.paramsById = clone(u.motion.paramsById);
       }
     }
+    if (u.workspace && typeof u.workspace === 'object') {
+      const normalizeBlocks = (blocks) => (Array.isArray(blocks) ? blocks : [])
+        .filter((b) => b && typeof b.id === 'string')
+        .map((b) => ({
+          id: b.id,
+          params: b.params && typeof b.params === 'object' ? clone(b.params) : {},
+          loops: Number.isFinite(Number(b.loops)) ? Number(b.loops) : 1,
+        }));
+      if (Array.isArray(u.workspace.blocks)) out.uiState.workspace.blocks = normalizeBlocks(u.workspace.blocks);
+      if (typeof u.workspace.currentProgramId === 'string') out.uiState.workspace.currentProgramId = u.workspace.currentProgramId;
+      if (Array.isArray(u.workspace.programs)) {
+        out.uiState.workspace.programs = u.workspace.programs
+          .filter((p) => p && typeof p.id === 'string')
+          .map((p) => ({
+            id: p.id,
+            name: typeof p.name === 'string' && p.name.trim() ? p.name.trim() : p.id,
+            notes: typeof p.notes === 'string' ? p.notes : '',
+            blocks: normalizeBlocks(p.blocks),
+            hash: typeof p.hash === 'string' ? p.hash : null,
+            createdAt: typeof p.createdAt === 'string' ? p.createdAt : null,
+            updatedAt: typeof p.updatedAt === 'string' ? p.updatedAt : null,
+          }));
+      }
+    }
     if (u.disturbance && typeof u.disturbance === 'object') {
       const d = u.disturbance;
-      if (typeof d.wMode === 'string') out.uiState.disturbance.wMode = d.wMode;
-      for (const k of ['uMotor', 'uDeg', 'uMs', 'wSev', 'wMs', 'batteryBackstop']) {
-        const v = Number(d[k]);
-        if (Number.isFinite(v)) out.uiState.disturbance[k] = v;
-      }
+      const randomSev = Number.isFinite(Number(d.randomSev)) ? Number(d.randomSev) : Number(d.wSev);
+      if (Number.isFinite(randomSev)) out.uiState.disturbance.randomSev = Math.max(0.5, Math.min(8, randomSev));
     }
     if (typeof u.recorderName === 'string') out.uiState.recorderName = u.recorderName;
   }

@@ -38,6 +38,16 @@ function round(v, d = 3) {
   return Number(v.toFixed(d));
 }
 
+function counterDelta(values) {
+  let total = 0;
+  for (let i = 1; i < values.length; i++) {
+    const prev = values[i - 1], cur = values[i];
+    if (!Number.isFinite(prev) || !Number.isFinite(cur)) continue;
+    total += cur >= prev ? cur - prev : cur;
+  }
+  return total;
+}
+
 function load(file) {
   const tele = [];
   const cmds = [];
@@ -125,8 +135,8 @@ function summarize(file) {
       efMax: max(ef),
       txMax: max(tx),
       rxMax: max(rx),
-      rxDropSum: rxDrop.reduce((a, b) => a + b, 0),
-      txFailSum: txFail.reduce((a, b) => a + b, 0),
+      rxDropSum: counterDelta(rxDrop),
+      txFailSum: counterDelta(txFail),
       qDepthMax: max(qDepth),
       qMaxMax: max(qMax),
       errorPassiveFrac: tx.length ? round(tx.filter((x) => x >= 128).length / tx.length, 4) : null,
@@ -170,4 +180,5 @@ function main() {
   console.log(JSON.stringify(out.length === 1 ? out[0] : out, null, 2));
 }
 
-main();
+if (require.main === module) main();
+else module.exports = { summarize, load };

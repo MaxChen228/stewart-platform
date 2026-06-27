@@ -11,6 +11,7 @@
 - 改幾何時必須同步三處：`src/kinematics.h`、`web/index.html`、`sysid/kin.js`。
 - CAN 指令細節以 `docs/servo42d/00-index.md` 作入口；不要只靠本檔摘要猜封包。
 - 系統辨識與控制結論以實測資料為準。新增實驗記錄時追加到 `docs/sysid-research-log.md`，不要改舊 entry。
+- 回授預設使用 SERVO42D `0x01` auto-return 送 `0x35` raw encoder；`A0` 輪詢只作明確診斷/對照條件。即時確認看 `/api/latest` 的 `ar/cus/bus.per`。
 - 前端修改通常不必重啟 server；韌體修改才需要 `npm run upload`。
 - 驗證優先順序：JS/server 改動跑相應 Node 流程；韌體改動至少跑 `pio run`；需要硬體才可驗證的項目要明確說明未實測。
 
@@ -103,6 +104,7 @@ Pair 3 (M5,M6) @ -30°
 | 指令 | 用途 |
 |------|------|
 | 0x35 | 讀 RAW 累積編碼器（不受 0x92 影響） |
+| 0x01 | auto-return 週期主動回報唯讀參數（本專案預設用來推送 0x35） |
 | 0x92 | 設當前位置為坐標零點 |
 | 0x96 | 設 vFOC PID（Kp/Ki/Kd/Kv, 0-1024） |
 | 0xF3 | 使能(01)/禁用(00) |
@@ -115,6 +117,7 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 
 - 只有 2 個接收 buffer，F5 回覆會塞爆 → 每 cycle 開頭必須 flushReceiveBuffer()
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
+- 主運行回授預設 `A1` auto-return；`ar>0`、`cus=0`、`bus.per` 六顆有計數代表生效。MCP2515 下仍要監看 `ef/rxDrop/tx`，必要時調慢 `AR`，但不要把 `A0` 輪詢當一般預設。
 
 ## 編碼器與校正
 

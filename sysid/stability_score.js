@@ -32,6 +32,16 @@ function round(x, d = 4) {
   return Number.isFinite(x) ? Number(x.toFixed(d)) : null;
 }
 
+function counterDelta(values) {
+  let total = 0;
+  for (let i = 1; i < values.length; i++) {
+    const prev = values[i - 1], cur = values[i];
+    if (!Number.isFinite(prev) || !Number.isFinite(cur)) continue;
+    total += cur >= prev ? cur - prev : cur;
+  }
+  return total;
+}
+
 function mean(xs) {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN;
 }
@@ -70,6 +80,8 @@ function readJson(file) {
 }
 
 function companionManifest(file) {
+  const direct = file.replace(/\.jsonl$/, '.manifest.json');
+  if (fs.existsSync(direct)) return readJson(direct);
   const bundle = readJson(file.replace(/\.jsonl$/, '.bundle.json'));
   if (bundle?.manifest && fs.existsSync(bundle.manifest)) return readJson(bundle.manifest);
   const dir = path.dirname(file);
@@ -89,6 +101,7 @@ function smoothstep(u) {
 function load(file) {
   const cmds = [];
   const tele = [];
+  const events = [];
   resetFK([0, 0, NEUTRAL_Z, 0, 0, 0]);
 
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
@@ -100,6 +113,11 @@ function load(file) {
       cmds.push({ t: Number(rec.t), cmd, pose: parsePoseCommand(cmd), disturb: parseWCommand(cmd) });
       continue;
     }
+    if (rec.dir === 'event') {
+      const event = rec.d && typeof rec.d === 'object' ? rec.d : {};
+      events.push({ t: Number(rec.t), ...event });
+      continue;
+    }
     if (rec.dir !== 'in') continue;
     let d;
     try { d = typeof rec.d === 'string' ? JSON.parse(rec.d) : rec.d; } catch { continue; }
@@ -109,7 +127,31 @@ function load(file) {
   }
   tele.sort((a, b) => a.t - b.t);
   cmds.sort((a, b) => a.t - b.t);
-  return { cmds, tele };
+  events.sort((a, b) => a.t - b.t);
+  return { cmds, tele, events };
+}
+
+function scoringWindow(events) {
+  const start = events.find((e) => e.type === 'score_start' || (e.type === 'session_phase' && e.phase === 'recording'));
+  if (!start) return null;
+  const stop = events.find((e) => e.t > start.t && (e.type === 'score_stop' || (e.type === 'session_phase' && e.phase === 'landing')));
+  return {
+    startMs: start.t,
+    endMs: stop ? stop.t : Infinity,
+    startEvent: start.type === 'session_phase' ? start.phase : start.type,
+    endEvent: stop ? (stop.type === 'session_phase' ? stop.phase : stop.type) : null,
+  };
+}
+
+function cropToWindow(cmds, tele, events) {
+  const window = scoringWindow(events);
+  if (!window) return { cmds, tele, window: null };
+  const inWindow = (row) => row.t >= window.startMs && row.t <= window.endMs;
+  return {
+    cmds: cmds.filter(inWindow),
+    tele: tele.filter(inWindow),
+    window,
+  };
 }
 
 function applyReferenceCompensation(pose, referenceComp) {
@@ -277,8 +319,8 @@ function quality(tele) {
   const dts = [];
   for (let i = 1; i < tele.length; i++) dts.push(tele[i].t - tele[i - 1].t);
   const latest = tele[tele.length - 1]?.raw || {};
-  const rxDropSum = tele.reduce((s, x) => s + (x.raw.can?.rxDrop || 0), 0);
-  const txFailSum = tele.reduce((s, x) => s + (x.raw.can?.txFail || 0), 0);
+  const rxDropSum = counterDelta(tele.map((x) => Number(x.raw.can?.rxDrop)).filter(Number.isFinite));
+  const txFailSum = counterDelta(tele.map((x) => Number(x.raw.can?.txFail)).filter(Number.isFinite));
   const efOr = tele.reduce((s, x) => s | (x.raw.can?.ef || x.raw.ef || 0), 0);
   const durationS = tele.length >= 2 ? (tele[tele.length - 1].t - tele[0].t) / 1000 : 0;
   return {
@@ -327,7 +369,9 @@ function disturbanceRecovery(samples, cmds) {
 }
 
 function score(file, opts = {}) {
-  const { cmds, tele } = load(file);
+  const loaded = load(file);
+  const scoped = cropToWindow(loaded.cmds, loaded.tele, loaded.events);
+  const { cmds, tele, window } = scoped;
   if (!tele.length) throw new Error(`${file}: no telemetry`);
   const manifest = companionManifest(file);
   const referenceComp = {
@@ -376,6 +420,12 @@ function score(file, opts = {}) {
       qualityPenalty: round(qualityPenalty),
     },
     targetModel: {
+      scoringWindow: window ? {
+        startMs: round(window.startMs, 1),
+        endMs: Number.isFinite(window.endMs) ? round(window.endMs, 1) : null,
+        startEvent: window.startEvent,
+        endEvent: window.endEvent,
+      } : null,
       commandCount: cmds.length,
       poseCommandCount: cmds.filter((x) => x.pose).length,
       disturbanceCount: cmds.filter((x) => x.disturb).length,
@@ -409,4 +459,11 @@ function main() {
 }
 
 if (require.main === module) main();
-else module.exports = { score };
+else module.exports = {
+  score,
+  load,
+  cropToWindow,
+  buildTargetModel,
+  companionManifest,
+  AXES,
+};
