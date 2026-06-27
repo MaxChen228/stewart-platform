@@ -126,6 +126,7 @@ export function normalizeWorkspaceTiming(config = {}) {
   return {
     warmupMs: ms('warmupMs', 1000, 0, 30000),
     homeMs: ms('homeMs', 1500, 300, 60000),
+    followSettleMs: ms('followSettleMs', 800, 0, 30000),
     landMs: ms('landMs', 1500, 300, 60000),
   };
 }
@@ -147,6 +148,7 @@ export function workspacePreviewTimeline({
   kin = null,
   warmupSec = 1.0,
   takeoffSec = 1.5,
+  followSettleSec = 0.8,
   closeSec = 1.2,
   landSec = 1.5,
   smokeSec = 0.8,
@@ -164,6 +166,7 @@ export function workspacePreviewTimeline({
 
   if (Number(warmupSec) > 0) add({ kind: 'warmup', label: 'HOLD WARMUP', from: start, to: start, duration: warmupSec });
   add({ kind: 'takeoff', label: 'TAKE OFF', from: start, to: home, duration: takeoffSec });
+  if (Number(followSettleSec) > 0) add({ kind: 'follow-settle', label: 'FOLLOW SETTLE', from: home, to: home, duration: followSettleSec });
   if (blocks.length) {
     for (const [index, block] of blocks.entries()) {
       const def = motionById(motions, block.id);

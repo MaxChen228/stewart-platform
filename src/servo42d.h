@@ -449,7 +449,7 @@ public:
 
     // 連續排空：把 RX buffer 內所有 0x35 上報幀「覆蓋寫入」latest[]（永遠保留最新值）。
     // 與 drainEncoderReplies 差別：不跳過已收的，總是更新。供 auto-return 高頻呼叫。
-    int drainInto(int64_t latest[NUM_MOTORS]) {
+    int drainInto(int64_t latest[NUM_MOTORS], uint32_t latestAtMs[NUM_MOTORS] = nullptr) {
         CanGuard _g(can);
         int n = 0;
         while (can.checkReceive() == CAN_MSGAVAIL) {
@@ -471,6 +471,7 @@ public:
             val = (val << 8) | rxBuf[5];
             val = (val << 8) | rxBuf[6];
             latest[idx] = val;
+            if (latestAtMs) latestAtMs[idx] = millis();
             n++;
             rxPerId[idx]++;                  // [Phase0]
         }

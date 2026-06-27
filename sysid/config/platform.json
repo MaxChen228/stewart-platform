@@ -27,20 +27,21 @@
     "ms": 5000,
     "settleMs": 800,
     "warmupMs": 1000,
-    "homeMs": 1500,
-    "landMs": 1500,
+    "homeMs": 4000,
+    "followSettleMs": 1500,
+    "landMs": 4000,
     "safeLand": true
   },
   "uiState": {
     "poseTargetRelative": [
       0,
       0,
-      28,
+      31,
+      -0.5,
       0,
-      0,
-      0
+      65
     ],
-    "poseMoveMs": 1200,
+    "poseMoveMs": 3600,
     "motion": {
       "selectedId": "hold",
       "loops": 1,
@@ -77,6 +78,10 @@
         },
         "hold": {
           "T": 0.5
+        },
+        "z-sine": {
+          "A": 25,
+          "T": 2
         }
       }
     },
@@ -85,22 +90,34 @@
         {
           "id": "hold",
           "params": {
-            "T": 1
+            "T": 0.5
           },
           "loops": 1
         }
       ],
-      "currentProgramId": "scratch",
-      "programs": []
+      "currentProgramId": "00_mqwek9ay",
+      "programs": [
+        {
+          "id": "00_mqwek9ay",
+          "name": "00",
+          "notes": "",
+          "blocks": [
+            {
+              "id": "hold",
+              "params": {
+                "T": 0.5
+              },
+              "loops": 1
+            }
+          ],
+          "hash": "495da376",
+          "createdAt": "2026-06-27T13:35:28.282Z",
+          "updatedAt": "2026-06-27T13:37:24.907Z"
+        }
+      ]
     },
     "disturbance": {
-      "uMotor": 3,
-      "uDeg": 0,
-      "uMs": 0,
-      "wMode": "tilt",
-      "wSev": 0,
-      "wMs": 0,
-      "batteryBackstop": 15
+      "randomSev": 3
     },
     "recorderName": "run"
   },
@@ -115,5 +132,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-27T13:18:59.570Z"
+  "updatedAt": "2026-06-27T16:37:04.760Z"
 }

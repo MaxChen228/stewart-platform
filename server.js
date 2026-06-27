@@ -9,6 +9,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { NEUTRAL_Z, solveFK, resetFK } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
+const WorkspaceExecutor = require('./sysid/workspace_executor');
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
 const BAUD = 460800;
@@ -54,12 +55,13 @@ let recT0 = 0;
 let recOwner = null;
 
 // UI/session ownership gate. Manual pose controls and program sessions share the
-// same WebSocket transport, so the server owns the final arbitration. A future
-// workspace runner will start a session, send commands with the returned token,
-// and finish/abort the session when safe landing is complete.
+// same WebSocket transport, so the server owns the final arbitration. Workspace
+// execution is owned by the server-side executor; browser and CLI clients only
+// request a run and observe session events.
 let activeSession = null;
 let sessionEvents = [];
 let sessionSeq = 0;
+let workspaceRun = null;
 
 function makeSessionToken() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -135,6 +137,53 @@ function sanitizeConditionMeta(condition) {
   return Object.keys(out).length ? out : null;
 }
 
+function startSessionState({ label = 'program', phase = 'starting', program = null, condition = null } = {}) {
+  if (activeSession) throw new Error('session already active');
+  activeSession = {
+    token: makeSessionToken(),
+    owner: 'session',
+    label: typeof label === 'string' ? label.slice(0, 80) : 'program',
+    phase: typeof phase === 'string' ? phase.slice(0, 40) : 'starting',
+    program: sanitizeProgramMeta(program),
+    condition: sanitizeConditionMeta(condition),
+    startedAt: new Date().toISOString(),
+  };
+  pushSessionEvent('session_start', {
+    label: activeSession.label,
+    phase: activeSession.phase,
+    program: activeSession.program,
+    condition: activeSession.condition,
+  });
+  broadcastSessionState();
+  return { ...publicSessionState(), token: activeSession.token };
+}
+
+function requireSessionToken(token) {
+  if (!activeSession) throw new Error('no active session');
+  if (token !== activeSession.token) throw new Error('bad session token');
+}
+
+function setSessionPhase(token, phase) {
+  requireSessionToken(token);
+  activeSession.phase = typeof phase === 'string' ? phase.slice(0, 40) : activeSession.phase;
+  pushSessionEvent('phase', { phase: activeSession.phase });
+  recEvent('session_phase', { phase: activeSession.phase });
+  broadcastSessionState();
+  return publicSessionState();
+}
+
+function finishSessionState(token, { abort = false, reason = null } = {}) {
+  requireSessionToken(token);
+  const endedSession = publicSessionState();
+  activeSession = null;
+  pushSessionEvent(abort ? 'session_abort' : 'session_finish', {
+    reason,
+    session: { ...endedSession, active: false, endedAt: new Date().toISOString() },
+  });
+  broadcastSessionState();
+  return publicSessionState();
+}
+
 function publicRecState() {
   return { recording: !!recStream, path: recPath, lines: recCount, owner: publicRecOwner() };
 }
@@ -156,6 +205,36 @@ function commandAllowed(cmd, token) {
   if (op === 'D' || op === 'S') return { ok: true, emergency: true };
   if (!movementCommand(cmd)) return { ok: true };
   return { ok: false, reason: `session active: ${activeSession.label || activeSession.owner}` };
+}
+
+function sendCommand(cmd, sessionToken = null) {
+  const gate = commandAllowed(cmd, sessionToken);
+  if (!gate.ok) {
+    console.warn(`[WS] blocked cmd (${gate.reason}): ${cmd}`);
+    pushSessionEvent('command_blocked', { cmd, reason: gate.reason, transport: currentTransport });
+    recWrite('drop', { cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() });
+    broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() }));
+    return { ok: false, reason: gate.reason };
+  }
+  console.log(`[WS] cmd: ${cmd}`);
+  const wr = transport.write(cmd);
+  if (wr.ok) {
+    if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_sent', { cmd, via: wr.kind });
+    recWrite('cmd', cmd);
+    broadcast(JSON.stringify({ evt: 'cmd', c: cmd, via: wr.kind }));
+    return { ok: true, via: wr.kind };
+  }
+  console.warn(`[WS] dropped cmd (${wr.reason}): ${cmd}`);
+  if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_dropped', { cmd, reason: wr.reason, transport: currentTransport });
+  recWrite('drop', { cmd, reason: wr.reason, transport: currentTransport });
+  broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: wr.reason, transport: currentTransport }));
+  return { ok: false, reason: wr.reason };
+}
+
+function sendRequiredCommand(cmd, sessionToken = null) {
+  const result = sendCommand(cmd, sessionToken);
+  if (!result.ok) throw new Error(`command dropped: ${cmd} (${result.reason || 'unknown'})`);
+  return result;
 }
 
 function recWrite(dir, payload) {
@@ -217,7 +296,7 @@ function createRecordingArtifacts(recordingPath, { session = null, program = nul
   const stem = recordingPath.replace(/\.jsonl$/, '');
   const manifestPath = `${stem}.manifest.json`;
   const summaryPath = `${stem}.summary.json`;
-  const stabilityPath = `${stem}.stability.json`;
+  const evaluationPath = `${stem}.evaluation.json`;
   const bundlePath = `${stem}.bundle.json`;
   const existingManifest = safeReadJson(manifestPath);
   const manifest = {
@@ -236,11 +315,11 @@ function createRecordingArtifacts(recordingPath, { session = null, program = nul
   const summary = JSON.parse(runSysidNode('telemetry_summary.js', [recordingPath]));
   writeJson(summaryPath, summary);
   const plot = JSON.parse(runSysidNode('plot_motion6.js', [recordingPath, '--out-dir', path.join(REC_DIR, 'plots')]));
-  const stability = JSON.parse(runSysidNode('stability_score.js', [recordingPath]));
-  writeJson(stabilityPath, stability);
-  const bundle = { recording: recordingPath, manifest: manifestPath, summary: summaryPath, stability: stabilityPath, plot };
+  const evaluation = JSON.parse(runSysidNode('workspace_evaluation.js', [recordingPath]));
+  writeJson(evaluationPath, evaluation);
+  const bundle = { recording: recordingPath, manifest: manifestPath, summary: summaryPath, evaluation: evaluationPath, plot };
   writeJson(bundlePath, bundle);
-  return { manifest: manifestPath, summary: summaryPath, stability: stabilityPath, bundle: bundlePath, plot };
+  return { manifest: manifestPath, summary: summaryPath, evaluation: evaluationPath, bundle: bundlePath, plot };
 }
 
 function analyzeRun(id, opts = {}) {
@@ -347,6 +426,33 @@ function latestTelemetryBody() {
   }
 }
 
+function latestTelemetryObject() {
+  if (!lastTelemetry) return {};
+  try {
+    const d = JSON.parse(lastTelemetry);
+    d._server = {
+      receivedAt: lastTelemetryAt || null,
+      telemetryAgeMs: lastTelemetryAt ? Date.now() - lastTelemetryAt : null,
+    };
+    return d;
+  } catch {
+    return {};
+  }
+}
+
+function publicWorkspaceRunState() {
+  return workspaceRun
+    ? {
+        active: !!workspaceRun.active,
+        label: workspaceRun.label || null,
+        startedAt: workspaceRun.startedAt,
+        aborting: !!workspaceRun.signal?.aborted,
+        result: workspaceRun.result || null,
+        error: workspaceRun.error || null,
+      }
+    : { active: false };
+}
+
 function runIdFromJsonl(file) {
   return path.basename(file, '.jsonl');
 }
@@ -391,7 +497,7 @@ function collectRuns() {
     const id = runIdFromJsonl(file);
     const stem = file.replace(/\.jsonl$/, '');
     const summary = safeReadJson(`${stem}.summary.json`);
-    const stability = safeReadJson(`${stem}.stability.json`);
+    const evaluation = safeReadJson(`${stem}.evaluation.json`);
     const bundle = safeReadJson(`${stem}.bundle.json`);
     const directManifest = `${stem}.manifest.json`;
     const manifest = fs.existsSync(directManifest)
@@ -411,20 +517,28 @@ function collectRuns() {
       durationS: summary?.durationS ?? meta.durationS,
       samples: summary?.samples ?? meta.samples,
       cmdCount: meta.cmdCount,
-      score: stability?.score?.stability ?? null,
+      verdict: evaluation?.quality?.verdict ?? null,
+      features: {
+        maxStepDeg: evaluation?.fullBadness?.motorStepMaxDeg ?? null,
+        p99StepDeg: evaluation?.fullBadness?.motorStepP99MeanDeg ?? null,
+        crossPeak: evaluation?.fullBadness?.poseCrossHpPeak ?? null,
+        worstMotor: evaluation?.fullBadness?.worstMotorStep?.label ?? null,
+        takeoffStepDeg: evaluation?.quality?.takeoff?.motorStepMaxDeg ?? null,
+        landingStepDeg: evaluation?.quality?.landing?.motorStepMaxDeg ?? null,
+      },
       profile: manifest?.condition?.profile || (id.includes('z_sweep') ? 'z-sweep' : id.includes('heave-step') ? 'heave-step' : null),
       program,
       condition: manifest?.condition || meta.meta?.owner?.condition || null,
       health: {
-        okFailFrac: summary?.encoders?.failFrac ?? null,
-        canEfOr: summary?.canHealth?.efOr ?? stability?.quality?.can?.efOr ?? null,
-        rxDropSum: summary?.canHealth?.rxDropSum ?? stability?.quality?.can?.rxDropSum ?? null,
-        rxDropPerS: stability?.quality?.can?.rxDropPerS ?? null,
+        okFailFrac: evaluation?.health?.okFailFrac ?? summary?.encoders?.failFrac ?? null,
+        canEfOr: evaluation?.health?.efOr ?? summary?.canHealth?.efOr ?? null,
+        rxDropSum: evaluation?.health?.rxDrop ?? summary?.canHealth?.rxDropSum ?? null,
+        rxDropPerS: evaluation?.health?.rxDropPerS ?? null,
       },
       files: {
         recording: safeRelPath(file),
         summary: fs.existsSync(`${stem}.summary.json`) ? safeRelPath(`${stem}.summary.json`) : null,
-        stability: fs.existsSync(`${stem}.stability.json`) ? safeRelPath(`${stem}.stability.json`) : null,
+        evaluation: fs.existsSync(`${stem}.evaluation.json`) ? safeRelPath(`${stem}.evaluation.json`) : null,
         manifest: fs.existsSync(directManifest) ? safeRelPath(directManifest) : (bundle?.manifest && fs.existsSync(bundle.manifest) ? safeRelPath(bundle.manifest) : null),
         bundle: fs.existsSync(`${stem}.bundle.json`) ? safeRelPath(`${stem}.bundle.json`) : null,
         planePlot: fs.existsSync(planePlot) ? safeRelPath(planePlot) : null,
@@ -439,7 +553,7 @@ function loadRunDetail(id) {
   if (!file) return null;
   const stem = file.replace(/\.jsonl$/, '');
   const summary = safeReadJson(`${stem}.summary.json`);
-  const stability = safeReadJson(`${stem}.stability.json`);
+  const evaluation = safeReadJson(`${stem}.evaluation.json`);
   const bundle = safeReadJson(`${stem}.bundle.json`);
   const directManifest = `${stem}.manifest.json`;
   const manifest = fs.existsSync(directManifest)
@@ -477,7 +591,7 @@ function loadRunDetail(id) {
   const step = Math.max(1, Math.ceil(rawRows.length / maxSamples));
   for (let i = 0; i < rawRows.length; i += step) samples.push(rawRows[i]);
   const run = collectRuns().find((x) => x.id === id);
-  return { run, summary, stability, manifest, bundle, commands, samples, sampleStep: step };
+  return { run, summary, evaluation, manifest, bundle, commands, samples, sampleStep: step };
 }
 
 function relatedRunFiles(id) {
@@ -489,11 +603,11 @@ function relatedRunFiles(id) {
     file,
     `${stem}.manifest.json`,
     `${stem}.summary.json`,
-    `${stem}.stability.json`,
+    `${stem}.evaluation.json`,
     `${stem}.bundle.json`,
     bundle?.manifest,
     bundle?.summary,
-    bundle?.stability,
+    bundle?.evaluation,
     bundle?.plot?.planeOut,
     bundle?.plot?.motorOut,
     path.join(REC_DIR, 'plots', `${path.basename(stem)}_plane6.svg`),
@@ -533,6 +647,108 @@ function moveRunFiles(id, bucket) {
     moved,
   }, null, 2));
   return { id, op: bucket, dest: safeRelPath(destDir), moved };
+}
+
+async function startWorkspaceRun(incoming = {}) {
+  if (workspaceRun?.active) throw new Error('workspace run already active');
+  if (activeSession) throw new Error('session already active');
+  const config = loadPlatformConfig();
+  const signal = { aborted: false };
+  const opts = {
+    name: typeof incoming.name === 'string' ? incoming.name.slice(0, 80) : '',
+    blocks: Array.isArray(incoming.blocks) ? incoming.blocks : undefined,
+    program: sanitizeProgramMeta(incoming.program) || null,
+    zBias: Number(incoming.zBias),
+    vmaxT: Number(incoming.vmaxT),
+    vmaxR: Number(incoming.vmaxR),
+    warmupMs: Number(incoming.warmupMs),
+    homeMs: Number(incoming.homeMs),
+    followSettleMs: Number(incoming.followSettleMs),
+    landMs: Number(incoming.landMs),
+    closeMs: Number(incoming.closeMs),
+    releaseObserveMs: Number(incoming.releaseObserveMs),
+  };
+  const plan = await WorkspaceExecutor.buildWorkspacePlan(config, opts);
+  if (!plan.audit.ok) throw new Error(`closed-loop audit failed: ${plan.audit.issues.join('; ')}`);
+  const label = opts.name || `${plan.program ? plan.program.id : 'workspace'}_workspace_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+  workspaceRun = {
+    active: true,
+    label,
+    startedAt: new Date().toISOString(),
+    signal,
+    result: null,
+    error: null,
+  };
+  const deps = {
+    getLatest: latestTelemetryObject,
+    getTransport: () => ({
+      ...currentTransport,
+      lastLineAt: lastLine ? lastLine.t : null,
+      lastTelemetryAt: lastTelemetryAt || null,
+      telemetryAgeMs: lastTelemetryAt ? Date.now() - lastTelemetryAt : null,
+    }),
+    getRecorder: publicRecState,
+    startSession: (session) => startSessionState(session),
+    phase: (token, phase) => setSessionPhase(token, phase),
+    startRecording: (token, name) => {
+      requireSessionToken(token);
+      const labelName = typeof name === 'string' ? name.slice(0, 80) : activeSession.label;
+      const p = recStart(labelName, {
+        type: 'session',
+        label: activeSession.label,
+        token: activeSession.token,
+        program: activeSession.program,
+        condition: activeSession.condition,
+      });
+      pushSessionEvent('rec_start', { path: safeRelPath(p), recorder: publicRecState() });
+      return publicRecState();
+    },
+    stopRecording: async (token, analyze = false) => {
+      requireSessionToken(token);
+      if (recOwner && recOwner.type === 'session' && recOwner.token !== activeSession.token) {
+        throw new Error('recorder belongs to another session');
+      }
+      const stopped = await recStop();
+      let artifacts = null;
+      let artifactError = null;
+      if (analyze !== false) {
+        try {
+          artifacts = stopped?.path ? createRecordingArtifacts(stopped.path, { session: publicSessionState(), program: activeSession.program || null, condition: activeSession.condition || null }) : null;
+        } catch (err) {
+          artifactError = err.message;
+        }
+      }
+      pushSessionEvent('rec_stop', { recorder: stopped, artifacts, artifactError });
+      return { recording: false, ...(stopped || {}), artifacts, artifactError };
+    },
+    finishSession: (token) => finishSessionState(token),
+    abortSession: (token, reason) => {
+      try { return finishSessionState(token, { abort: true, reason }); }
+      catch { return publicSessionState(); }
+    },
+    send: (cmd, token) => sendRequiredCommand(cmd, token),
+    analyzeRun: (id, optsForRun) => analyzeRun(id, optsForRun),
+  };
+  workspaceRun.promise = WorkspaceExecutor.runWorkspaceSession({ config, opts: { ...opts, name: label }, deps, signal })
+    .then((result) => {
+      if (workspaceRun) workspaceRun.result = result;
+      pushSessionEvent('workspace_complete', { result });
+      return result;
+    })
+    .catch((err) => {
+      if (workspaceRun) workspaceRun.error = err.message;
+      pushSessionEvent('workspace_error', { error: err.message });
+      throw err;
+    })
+    .finally(() => {
+      const done = workspaceRun;
+      if (done) done.active = false;
+      setTimeout(() => {
+        if (workspaceRun === done) workspaceRun = null;
+      }, 3000);
+    });
+  workspaceRun.promise.catch(() => {});
+  return { state: publicWorkspaceRunState(), plan: { program: plan.program, condition: plan.condition, blocks: plan.blocks.length, description: plan.description } };
 }
 
 const server = http.createServer((req, res) => {
@@ -749,6 +965,37 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.url === '/api/workspace/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(publicWorkspaceRunState()));
+    return;
+  }
+  if (req.url === '/api/workspace/run' && req.method === 'POST') {
+    readRequestBody(req).then(async (body) => {
+      let incoming = {};
+      try { incoming = JSON.parse(body || '{}'); } catch {}
+      const result = await startWorkspaceRun(incoming);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    }).catch((err) => {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, workspace: publicWorkspaceRunState(), session: publicSessionState(), recorder: publicRecState() }));
+    });
+    return;
+  }
+  if (req.url === '/api/workspace/abort' && req.method === 'POST') {
+    if (workspaceRun?.signal) {
+      workspaceRun.signal.aborted = true;
+      pushSessionEvent('workspace_abort_requested', { label: workspaceRun.label || null });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(publicWorkspaceRunState()));
+    } else {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'no active workspace run', workspace: publicWorkspaceRunState() }));
+    }
+    return;
+  }
+
   if (req.url === '/api/session/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(publicSessionState()));
@@ -761,29 +1008,19 @@ const server = http.createServer((req, res) => {
   }
   if (req.url === '/api/session/start' && req.method === 'POST') {
     readRequestBody(req).then(async (body) => {
-      if (activeSession) {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'session already active', session: publicSessionState() }));
-        return;
-      }
       let incoming = {};
       try { incoming = JSON.parse(body || '{}'); } catch {}
-      activeSession = {
-        token: makeSessionToken(),
-        owner: 'session',
+      const started = startSessionState({
         label: typeof incoming.label === 'string' ? incoming.label.slice(0, 80) : 'program',
         phase: typeof incoming.phase === 'string' ? incoming.phase.slice(0, 40) : 'starting',
         program: sanitizeProgramMeta(incoming.program),
         condition: sanitizeConditionMeta(incoming.condition),
-        startedAt: new Date().toISOString(),
-      };
-      pushSessionEvent('session_start', { label: activeSession.label, phase: activeSession.phase, program: activeSession.program, condition: activeSession.condition });
-      broadcastSessionState();
+      });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ...publicSessionState(), token: activeSession.token }));
+      res.end(JSON.stringify(started));
     }).catch((err) => {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
+      res.writeHead(activeSession ? 409 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, session: publicSessionState() }));
     });
     return;
   }
@@ -791,25 +1028,12 @@ const server = http.createServer((req, res) => {
     readRequestBody(req).then((body) => {
       let incoming = {};
       try { incoming = JSON.parse(body || '{}'); } catch {}
-      if (!activeSession) {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'no active session', session: publicSessionState() }));
-        return;
-      }
-      if (incoming.token !== activeSession.token) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'bad session token', session: publicSessionState() }));
-        return;
-      }
-      activeSession.phase = typeof incoming.phase === 'string' ? incoming.phase.slice(0, 40) : activeSession.phase;
-      pushSessionEvent('phase', { phase: activeSession.phase });
-      recEvent('session_phase', { phase: activeSession.phase });
-      broadcastSessionState();
+      setSessionPhase(incoming.token, incoming.phase);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(publicSessionState()));
     }).catch((err) => {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
+      res.writeHead(err.message === 'bad session token' ? 403 : 409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, session: publicSessionState() }));
     });
     return;
   }
@@ -1001,27 +1225,7 @@ wss.on('connection', (ws, req) => {
       } catch {}
     }
     if (!cmd) return;
-    const gate = commandAllowed(cmd, sessionToken);
-    if (!gate.ok) {
-      console.warn(`[WS] blocked cmd (${gate.reason}): ${cmd}`);
-      pushSessionEvent('command_blocked', { cmd, reason: gate.reason, transport: currentTransport });
-      recWrite('drop', { cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() });
-      broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() }));
-      return;
-    }
-    console.log(`[WS] cmd: ${cmd}`);
-    const wr = transport.write(cmd);     // '\n' 由 transport 內部補；未連線則明確回 dropped
-    if (wr.ok) {
-      if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_sent', { cmd, via: wr.kind });
-      recWrite('cmd', cmd);
-      // echo 給所有 client（含其他來源）→ 操作對等可見，monitor 用此唯一來源畫指令標記
-      broadcast(JSON.stringify({ evt: 'cmd', c: cmd, via: wr.kind }));
-    } else {
-      console.warn(`[WS] dropped cmd (${wr.reason}): ${cmd}`);
-      if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_dropped', { cmd, reason: wr.reason, transport: currentTransport });
-      recWrite('drop', { cmd, reason: wr.reason, transport: currentTransport });
-      broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: wr.reason, transport: currentTransport }));
-    }
+    sendCommand(cmd, sessionToken);
   });
 
   ws.on('close', () => {

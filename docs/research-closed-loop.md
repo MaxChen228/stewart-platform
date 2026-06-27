@@ -74,6 +74,7 @@ A completed runner should produce:
 - `*.jsonl`: raw recording.
 - `*.manifest.json`: software/config/live-state snapshot.
 - `*.summary.json`: machine-readable health summary.
+- `*.evaluation.json`: full-lifecycle raw feature report.
 - `sysid/data/plots/*_motor6.svg`: six motor curves.
 - `sysid/data/plots/*_plane6.svg`: six FK pose curves.
 - `*.bundle.json`: paths to the above.
@@ -83,3 +84,15 @@ A completed runner should produce:
 If a control concept appears in both UI and CLI, extract or route it through a
 shared source first. Do not implement a second copy just because it is faster in
 the moment.
+
+## Workspace Execution
+
+Workspace live execution is owned by the server-side runner exposed through
+`POST /api/workspace/run`, `GET /api/workspace/status`, and
+`POST /api/workspace/abort`.
+
+The browser Workspace page is the editor/preview/observer. The CLI
+`npm run workspace:session` is the dry-run validator and live request client.
+Neither should stream its own live `PF` loop during normal operation; the only
+normal live `PF` loop is inside `sysid/workspace_executor.js`, under a session
+token owned by `server.js`.

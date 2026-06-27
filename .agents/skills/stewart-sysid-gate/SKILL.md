@@ -36,7 +36,7 @@ Use this workflow for system-identification and agent-operated Workspace tasks.
 Workspace is the default path for agent-composed repeatable motion experiments.
 
 - The fixed outer sequence is `TAKE OFF -> HOME -> FOLLOW -> blocks -> HOME -> LAND -> RELEASE -> analyze`.
-- Closed-loop means the recorded motion window starts at HOME and ends at HOME. LAND/RELEASE are safety cleanup after the closed-loop window.
+- Raw Workspace recording covers the full lifecycle: TAKE OFF, HOME, FOLLOW, blocks, close loop, LAND, and RELEASE. Closed-loop scoring/analysis still treats the HOME-to-HOME block interval as the motion window inside that full recording.
 - A Workspace with zero blocks is valid as a smoke test: `TAKE OFF -> HOME record window -> HOME -> LAND`.
 - Session execution must use `npm run workspace:session` for dry-run validation.
 - Live execution must use `npm run workspace:session -- --live --i-am-at-rig --name NAME` and only after the user confirms they are physically at the rig.

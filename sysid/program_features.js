@@ -9,10 +9,10 @@ const DATA_DIR = path.join(ROOT, 'sysid', 'data');
 
 function usage() {
   console.log(`Usage:
-  node sysid/program_leaderboard.js [--program ID_OR_HASH] [--json]
+  node sysid/program_features.js [--program ID_OR_HASH] [--json]
 
-Ranks runs only within the same Workspace program/reference. Cross-program
-scores are intentionally not compared.
+Lists run feature summaries only within the same Workspace program/reference.
+It intentionally avoids scalar run ratings.
 `);
 }
 
@@ -71,7 +71,7 @@ function collectRuns() {
     const id = runIdFromJsonl(file);
     const meta = summarizeJsonlMeta(file);
     const summary = readJson(`${stem}.summary.json`);
-    const stability = readJson(`${stem}.stability.json`);
+    const evaluation = readJson(`${stem}.evaluation.json`);
     const bundle = readJson(`${stem}.bundle.json`);
     const manifest = bundle?.manifest ? readJson(bundle.manifest) : null;
     const program = meta.meta?.owner?.program || manifest?.program || null;
@@ -86,12 +86,14 @@ function collectRuns() {
       cmdCount: meta.cmdCount,
       program,
       condition: manifest?.condition || meta.meta?.owner?.condition || null,
-      score: stability?.score || null,
-      stability: stability?.score?.stability ?? null,
+      evaluation,
+      verdict: evaluation?.quality?.verdict ?? null,
       health: {
-        canEfOr: summary?.canHealth?.efOr ?? stability?.quality?.can?.efOr ?? null,
-        rxDropPerS: stability?.quality?.can?.rxDropPerS ?? null,
-        rxDropSum: summary?.canHealth?.rxDropSum ?? stability?.quality?.can?.rxDropSum ?? null,
+        canEfOr: evaluation?.health?.efOr ?? summary?.canHealth?.efOr ?? null,
+        rxDropPerS: evaluation?.health?.rxDropPerS ?? null,
+        rxDropSum: evaluation?.health?.rxDrop ?? summary?.canHealth?.rxDropSum ?? null,
+        maxStepDeg: evaluation?.fullBadness?.motorStepMaxDeg ?? null,
+        crossPeak: evaluation?.fullBadness?.poseCrossHpPeak ?? null,
       },
     };
   });
@@ -118,25 +120,20 @@ function number(v) {
 }
 
 function rankRuns(runs) {
-  return [...runs].sort((a, b) => {
-    const as = number(a.stability);
-    const bs = number(b.stability);
-    if (as != null && bs != null && bs !== as) return bs - as;
-    return Number(b.mtime || 0) - Number(a.mtime || 0);
-  });
+  return [...runs].sort((a, b) => Number(b.mtime || 0) - Number(a.mtime || 0));
 }
 
 function latestRun(runs) {
   return [...runs].sort((a, b) => Number(b.mtime || 0) - Number(a.mtime || 0))[0] || null;
 }
 
-function delta(latest, best) {
-  if (!latest || !best || latest.id === best.id) return null;
-  const fields = ['stability', 'trackingCost', 'crossAxisCost', 'oscillationCost', 'qualityPenalty'];
+function delta(latest, reference) {
+  if (!latest || !reference || latest.id === reference.id) return null;
+  const fields = ['maxStepDeg', 'p99StepDeg', 'crossPeak', 'rxDropPerS'];
   const out = {};
   for (const field of fields) {
-    const a = field === 'stability' ? latest.stability : latest.score?.[field];
-    const b = field === 'stability' ? best.stability : best.score?.[field];
+    const a = latest.health?.[field];
+    const b = reference.health?.[field];
     const an = number(a), bn = number(b);
     out[field] = an != null && bn != null ? Number((an - bn).toFixed(3)) : null;
   }
@@ -145,15 +142,15 @@ function delta(latest, best) {
 
 function summarize(programRuns) {
   const ranked = rankRuns(programRuns);
-  const best = ranked[0] || null;
+  const reference = ranked[1] || null;
   const latest = latestRun(programRuns);
   return {
     key: programRuns[0] ? programKey(programRuns[0]) : '',
     label: programRuns[0] ? programLabel(programRuns[0]) : '',
     runs: programRuns.length,
-    best,
+    reference,
     latest,
-    latestVsBest: delta(latest, best),
+    latestVsReference: delta(latest, reference),
     ranked,
   };
 }
@@ -180,20 +177,17 @@ function printHuman(groups) {
   for (const group of groups) {
     console.log(`\n${group.label} (${group.key})`);
     console.log(`runs=${group.runs}`);
-    if (group.best) {
-      console.log(`best   ${fmt(group.best.stability, 2)}  ${group.best.id}`);
-    }
     if (group.latest) {
-      const s = group.latest.score || {};
-      console.log(`latest ${fmt(group.latest.stability, 2)}  track=${fmt(s.trackingCost)} cross=${fmt(s.crossAxisCost)} osc=${fmt(s.oscillationCost)} quality=${fmt(s.qualityPenalty)}${conditionLabel(group.latest.condition)}  ${group.latest.id}`);
+      const h = group.latest.health || {};
+      console.log(`latest ${group.latest.verdict || ''}  maxStep=${fmt(h.maxStepDeg)} p99=${fmt(h.p99StepDeg)} cross=${fmt(h.crossPeak)} rxDrop/s=${fmt(h.rxDropPerS)}${conditionLabel(group.latest.condition)}  ${group.latest.id}`);
     }
-    if (group.latestVsBest) {
-      const d = group.latestVsBest;
-      console.log(`delta latest-best: stability=${fmt(d.stability)} tracking=${fmt(d.trackingCost)} cross=${fmt(d.crossAxisCost)} osc=${fmt(d.oscillationCost)} quality=${fmt(d.qualityPenalty)}`);
+    if (group.latestVsReference) {
+      const d = group.latestVsReference;
+      console.log(`delta latest-prev: maxStep=${fmt(d.maxStepDeg)} p99=${fmt(d.p99StepDeg)} cross=${fmt(d.crossPeak)} rxDrop/s=${fmt(d.rxDropPerS)}`);
     }
     for (const [i, run] of group.ranked.slice(0, 8).entries()) {
-      const s = run.score || {};
-      console.log(`${String(i + 1).padStart(2)}  ${fmt(run.stability, 2)}  track=${fmt(s.trackingCost)} cross=${fmt(s.crossAxisCost)} osc=${fmt(s.oscillationCost)} quality=${fmt(s.qualityPenalty)}${conditionLabel(run.condition)}  ${run.id}`);
+      const h = run.health || {};
+      console.log(`${String(i + 1).padStart(2)}  ${run.verdict || ''}  maxStep=${fmt(h.maxStepDeg)} p99=${fmt(h.p99StepDeg)} cross=${fmt(h.crossPeak)} rxDrop/s=${fmt(h.rxDropPerS)}${conditionLabel(run.condition)}  ${run.id}`);
     }
   }
 }

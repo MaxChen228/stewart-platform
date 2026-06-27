@@ -196,13 +196,13 @@ function summarize(recPath, manifestPath) {
   const summaryPath = recPath.replace(/\.jsonl$/, '.summary.json');
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
   const plot = JSON.parse(runNode('sysid/plot_motion6.js', [recPath, '--out-dir', path.join(__dirname, 'data', 'plots')]));
-  const stability = JSON.parse(runNode('sysid/stability_score.js', [recPath, '--axis', 'z']));
-  const stabilityPath = recPath.replace(/\.jsonl$/, '.stability.json');
-  fs.writeFileSync(stabilityPath, JSON.stringify(stability, null, 2));
-  const bundle = { recording: recPath, manifest: manifestPath, summary: summaryPath, stability: stabilityPath, plot };
+  const evaluation = JSON.parse(runNode('sysid/workspace_evaluation.js', [recPath]));
+  const evaluationPath = recPath.replace(/\.jsonl$/, '.evaluation.json');
+  fs.writeFileSync(evaluationPath, JSON.stringify(evaluation, null, 2));
+  const bundle = { recording: recPath, manifest: manifestPath, summary: summaryPath, evaluation: evaluationPath, plot };
   const bundlePath = recPath.replace(/\.jsonl$/, '.bundle.json');
   fs.writeFileSync(bundlePath, JSON.stringify(bundle, null, 2));
-  return { summary, stability, bundlePath, plot };
+  return { summary, evaluation, bundlePath, plot };
 }
 
 function buildPlan(opts, cfg) {
@@ -302,9 +302,9 @@ async function main() {
   const result = summarize(recPath, manifestPath);
   console.log(JSON.stringify({
     recording: recPath,
-    stability: result.bundlePath.replace(/\.bundle\.json$/, '.stability.json'),
-    score: result.stability.score,
-    crossAxis: result.stability.crossAxis,
+    evaluation: result.bundlePath.replace(/\.bundle\.json$/, '.evaluation.json'),
+    inspection: result.evaluation.quality,
+    fullBadness: result.evaluation.fullBadness,
     summary: result.summary.canHealth,
     planePlot: result.plot.planeOut,
     motorPlot: result.plot.motorOut,

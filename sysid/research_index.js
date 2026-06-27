@@ -89,7 +89,7 @@ function collectHeave() {
   });
 }
 
-function scoreHeave(run) {
+function heaveCost(run) {
   const e = Math.abs(run.metrics.absolute.finalErrorVsNominal143 ?? run.metrics.absolute.finalErrorVsCommand ?? 99);
   const c = run.metrics.coupling.crossPeak ?? 99;
   const badCan = run.metrics.health?.okFailFrac ? 10 : 0;
@@ -106,22 +106,22 @@ function collectBatteryRuns() {
   return files.map((file) => ({ file, name: path.basename(file) }));
 }
 
-function collectStabilityRuns() {
-  const files = listFiles(DATA_DIR, (file) => file.endsWith('.stability.json'));
+function collectEvaluationRuns() {
+  const files = listFiles(DATA_DIR, (file) => file.endsWith('.evaluation.json'));
   return files.map((file) => {
-    const stability = readJson(file);
-    if (!stability) return null;
-    const bundle = readJson(file.replace(/\.stability\.json$/, '.bundle.json'));
+    const evaluation = readJson(file);
+    if (!evaluation) return null;
+    const bundle = readJson(file.replace(/\.evaluation\.json$/, '.bundle.json'));
     return {
       file,
-      label: path.basename(file).replace(/\.stability\.json$/, ''),
-      stability,
+      label: path.basename(file).replace(/\.evaluation\.json$/, ''),
+      evaluation,
       bundle,
-      recording: bundle?.recording || stability.path || null,
+      recording: bundle?.recording || evaluation.path || null,
       planePlot: bundle?.plot?.planeOut || null,
       motorPlot: bundle?.plot?.motorOut || null,
     };
-  }).filter(Boolean).sort((a, b) => (b.stability.score?.stability || 0) - (a.stability.score?.stability || 0));
+  }).filter(Boolean).sort((a, b) => path.basename(b.file).localeCompare(path.basename(a.file)));
 }
 
 function fmt(x, digits = 2, unit = '') {
@@ -147,7 +147,7 @@ function writeMarkdown(index) {
     lines.push(`- Heave runs indexed: ${index.heaveRuns.length}`);
     lines.push(`- FreeRTOS/CAN diagnostic files: ${index.canRuns.length}`);
     lines.push(`- Battery/PID disturbance files: ${index.batteryRuns.length}`);
-    lines.push(`- Stability-scored runs: ${index.stabilityRuns.length}`);
+    lines.push(`- Evaluated runs: ${index.evaluationRuns.length}`);
     lines.push(`- Machine-readable index: ${mdLink('research-index.json', OUT_JSON)}`);
     lines.push('');
     fs.writeFileSync(OUT_MD, lines.join('\n'));
@@ -183,18 +183,19 @@ function writeMarkdown(index) {
     lines.push(`| ${run.condition.label} | ${pid} | ${fmt(run.condition.zBias, 1, 'mm')} | ${fmt(m.absolute.actualFinalZ, 2, 'mm')} | ${fmt(m.absolute.finalErrorVsNominal143, 2, 'mm')} | ${fmt(m.coupling.crossPeak, 2, 'mm')} | ${fmt(100 * m.coupling.crossOverZ, 1, '%')} | ${m.health.canEfOr ?? '-'}/${m.health.rxDropSum ?? '-'} | ${data} | ${plots} |`);
   }
   lines.push('');
-  const zRuns = index.stabilityRuns.filter((x) => x.label.startsWith('z_sweep') && x.label.includes('_clean'));
+  const zRuns = index.evaluationRuns.filter((x) => x.label.startsWith('z_sweep') && x.label.includes('_clean'));
   if (zRuns.length) {
-    lines.push('## Z Sweep Stability Table');
+    lines.push('## Z Sweep Evaluation Table');
     lines.push('');
-    lines.push('| Case | Score | tracking | cross-axis | oscillation | quality penalty | CAN rxDrop/s | Data | Plots |');
-    lines.push('|---|---:|---:|---:|---:|---:|---:|---|---|');
+    lines.push('| Case | Verdict | max step | p99 step | cross peak | worst | CAN rxDrop/s | Data | Plots |');
+    lines.push('|---|---:|---:|---:|---:|---|---:|---|---|');
     for (const run of zRuns) {
-      const s = run.stability.score;
-      const q = run.stability.quality?.can || {};
+      const q = run.evaluation.quality || {};
+      const h = run.evaluation.health || {};
+      const b = run.evaluation.fullBadness || {};
       const data = run.recording ? mdLink('jsonl', run.recording) : '-';
       const plots = [run.planePlot ? mdLink('plane', run.planePlot) : null, run.motorPlot ? mdLink('motor', run.motorPlot) : null].filter(Boolean).join(' / ') || '-';
-      lines.push(`| ${run.label} | ${fmt(s.stability, 1)} | ${fmt(s.trackingCost, 2)} | ${fmt(s.crossAxisCost, 2)} | ${fmt(s.oscillationCost, 2)} | ${fmt(s.qualityPenalty, 2)} | ${fmt(q.rxDropPerS, 2)} | ${data} | ${plots} |`);
+      lines.push(`| ${run.label} | ${q.verdict || '-'} | ${fmt(b.motorStepMaxDeg, 2)} | ${fmt(b.motorStepP99MeanDeg, 2)} | ${fmt(b.poseCrossHpPeak, 2)} | ${b.worstMotorStep?.label || '-'} | ${fmt(h.rxDropPerS, 2)} | ${data} | ${plots} |`);
     }
     lines.push('');
   }
@@ -211,7 +212,7 @@ function writeMarkdown(index) {
   lines.push(`- Heave runs indexed: ${index.heaveRuns.length}`);
   lines.push(`- FreeRTOS/CAN diagnostic files: ${index.canRuns.length}`);
   lines.push(`- Battery/PID disturbance files: ${index.batteryRuns.length}`);
-  lines.push(`- Stability-scored runs: ${index.stabilityRuns.length}`);
+  lines.push(`- Evaluated runs: ${index.evaluationRuns.length}`);
   lines.push(`- Machine-readable index: ${mdLink('research-index.json', OUT_JSON)}`);
   lines.push('');
   lines.push('## How To Refresh');
@@ -230,7 +231,7 @@ function main() {
     return at.localeCompare(bt);
   });
   const cleanHeave = heaveRuns.filter((x) => x.condition.clean);
-  const best = [...cleanHeave].sort((a, b) => scoreHeave(a) - scoreHeave(b))[0] || heaveRuns[0] || null;
+  const best = [...cleanHeave].sort((a, b) => heaveCost(a) - heaveCost(b))[0] || heaveRuns[0] || null;
   const index = {
     generatedAt: new Date().toISOString(),
     currentBest: { heave: best },
@@ -240,7 +241,7 @@ function main() {
       purePZBias45: cleanHeave.find((x) => x.condition.label === 'pure-P + zBias 4.5') || null,
     },
     heaveRuns,
-    stabilityRuns: collectStabilityRuns(),
+    evaluationRuns: collectEvaluationRuns(),
     canRuns: collectCanRuns(),
     batteryRuns: collectBatteryRuns(),
   };

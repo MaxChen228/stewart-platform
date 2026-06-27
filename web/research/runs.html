@@ -84,13 +84,43 @@
 .replay-stage .stage-empty { position:absolute; inset:0; display:grid; place-items:center; color:#777; font-size:12px; pointer-events:none; }
 .replay-side { display:flex; flex-direction:column; gap:10px; }
 .replay-controls { border:1px solid var(--borderBase); border-radius:4px; background:var(--surface); padding:12px; }
-.replay-controls button { flex:0 0 auto; width:100%; min-width:0; padding:8px 10px; font-size:12px; border-radius:12px; }
-.replay-control-row { display:flex; gap:8px; margin-top:10px; }
-.replay-control-row button { flex:1 1 0; width:auto; padding:7px 8px; font-size:11px; }
+.replay-control-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.replay-control-title {
+  font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink);
+}
+.replay-time {
+  font-family:var(--font-mono); font-size:11px; color:var(--sub);
+  font-variant-numeric:tabular-nums; white-space:nowrap;
+}
+.replay-primary {
+  width:100%; min-height:42px; padding:8px 12px; border-radius:14px;
+  font-size:13px; letter-spacing:.08em;
+}
+.replay-scrub-wrap { margin-top:10px; }
+.replay-scrub-meta {
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  margin-top:4px; font-family:var(--font-mono); font-size:10px;
+  color:var(--sub); font-variant-numeric:tabular-nums;
+}
+.control-section { margin-top:14px; }
+.control-label {
+  margin-bottom:7px; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--sub);
+}
+.speed-row { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:6px; }
+.speed-row button,
+.view-row button {
+  min-width:0; padding:7px 6px; border-radius:12px; font-size:11px;
+}
+.speed-row button.active { background:var(--contra); border-color:transparent; color:#fff; }
+.view-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .replay-side input[type="range"] { width:100%; }
 .trace-toggle {
-  display:flex; align-items:center; gap:8px; margin-top:10px;
+  display:flex; align-items:center; gap:8px; margin-top:12px;
+  padding:8px 10px; border:1px solid var(--borderL); border-radius:12px;
   font-family:var(--font-mono); font-size:11px; color:var(--ink);
+  background:var(--bg);
 }
 .trace-toggle input { width:auto; }
 .replay-readout { border:1px solid var(--borderBase); border-radius:4px; background:var(--bg); padding:12px; }
@@ -182,6 +212,9 @@ const state = {
   tab: 'overview',
   replayIndex: 0,
   playing: false,
+  playbackRate: 1,
+  playStartedAt: 0,
+  playStartTimeMs: 0,
   raf: null,
   replay3d: null,
   draftProgram: null,
@@ -203,11 +236,10 @@ function esc(s) {
 }
 function fileUrl(p) { return `/api/run-file?p=${encodeURIComponent(p)}`; }
 function jsonBlock(x) { return `<pre>${esc(JSON.stringify(x ?? {}, null, 2))}</pre>`; }
-function scoreClass(s) {
-  if (!present(s) || !Number.isFinite(Number(s))) return '';
-  if (s >= 75) return 'good';
-  if (s >= 55) return 'warn';
-  return 'bad';
+function verdictClass(v) {
+  if (v === 'no-hard-fail') return 'good';
+  if (v === 'reject') return 'bad';
+  return 'warn';
 }
 function shortRunName(r) {
   return r.name && r.name !== 'capture' ? r.name : r.id.replace(/_\d{4}-\d{2}-\d{2}T.*/, '');
@@ -305,15 +337,12 @@ function applyFilter() {
   });
   if (selectedProgram) {
     state.filtered.sort((a, b) => {
-      const as = Number(a.score);
-      const bs = Number(b.score);
-      if (Number.isFinite(as) && Number.isFinite(bs) && bs !== as) return bs - as;
       return Number(new Date(b.wallClock || 0)) - Number(new Date(a.wallClock || 0));
     });
     const label = state.filtered[0] ? programLabel(state.filtered[0]) : $('program-filter').selectedOptions[0]?.textContent;
-    $('compare-note').textContent = `${label || 'Program'} leaderboard：只和同一個 program / reference 互比。`;
+    $('compare-note').textContent = `${label || 'Program'}：依時間瀏覽，同一 program 內看 waveform features 與 phase 差異。`;
   } else {
-    $('compare-note').textContent = '全部 Program 只用來瀏覽資料；tracking / cross-axis / oscillation 分數不要跨 program 比較。';
+    $('compare-note').textContent = '全部 Program 只用來瀏覽資料；不要把不同 program 的 run 壓成單一數字比較。';
   }
   renderList();
 }
@@ -325,15 +354,17 @@ function renderList() {
     return;
   }
   box.innerHTML = state.filtered.map(r => {
-    const rank = $('program-filter').value ? state.filtered.findIndex((x) => x.id === r.id) + 1 : 0;
     const health = r.health || {};
+    const features = r.features || {};
     const can = Number.isFinite(Number(health.rxDropPerS)) ? `${fmt.n(health.rxDropPerS, 1)} drop/s` :
                 Number.isFinite(Number(health.rxDropSum)) ? `drop ${fmt.int(health.rxDropSum)}` : 'CAN —';
     return `<button class="run-item ${state.selected === r.id ? 'sel' : ''}" data-id="${esc(r.id)}">
       <div class="run-name">${esc(shortRunName(r))}</div>
       <div class="run-meta">
-        <span class="pill ${scoreClass(r.score)}">score ${fmt.n(r.score, 1)}</span>
-        ${rank ? `<span class="pill good">#${rank}</span>` : ''}
+        <span class="pill ${verdictClass(r.verdict)}">${esc(r.verdict || 'eval')}</span>
+        <span class="pill">step ${fmt.n(features.maxStepDeg, 2)}°</span>
+        <span class="pill">cross ${fmt.n(features.crossPeak, 2)}</span>
+        <span class="pill">worst ${esc(features.worstMotor || '—')}</span>
         <span class="pill">${esc(programLabel(r))}</span>
         <span class="pill">${fmt.time(r.durationS)}</span>
         <span class="pill">${fmt.int(r.samples)} samples</span>
@@ -364,7 +395,7 @@ function metric(label, value, sub = '') {
 function renderDetail() {
   const d = state.detail;
   const r = d.run || {};
-  const st = d.stability || {};
+  const ev = d.evaluation || {};
   const cond = d.manifest?.condition || r.condition || {};
   const health = r.health || {};
   $('detail').innerHTML = `
@@ -374,7 +405,7 @@ function renderDetail() {
         ${esc(fmt.date(r.wallClock))} · ${esc(programLabel(r))} · ${fmt.int(r.samples)} samples · ${fmt.time(r.durationS)}
       </div>
       <div class="run-meta" style="margin-top:12px;">
-        <span class="pill ${scoreClass(r.score)}">stability ${fmt.n(r.score, 1)}</span>
+        <span class="pill ${verdictClass(r.verdict || ev.quality?.verdict)}">${esc(r.verdict || ev.quality?.verdict || 'eval')}</span>
         <span class="pill">program ${esc(programLabel(r))}</span>
         <span class="pill">PID ${esc((cond.pid || d.manifest?.latest?.pid || []).join?.('/') || '—')}</span>
         <span class="pill">CAN ${fmt.n(health.rxDropPerS, 1)} drop/s</span>
@@ -388,11 +419,11 @@ function renderDetail() {
 
     <section class="panel">
       <div class="metric-grid">
-        ${metric('STABILITY', fmt.n(r.score, 1), '總分：越高越穩')}
-        ${metric('TRACKING', fmt.n(st.score?.trackingCost, 1), '任務軸成本：越低越好')}
-        ${metric('CROSS AXIS', fmt.n(st.score?.crossAxisCost, 1), '非任務軸成本：越低越好')}
-        ${metric('OSCILLATION', fmt.n(st.score?.oscillationCost, 1), '高頻晃動成本：越低越好')}
-        ${metric('QUALITY', fmt.n(st.score?.qualityPenalty, 1), 'CAN / FK / telemetry 懲罰')}
+        ${metric('VERDICT', r.verdict || ev.quality?.verdict || '—', 'hard feature gate')}
+        ${metric('MAX STEP', `${fmt.n(ev.fullBadness?.motorStepMaxDeg, 2)}°`, '馬達單樣本最大跳動')}
+        ${metric('P99 STEP', `${fmt.n(ev.fullBadness?.motorStepP99MeanDeg, 2)}°`, '馬達單樣本跳動 P99 平均')}
+        ${metric('CROSS PEAK', fmt.n(ev.fullBadness?.poseCrossHpPeak, 2), 'FK cross-axis 高通峰值')}
+        ${metric('WORST MOTOR', ev.fullBadness?.worstMotorStep?.label || '—', '最大跳動來源')}
       </div>
     </section>
 
@@ -437,7 +468,7 @@ function renderTab() {
 
 function overviewHtml(d) {
   const r = d.run || {};
-  const st = d.stability || {};
+  const ev = d.evaluation || {};
   const s = d.summary || {};
   return `<div class="kv">
     <div class="key">Run ID</div><div class="val">${esc(r.id)}</div>
@@ -445,8 +476,9 @@ function overviewHtml(d) {
     <div class="key">Program</div><div class="val">${esc(programLabel(r))}</div>
     <div class="key">Profile</div><div class="val">${esc(r.profile || 'unknown')}</div>
     <div class="key">錄製長度</div><div class="val">${fmt.time(r.durationS)} · ${fmt.int(r.samples)} samples · ${fmt.int(r.cmdCount)} commands</div>
-    <div class="key">穩定分數</div><div class="val">${fmt.n(r.score, 2)}</div>
-    <div class="key">成本</div><div class="val">tracking ${fmt.n(st.score?.trackingCost)} / cross ${fmt.n(st.score?.crossAxisCost)} / osc ${fmt.n(st.score?.oscillationCost)} / quality ${fmt.n(st.score?.qualityPenalty)}</div>
+    <div class="key">Verdict</div><div class="val">${esc(r.verdict || ev.quality?.verdict || '—')}</div>
+    <div class="key">Raw waveform</div><div class="val">max step ${fmt.n(ev.fullBadness?.motorStepMaxDeg, 2)}° / p99 ${fmt.n(ev.fullBadness?.motorStepP99MeanDeg, 2)}° / cross peak ${fmt.n(ev.fullBadness?.poseCrossHpPeak, 2)} / worst ${esc(ev.fullBadness?.worstMotorStep?.label || '—')}</div>
+    <div class="key">Fail reasons</div><div class="val">${esc((ev.quality?.failures || []).join(' · ') || '—')}</div>
     <div class="key">CAN</div><div class="val">efOr ${fmt.int(r.health?.canEfOr)} · rxDrop ${fmt.int(r.health?.rxDropSum)} · ${fmt.n(r.health?.rxDropPerS, 2)} drop/s</div>
     <div class="key">Encoder</div><div class="val">failFrac ${fmt.pct(s.encoders?.failFrac)}</div>
   </div>`;
@@ -487,11 +519,30 @@ function replayHtml(d) {
     </div>
     <aside class="replay-side">
       <div class="replay-controls">
-        <button id="play">播放</button>
-        <input id="scrub" type="range" min="0" max="${Math.max(0, (d.samples || []).length - 1)}" value="0">
-        <div class="replay-control-row">
-          <button id="view-home" type="button">重置視角</button>
-          <button id="view-top" type="button">俯視</button>
+        <div class="replay-control-head">
+          <div class="replay-control-title">Replay</div>
+          <div class="replay-time"><span id="replay-current">0.00s</span> / <span id="replay-total">0.00s</span></div>
+        </div>
+        <button id="play" class="chip replay-primary" type="button">播放</button>
+        <div class="replay-scrub-wrap">
+          <input id="scrub" type="range" min="0" max="${Math.max(0, (d.samples || []).length - 1)}" value="0">
+          <div class="replay-scrub-meta">
+            <span id="replay-index">0 / ${Math.max(0, (d.samples || []).length - 1)}</span>
+            <span id="replay-rate">${state.playbackRate.toFixed(2)}x</span>
+          </div>
+        </div>
+        <div class="control-section">
+          <div class="control-label">播放速度</div>
+          <div class="speed-row">
+            ${[0.25, 0.5, 1, 2, 4].map(rate => `<button class="chip speed-btn ${state.playbackRate === rate ? 'active' : ''}" type="button" data-rate="${rate}">${rate}x</button>`).join('')}
+          </div>
+        </div>
+        <div class="control-section">
+          <div class="control-label">視角</div>
+          <div class="view-row">
+            <button id="view-home" class="chip" type="button">重置視角</button>
+            <button id="view-top" class="chip" type="button">俯視</button>
+          </div>
         </div>
         <label class="trace-toggle"><input id="trace3d-toggle" type="checkbox" ${state.showReplayTrace ? 'checked' : ''}> 中心軌跡</label>
       </div>
@@ -508,7 +559,7 @@ function paramsHtml(d) {
   return `<div class="plots">
     <div><div class="panel-title" style="margin-bottom:8px;">Manifest / condition</div>${jsonBlock(d.manifest || {})}</div>
     <div><div class="panel-title" style="margin-bottom:8px;">Summary</div>${jsonBlock(d.summary || {})}</div>
-    <div><div class="panel-title" style="margin-bottom:8px;">Stability score</div>${jsonBlock(d.stability || {})}</div>
+    <div><div class="panel-title" style="margin-bottom:8px;">Evaluation</div>${jsonBlock(d.evaluation || {})}</div>
   </div>`;
 }
 
@@ -551,10 +602,28 @@ function setupReplay() {
   const traceToggle = $('trace3d-toggle');
   initReplay3d();
   if (!samples.length) { drawReplay(); return; }
-  scrub.oninput = () => { state.replayIndex = Number(scrub.value); drawReplay(); };
+  scrub.oninput = () => {
+    state.replayIndex = Number(scrub.value);
+    if (state.playing) {
+      state.playStartedAt = performance.now();
+      state.playStartTimeMs = sampleTimeMs(samples, state.replayIndex);
+    }
+    drawReplay();
+  };
   play.onclick = () => state.playing ? stopReplay() : startReplay();
   if (home) home.onclick = () => setReplayView('home');
   if (top) top.onclick = () => setReplayView('top');
+  document.querySelectorAll('.speed-btn').forEach((button) => {
+    button.onclick = () => {
+      const samples = state.detail?.samples || [];
+      if (state.playing) {
+        state.playStartTimeMs = sampleTimeMs(samples, state.replayIndex);
+        state.playStartedAt = performance.now();
+      }
+      state.playbackRate = Math.max(0.05, Number(button.dataset.rate) || 1);
+      updateReplayControls();
+    };
+  });
   if (traceToggle) {
     traceToggle.onchange = () => {
       state.showReplayTrace = !!traceToggle.checked;
@@ -573,13 +642,65 @@ function setupReplay() {
   drawReplay();
 }
 
+function sampleTimeMs(samples, index) {
+  const s = samples[Math.max(0, Math.min(samples.length - 1, index))];
+  const t = Number(s?.t);
+  return Number.isFinite(t) ? t : index * (1000 / 60);
+}
+
+function indexAtReplayTime(samples, targetMs) {
+  if (!samples.length) return 0;
+  let lo = 0, hi = samples.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (sampleTimeMs(samples, mid) < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0) {
+    const prev = sampleTimeMs(samples, lo - 1);
+    const cur = sampleTimeMs(samples, lo);
+    return Math.abs(prev - targetMs) <= Math.abs(cur - targetMs) ? lo - 1 : lo;
+  }
+  return lo;
+}
+
+function updateReplayControls() {
+  const samples = state.detail?.samples || [];
+  const idx = Math.max(0, Math.min(samples.length - 1, state.replayIndex));
+  const startMs = samples.length ? sampleTimeMs(samples, 0) : 0;
+  const curMs = samples.length ? sampleTimeMs(samples, idx) : 0;
+  const endMs = samples.length ? sampleTimeMs(samples, samples.length - 1) : 0;
+  const current = $('replay-current');
+  const total = $('replay-total');
+  const index = $('replay-index');
+  const rate = $('replay-rate');
+  if (current) current.textContent = `${fmt.n((curMs - startMs) / 1000, 2)}s`;
+  if (total) total.textContent = `${fmt.n((endMs - startMs) / 1000, 2)}s`;
+  if (index) index.textContent = `${idx} / ${Math.max(0, samples.length - 1)}`;
+  if (rate) rate.textContent = `${state.playbackRate.toFixed(state.playbackRate < 1 ? 2 : 1)}x`;
+  document.querySelectorAll('.speed-btn').forEach((button) => {
+    button.classList.toggle('active', Math.abs(Number(button.dataset.rate) - state.playbackRate) < 1e-6);
+  });
+}
+
 function startReplay() {
+  const samples = state.detail?.samples || [];
+  if (!samples.length) return;
   state.playing = true;
+  state.playStartedAt = performance.now();
+  state.playStartTimeMs = sampleTimeMs(samples, state.replayIndex);
   $('play').textContent = '暫停';
   const tick = () => {
     if (!state.playing) return;
     const samples = state.detail?.samples || [];
-    state.replayIndex = (state.replayIndex + 1) % Math.max(1, samples.length);
+    if (!samples.length) return stopReplay();
+    const startMs = sampleTimeMs(samples, 0);
+    const endMs = sampleTimeMs(samples, samples.length - 1);
+    const durationMs = Math.max(1, endMs - startMs);
+    const elapsedMs = (performance.now() - state.playStartedAt) * state.playbackRate;
+    let targetMs = state.playStartTimeMs + elapsedMs;
+    if (targetMs > endMs) targetMs = startMs + ((targetMs - startMs) % durationMs);
+    state.replayIndex = indexAtReplayTime(samples, targetMs);
     const scrub = $('scrub');
     if (scrub) scrub.value = state.replayIndex;
     drawReplay();
@@ -594,6 +715,7 @@ function stopReplay() {
   state.raf = null;
   const play = $('play');
   if (play) play.textContent = '播放';
+  updateReplayControls();
 }
 
 const kin = window.Kin || {};
@@ -672,7 +794,7 @@ function drawPlane(spec, samples) {
   const vMin = vVals.length ? Math.min(...vVals) : 0;
   const vMax = vVals.length ? Math.max(...vVals) : 0;
   const zoom = Math.max(0.1, Number(state.planeZoom?.[spec.key]) || 1);
-  const pad = { l: 34, r: 16, t: 18, b: 30 };
+  const pad = { l: 54, r: 16, t: 18, b: 42 };
   const pw = Math.max(1, W - pad.l - pad.r);
   const ph = Math.max(1, H - pad.t - pad.b);
   const hSpan = Math.max(18, hMax - hMin);
@@ -686,18 +808,54 @@ function drawPlane(spec, samples) {
   const project = (h, v) => [cx + (h - midH) * scale, cy - (v - midV) * scale];
   const pp = (point) => project(axisValue(point, spec.h), axisValue(point, spec.v));
   const cp = (pose) => project(poseAxis(pose, spec.h), poseAxis(pose, spec.v));
+  const hVisibleMin = midH - (cx - pad.l) / scale;
+  const hVisibleMax = midH + (W - pad.r - cx) / scale;
+  const vVisibleMin = midV - (H - pad.b - cy) / scale;
+  const vVisibleMax = midV + (cy - pad.t) / scale;
 
+  const niceTick = (span, targetCount = 7) => {
+    const raw = Math.max(1e-6, Math.abs(span)) / targetCount;
+    const pow = 10 ** Math.floor(Math.log10(raw));
+    const n = raw / pow;
+    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return step * pow;
+  };
+  const fmtTick = (value, step) => {
+    if (Math.abs(value) < step * 1e-6) return '0';
+    const digits = step < 1 ? 1 : 0;
+    return Number(value).toFixed(digits);
+  };
+  const hTick = niceTick(hVisibleMax - hVisibleMin, Math.max(4, Math.floor(pw / 74)));
+  const vTick = niceTick(vVisibleMax - vVisibleMin, Math.max(4, Math.floor(ph / 58)));
+
+  ctx.save();
   ctx.strokeStyle = '#E8E4DB';
+  ctx.fillStyle = '#8D867C';
   ctx.lineWidth = 1;
-  for (let i = -4; i <= 4; i++) {
-    const x = cx + i * pw / 8;
-    const y = cy + i * ph / 8;
+  ctx.font = '10px SF Mono, Consolas, monospace';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'center';
+  for (let v = Math.ceil(hVisibleMin / hTick) * hTick; v <= hVisibleMax + hTick * 0.5; v += hTick) {
+    const [x] = project(v, midV);
+    const major = Math.abs(v) < hTick * 1e-6;
+    ctx.strokeStyle = major ? '#D9D0C5' : '#E8E4DB';
     ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, H - pad.b); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    if (x >= pad.l + 16 && x <= W - pad.r - 12) ctx.fillText(fmtTick(v, hTick), x, H - pad.b + 8);
   }
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  for (let v = Math.ceil(vVisibleMin / vTick) * vTick; v <= vVisibleMax + vTick * 0.5; v += vTick) {
+    const [, y] = project(midH, v);
+    const major = Math.abs(v) < vTick * 1e-6;
+    ctx.strokeStyle = major ? '#D9D0C5' : '#E8E4DB';
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    if (y >= pad.t + 10 && y <= H - pad.b - 10) ctx.fillText(fmtTick(v, vTick), pad.l - 8, y);
+  }
+  ctx.restore();
   ctx.strokeStyle = '#DBD6CD';
   ctx.strokeRect(pad.l, pad.t, pw, ph);
   ctx.fillStyle = '#7A756C';
+  ctx.font = '11px SF Mono, Consolas, monospace';
   ctx.fillText(spec.hLabel, W - pad.r - 54, H - 10);
   ctx.save();
   ctx.translate(12, pad.t + 48);
@@ -952,6 +1110,7 @@ function drawReplay() {
   if (rt) rt.textContent = timeText;
   if (rp) rp.textContent = `X ${fmt.n(p[0], 1)} Y ${fmt.n(p[1], 1)} Z ${fmt.n(p[2], 1)} R ${fmt.n(p[3], 1)} P ${fmt.n(p[4], 1)} Y ${fmt.n(p[5], 1)}`;
   if (rc) rc.textContent = `ok ${s.ok ?? '—'} · hz ${fmt.n(s.lhz, 0)} · ef ${s.ef ?? '—'} · drop ${s.rxDrop ?? 0}`;
+  updateReplayControls();
   updateReplay3d(s);
 }
 

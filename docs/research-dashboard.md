@@ -1,6 +1,6 @@
 # Research Dashboard
 
-Generated: 2026-06-27T06:27:55.114Z
+Generated: 2026-06-27T16:14:58.252Z
 
 ## Read This First
 
@@ -13,5 +13,5 @@ Generated: 2026-06-27T06:27:55.114Z
 - Heave runs indexed: 0
 - FreeRTOS/CAN diagnostic files: 0
 - Battery/PID disturbance files: 0
-- Stability-scored runs: 1
+- Evaluated runs: 17
 - Machine-readable index: [research-index.json](../sysid/data/research-index.json)

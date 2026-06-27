@@ -200,7 +200,7 @@ body { min-height: 100vh; overflow: hidden; }
 .run-card b { display:block; color:var(--ink); font-size:11px; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .run-card span { display:block; margin-top:4px; color:var(--sub); font-size:10px; }
 .run-detail-mini { border:1px solid var(--borderL); border-radius:4px; padding:10px; font-family:var(--font-mono); color:var(--sub); font-size:10px; }
-.run-score { color:var(--contra); font-size:18px; font-weight:700; }
+.run-verdict { color:var(--contra); font-size:18px; font-weight:700; }
 .button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .button-row.three { grid-template-columns: 1fr 1fr 1fr; }
 .chip.primary { background: var(--contra); border-color: transparent; color: #fff; }
@@ -308,6 +308,11 @@ body { min-height: 100vh; overflow: hidden; }
             <output id="home-ms-v">1.5s</output>
           </label>
           <label class="param-row">
+            <span>FOLLOW</span>
+            <input id="follow-settle-ms" type="range" min="0" max="10000" step="250" value="800">
+            <output id="follow-settle-ms-v">0.8s</output>
+          </label>
+          <label class="param-row">
             <span>LAND</span>
             <input id="land-ms" type="range" min="500" max="12000" step="250" value="1500">
             <output id="land-ms-v">1.5s</output>
@@ -341,12 +346,12 @@ body { min-height: 100vh; overflow: hidden; }
         <div class="ui-card-title">Runs / Results</div>
         <div class="metric-row">
           <div class="metric"><b>runs</b><span id="r-count">0</span></div>
-          <div class="metric"><b>best</b><span id="r-best">—</span></div>
+          <div class="metric"><b>latest</b><span id="r-best">—</span></div>
           <div class="metric"><b>latest</b><span id="r-latest">—</span></div>
           <div class="metric"><b>scope</b><span id="r-scope">all</span></div>
         </div>
         <div id="run-list-mini" class="run-list-mini" style="margin-top:12px"></div>
-        <div id="run-detail-mini" class="run-detail-mini" style="margin-top:10px">選一筆 run 看分數與資料。</div>
+        <div id="run-detail-mini" class="run-detail-mini" style="margin-top:10px">選一筆 run 看特徵與資料。</div>
       </div>
 
       <div class="ui-card" style="margin-top:14px">
@@ -412,7 +417,6 @@ const Kin = window.Kin;
 const PlatformSoT = window.PlatformSoT;
 const { NEUTRAL_Z } = Kin;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const poseLine = (pose) => pose.map((x) => Number(x || 0).toFixed(3)).join(' ');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 let config = PlatformSoT.mergeConfig({});
@@ -427,10 +431,9 @@ let activeBlock = -1;
 let ws = null;
 let wsConnected = false;
 let liveTelemetry = null;
-let liveTelemetryAt = 0;
 let actualPose = null;
-let followActive = false;
 let sessionState = { active: false, phase: 'idle', label: '' };
+let workspaceState = { active: false };
 let sessionEvents = [];
 let runs = [];
 let selectedRunId = null;
@@ -602,7 +605,12 @@ function secLabel(ms) {
 
 function renderTimingControls() {
   const timing = workspaceTiming();
-  for (const [id, value] of [['warmup-ms', timing.warmupMs], ['home-ms', timing.homeMs], ['land-ms', timing.landMs]]) {
+  for (const [id, value] of [
+    ['warmup-ms', timing.warmupMs],
+    ['home-ms', timing.homeMs],
+    ['follow-settle-ms', timing.followSettleMs],
+    ['land-ms', timing.landMs],
+  ]) {
     const input = el(id);
     const output = el(`${id}-v`);
     if (!input || !output) continue;
@@ -624,6 +632,7 @@ function timingFromControls() {
   return {
     warmupMs: read('warmup-ms', timing.warmupMs),
     homeMs: read('home-ms', timing.homeMs),
+    followSettleMs: read('follow-settle-ms', timing.followSettleMs),
     landMs: read('land-ms', timing.landMs),
   };
 }
@@ -1024,10 +1033,10 @@ function renderSequence() {
     }).join('')
     : '<div class="empty-flow">從左邊選動作，調好參數後加入流程</div>';
   el('sequence').innerHTML = `
-    <div class="sequence-step fixed"><b>TAKE OFF</b><div class="step-meta">HOLD ${secLabel(timing.warmupMs)} → HOME ${secLabel(timing.homeMs)} → FOLLOW · not recorded</div></div>
+    <div class="sequence-step fixed"><b>TAKE OFF</b><div class="step-meta">HOLD ${secLabel(timing.warmupMs)} → HOME ${secLabel(timing.homeMs)} → settle ${secLabel(timing.followSettleMs)}</div></div>
     ${mid}
-    <div class="sequence-step fixed"><b>CLOSE LOOP</b><div class="step-meta">return HOME → stop recording</div></div>
-    <div class="sequence-step fixed"><b>LAND</b><div class="step-meta">FOLLOW OFF → configured LANDING ${secLabel(timing.landMs)}</div></div>`;
+    <div class="sequence-step fixed"><b>CLOSE LOOP</b><div class="step-meta">return HOME → keep recording lifecycle</div></div>
+    <div class="sequence-step fixed"><b>LAND</b><div class="step-meta">configured LANDING ${secLabel(timing.landMs)} → RELEASE</div></div>`;
   el('sequence').querySelectorAll('[data-block]').forEach((row) => {
     row.addEventListener('click', (ev) => {
       if (ev.target.closest('button')) return;
@@ -1042,19 +1051,13 @@ function renderSequence() {
 function renderMetrics() {
   const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
   const timing = workspaceTiming();
-  const lifecycleS = workspaceDurationSeconds() + (timing.warmupMs + timing.homeMs + timing.landMs + 1200) / 1000;
+  const lifecycleS = workspaceDurationSeconds() + (timing.warmupMs + timing.homeMs + timing.followSettleMs + timing.landMs + 1200) / 1000;
   el('m-blocks').textContent = blocks.length;
   el('m-time').textContent = `${lifecycleS.toFixed(1)}s`;
   el('m-loop').textContent = audit.ok ? (blocks.length ? 'PASS' : 'SMOKE') : 'FAIL';
   el('m-loop').style.color = audit.ok ? (blocks.length ? 'var(--contra)' : 'var(--dual)') : 'var(--dev)';
   el('m-ok').textContent = liveTelemetry ? String(liveTelemetry.ok ?? '—') : '—';
   if (!audit.ok && blocks.length) setStatus(audit.issues[0], 'bad');
-}
-
-function runScoreClass(score) {
-  const n = Number(score);
-  if (!Number.isFinite(n)) return '';
-  return n >= 70 ? 'good' : n >= 45 ? 'warn' : 'bad';
 }
 
 function fmtMaybe(value, digits = 1) {
@@ -1112,20 +1115,16 @@ function scopedRuns() {
 
 function renderRuns() {
   const list = scopedRuns();
-  const best = list
-    .filter((r) => Number.isFinite(Number(r.score)))
-    .sort((a, b) => Number(b.score) - Number(a.score))[0] || null;
   const latest = list[0] || null;
   el('r-count').textContent = list.length;
-  el('r-best').textContent = best ? Number(best.score).toFixed(1) : '—';
+  el('r-best').textContent = latest ? (latest.verdict || 'eval') : '—';
   el('r-latest').textContent = latest ? fmtSec(latest.durationS || 0) + 's' : '—';
   el('r-scope').textContent = 'program';
-  el('r-best').style.color = best ? `var(--${runScoreClass(best.score) === 'good' ? 'contra' : runScoreClass(best.score) === 'warn' ? 'dual' : 'dev'})` : '';
   const rows = list.slice(0, 8);
   el('run-list-mini').innerHTML = rows.length ? rows.map((run) => `
     <button class="run-card ${selectedRunId === run.id ? 'active' : ''}" data-run="${esc(run.id)}">
       <b>${esc(run.name || run.id)}</b>
-      <span>score ${Number.isFinite(Number(run.score)) ? Number(run.score).toFixed(1) : '—'} · ${fmtSec(run.durationS || 0)}s · ${run.samples || 0} samples</span>
+      <span>${esc(run.verdict || 'eval')} · step ${fmtMaybe(run.features?.maxStepDeg, 2)}° · cross ${fmtMaybe(run.features?.crossPeak, 2)} · ${fmtSec(run.durationS || 0)}s</span>
     </button>`).join('') : '<div class="empty-flow" style="padding:14px">還沒有 recorded runs</div>';
   el('run-list-mini').querySelectorAll('[data-run]').forEach((btn) => {
     btn.addEventListener('click', () => selectRun(btn.dataset.run));
@@ -1147,45 +1146,20 @@ async function selectRun(id) {
     return;
   }
   const run = detail.run || {};
-  const st = detail.stability || {};
+  const ev = detail.evaluation || {};
   const files = run.files || {};
   const program = runProgramMeta(run);
   el('run-detail-mini').innerHTML = `
     <div><b>${esc(run.name || run.id || id)}</b></div>
-    <div class="run-score">score ${fmtMaybe(run.score, 2)}</div>
+    <div class="run-verdict">${esc(run.verdict || ev.quality?.verdict || 'eval')}</div>
     <div>program ${esc(program?.name || program?.id || '未歸類')} ${program?.hash ? '· ' + esc(program.hash) : ''}</div>
-    <div>tracking ${fmtMaybe(st.score?.trackingCost)} · cross ${fmtMaybe(st.score?.crossAxisCost)} · osc ${fmtMaybe(st.score?.oscillationCost)}</div>
+    <div>max step ${fmtMaybe(ev.fullBadness?.motorStepMaxDeg)}° · cross ${fmtMaybe(ev.fullBadness?.poseCrossHpPeak)} · worst ${esc(ev.fullBadness?.worstMotorStep?.label || '—')}</div>
     <div>${run.samples || 0} samples · ${fmtSec(run.durationS || 0)}s · drop/s ${fmtMaybe(run.health?.rxDropPerS)}</div>
     <div style="margin-top:7px">
       ${files.recording ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.recording)}">jsonl</a>` : ''}
       ${files.planePlot ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.planePlot)}">plane</a>` : ''}
       ${files.motorPlot ? `<a class="app-link" href="/api/run-file?p=${encodeURIComponent(files.motorPlot)}">motor</a>` : ''}
     </div>`;
-}
-
-function runIdFromRecordingPath(p) {
-  const name = String(p || '').split('/').pop() || '';
-  return name.endsWith('.jsonl') ? name.slice(0, -6) : null;
-}
-
-function runDetailComplete(detail) {
-  const run = detail?.run || {};
-  const files = run.files || {};
-  return Number.isFinite(Number(run.score)) && files.summary && files.stability && files.bundle;
-}
-
-async function waitForRunAnalysis(runId, program) {
-  if (!runId) return null;
-  setStatus('analyzing run', 'warn');
-  await json(`/api/runs/${encodeURIComponent(runId)}/analyze`, { program }).catch(() => null);
-  const started = performance.now();
-  let detail = null;
-  while (performance.now() - started < 12000) {
-    detail = await json(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
-    if (runDetailComplete(detail)) return detail;
-    await sleep(500);
-  }
-  return detail;
 }
 
 function renderAll() {
@@ -1267,7 +1241,7 @@ async function previewDraftBlock() {
   refreshButtons();
   try {
     setStatus(`preview block · ${def.label}`, '');
-    await playBlock(block, -1, true);
+    await playBlock(block, -1);
     setStatus('block preview complete', 'good');
     setGhostPose(homePose, true, 'GHOST');
     setTimeline(0, 0, motionPeriod(def, block.params), 'ready');
@@ -1279,19 +1253,6 @@ async function previewDraftBlock() {
     renderSequence();
     refreshButtons();
   }
-}
-
-function live(maxAgeMs = 1500) {
-  const age = performance.now() - liveTelemetryAt;
-  if (!liveTelemetry || !Number.isFinite(age) || age > maxAgeMs) return null;
-  return { data: liveTelemetry, age };
-}
-
-function requireHealthyTelemetry() {
-  const cur = live();
-  if (!cur) throw new Error('live telemetry stale');
-  if (Number(cur.data.ok) !== 6) throw new Error(`encoder ok=${cur.data.ok ?? 'missing'}, expected 6`);
-  return cur;
 }
 
 function currentActualPose() {
@@ -1319,7 +1280,7 @@ async function preflight() {
     '',
     `blocks: ${blocks.length}`,
     `motion time: ${workspaceDurationSeconds().toFixed(1)}s`,
-    `timing: warmup ${secLabel(timing.warmupMs)}, takeoff ${secLabel(timing.homeMs)}, land ${secLabel(timing.landMs)}`,
+    `timing: warmup ${secLabel(timing.warmupMs)}, takeoff ${secLabel(timing.homeMs)}, follow ${secLabel(timing.followSettleMs)}, land ${secLabel(timing.landMs)}`,
     `closed loop: PASS (${blocks.length ? 'HOME → blocks → HOME' : 'HOME smoke window'})`,
     `transport: ${transport.kind || 'unknown'} connected`,
     `telemetry: ok ${latest.ok}, age ${Math.round(ageMs)}ms`,
@@ -1332,27 +1293,7 @@ async function preflight() {
   return PlatformSoT.mergeConfig(cfg);
 }
 
-function send(cmd) {
-  if (!runner.token || !ws || ws.readyState !== WebSocket.OPEN) return false;
-  ws.send(JSON.stringify({ cmd, sessionToken: runner.token }));
-  return true;
-}
-
-async function phase(name) {
-  if (!runner.token) return;
-  await json('/api/session/phase', { token: runner.token, phase: name }).catch(() => ({}));
-}
-
-async function waitUntil(fn, timeoutMs, label) {
-  const t0 = performance.now();
-  while (!fn()) {
-    if (runner.abort) throw new Error('aborted');
-    if (performance.now() - t0 > timeoutMs) throw new Error(label || 'timeout');
-    await sleep(80);
-  }
-}
-
-async function playBlock(block, index, preview) {
+async function playBlock(block, index) {
   activeBlock = index >= 0 ? index : -1;
   renderSequence();
   const def = motionById(MOTIONS, block.id);
@@ -1368,10 +1309,6 @@ async function playBlock(block, index, preview) {
     setGhostPose(sample.pose, sample.ok, 'GHOST');
     const label = index >= 0 ? `${index + 1}. ${def.label}` : `BLOCK · ${def.label}`;
     setTimeline(sample.frac, sample.tCycle, sample.per, sample.ok ? label : 'limit');
-    if (!preview && sample.ok) {
-      requireHealthyTelemetry();
-      send(`PF ${poseLine(sample.pose)}`);
-    }
     await sleep(1000 / MOTION_HZ);
   }
 }
@@ -1389,6 +1326,7 @@ async function previewWorkspaceFlow() {
     kin: Kin,
     warmupSec: timing.warmupMs / 1000,
     takeoffSec: timing.homeMs / 1000,
+    followSettleSec: timing.followSettleMs / 1000,
     closeSec: 1.2,
     landSec: timing.landMs / 1000,
   });
@@ -1419,84 +1357,45 @@ async function runWorkspace(preview) {
       await previewWorkspaceFlow();
       setStatus('preview complete', 'good');
       return;
-    } else {
-      setStatus('preflight', 'warn');
-      const cfg = await preflight();
-      const program = currentProgramMeta();
-      const programSlug = program.id;
-      const label = `${programSlug}_workspace_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
-      const started = await json('/api/session/start', { label, phase: 'takeoff', program });
-      runner.token = started.token;
-      runner.config = cfg;
-      runner.landingPose = Array.isArray(cfg.landingPose) ? cfg.landingPose : PlatformSoT.relToAbs(cfg.landingRelative, NEUTRAL_Z);
-      const timing = normalizeWorkspaceTiming(cfg);
-      setStatus('takeoff', 'warn');
-      send('H');
-      await waitUntil(() => live()?.data?.pos === 1 && Array.isArray(live()?.data?.hold), 3000, 'HOLD did not arm');
-      send(`VF ${cfg.followLimits?.vmaxT || 60} ${cfg.followLimits?.vmaxR || 45}`);
-      if (timing.warmupMs > 0) {
-        setStatus('holding warmup', 'warn');
-        await sleep(timing.warmupMs);
-      }
-      setStatus('takeoff to HOME', 'warn');
-      send(`P ${poseLine(homePose)} ${timing.homeMs}`);
-      await sleep(timing.homeMs + 400);
-      send('FOLLOW 1');
-      await waitUntil(() => followActive, 3500, 'FOLLOW did not arm');
-      await phase('recording');
-      await json('/api/session/rec/start', { token: runner.token, name: label });
-      runner.recording = true;
     }
-    for (let i = 0; i < blocks.length; i++) {
-      if (!preview) await phase(`block ${i + 1}/${blocks.length}`);
-      await playBlock(blocks[i], i, preview);
+    setStatus('preflight', 'warn');
+    const cfg = await preflight();
+    const program = currentProgramMeta();
+    const label = `${program.id}_workspace_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+    const timing = timingFromControls();
+    const started = await json('/api/workspace/run', {
+      name: label,
+      blocks: serializeBlocks(blocks, motionLib),
+      program,
+      warmupMs: timing.warmupMs,
+      homeMs: timing.homeMs,
+      followSettleMs: timing.followSettleMs,
+      landMs: timing.landMs,
+      zBias: cfg.trialDefaults?.zBias ?? 0,
+      vmaxT: cfg.followLimits?.vmaxT ?? 60,
+      vmaxR: cfg.followLimits?.vmaxR ?? 45,
+    });
+    workspaceState = started.state || { active: true, label };
+    refreshButtons();
+    let result = null;
+    while (!runner.abort) {
+      workspaceState = await json('/api/workspace/status').catch(() => workspaceState || { active: false });
+      if (workspaceState?.error) throw new Error(workspaceState.error);
+      if (workspaceState?.result) result = workspaceState.result;
+      if (!workspaceState?.active) break;
+      await loadEvents();
+      setStatus(sessionState.phase ? `running · ${sessionState.phase}` : 'running', 'warn');
+      await sleep(500);
     }
-    activeBlock = -1;
-    renderSequence();
-    if (!preview) {
-      await phase('close loop');
-      setStatus('closing loop at HOME', 'warn');
-      const t0 = performance.now();
-      while (performance.now() - t0 < 1200) {
-        if (runner.abort) throw new Error('aborted');
-        send(`PF ${poseLine(homePose)}`);
-        setGhostPose(homePose, true, 'GHOST');
-        await sleep(1000 / MOTION_HZ);
-      }
-      const stopped = await json('/api/session/rec/stop', { token: runner.token, analyze: false }).catch((err) => ({ error: err.message }));
-      runner.recording = false;
-      const runId = runIdFromRecordingPath(stopped.path);
-      await phase('landing');
-      setStatus('landing', 'warn');
-      send('FOLLOW 0');
-      await waitUntil(() => !followActive && live(), 2500, 'FOLLOW did not disarm');
-      const landMs = normalizeWorkspaceTiming(runner.config).landMs;
-      setGhostPose(runner.landingPose || landingPose, true, 'GHOST');
-      send(`P ${poseLine(runner.landingPose || landingPose)} ${landMs}`);
-      await sleep(landMs + 300);
-      send('D');
-      await sleep(150);
-      await json('/api/session/finish', { token: runner.token });
-      const analyzed = await waitForRunAnalysis(runId, currentProgramMeta());
-      await loadRuns();
-      if (analyzed?.run?.id) await selectRun(analyzed.run.id);
-      setStatus(runDetailComplete(analyzed) ? 'complete · analyzed · released' : 'complete · released · analysis pending', runDetailComplete(analyzed) ? 'good' : 'warn');
-    }
+    if (runner.abort) throw new Error('aborted');
+    await loadRuns();
+    if (result?.runId) await selectRun(result.runId);
+    setStatus(result?.runId ? 'complete · analyzed · released' : 'complete · released', result?.runId ? 'good' : 'warn');
   } catch (err) {
-    if (!preview && runner.token) {
-      send(`PF ${poseLine(homePose)}`);
-      send('FOLLOW 0');
-      await sleep(150);
-      const landMs = runner.config ? normalizeWorkspaceTiming(runner.config).landMs : 1500;
-      send(`P ${poseLine(runner.landingPose || landingPose)} ${landMs}`);
-      await sleep(landMs + 300);
-      send('D');
-      if (runner.recording) await json('/api/session/rec/stop', { token: runner.token, analyze: false }).catch(() => ({}));
-      await json('/api/session/abort', { token: runner.token }).catch(() => ({}));
-    }
     setStatus(err.message === 'aborted' ? 'aborted · landing requested' : err.message, 'bad');
   } finally {
     runner = { active: false, preview: false, abort: false, token: null, recording: false };
+    workspaceState = await json('/api/workspace/status').catch(() => ({ active: false }));
     activeBlock = -1;
     renderSequence();
     refreshButtons();
@@ -1505,13 +1404,14 @@ async function runWorkspace(preview) {
 
 function refreshButtons() {
   const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
-  const canRun = wsConnected && !sessionState.active && audit.ok && !runner.active;
+  const busy = runner.active || sessionState.active || workspaceState.active;
+  const canRun = wsConnected && !busy && audit.ok;
   el('run-btn').disabled = !canRun;
   el('preview-btn').disabled = runner.active;
   el('add-btn').disabled = runner.active;
   el('save-btn').disabled = runner.active;
   document.querySelectorAll('.target-save').forEach((button) => { button.disabled = runner.active; });
-  el('abort-btn').style.display = runner.active && !runner.preview ? '' : 'none';
+  el('abort-btn').style.display = (runner.active && !runner.preview) || workspaceState.active ? '' : 'none';
   el('session-badge').textContent = sessionState.active ? `SESSION · ${(sessionState.phase || 'running').toUpperCase()}` : 'MANUAL';
   el('session-badge').className = `status-pill ${sessionState.active ? 'warn' : 'good'}`;
 }
@@ -1533,6 +1433,11 @@ async function loadEvents() {
   refreshButtons();
 }
 
+async function loadWorkspaceState() {
+  workspaceState = await json('/api/workspace/status').catch(() => ({ active: false }));
+  refreshButtons();
+}
+
 function connectWS() {
   ws = new WebSocket(`ws://${location.host}`);
   ws.onopen = () => {
@@ -1540,6 +1445,7 @@ function connectWS() {
     el('ws-badge').textContent = 'ONLINE';
     el('ws-badge').className = 'status-pill good';
     loadEvents();
+    loadWorkspaceState();
     refreshButtons();
   };
   ws.onclose = () => {
@@ -1559,7 +1465,6 @@ function connectWS() {
     }
     if (data.evt === 'session') {
       sessionState = { active: !!data.active, phase: data.phase || 'idle', label: data.label || '' };
-      if (sessionState.active) followActive = false;
       refreshButtons();
       return;
     }
@@ -1571,13 +1476,9 @@ function connectWS() {
     }
     if (Array.isArray(data.a)) {
       liveTelemetry = data;
-      liveTelemetryAt = performance.now();
       setActualFromAngles(data.a);
       renderMetrics();
     }
-    if (data.fl !== undefined && !data.fl) followActive = false;
-    if (data.status === 'follow on') followActive = true;
-    if (data.status === 'follow off') followActive = false;
   };
 }
 
@@ -1589,7 +1490,11 @@ el('program-name').addEventListener('input', renderPrograms);
 el('preview-btn').addEventListener('click', () => runWorkspace(true));
 el('preview-block-btn').addEventListener('click', previewDraftBlock);
 el('run-btn').addEventListener('click', () => runWorkspace(false));
-el('abort-btn').addEventListener('click', () => { runner.abort = true; setStatus('aborting', 'bad'); });
+el('abort-btn').addEventListener('click', async () => {
+  runner.abort = true;
+  setStatus('aborting', 'bad');
+  await json('/api/workspace/abort', {}).catch(() => null);
+});
 el('reload-btn').addEventListener('click', loadConfig);
 el('save-current-home-btn').addEventListener('click', () => saveTargetPose('home'));
 el('save-current-release-btn').addEventListener('click', () => saveTargetPose('release'));
@@ -1597,11 +1502,11 @@ el('loops').addEventListener('input', () => {
   el('loops').value = clampLoops(el('loops').value);
   el('loops-v').textContent = el('loops').value;
 });
-for (const id of ['warmup-ms', 'home-ms', 'land-ms']) {
+for (const id of ['warmup-ms', 'home-ms', 'follow-settle-ms', 'land-ms']) {
   el(id).addEventListener('input', () => {
     const input = el(id);
     const timing = timingFromControls();
-    const key = id === 'warmup-ms' ? 'warmupMs' : id === 'home-ms' ? 'homeMs' : 'landMs';
+    const key = id === 'warmup-ms' ? 'warmupMs' : id === 'home-ms' ? 'homeMs' : id === 'follow-settle-ms' ? 'followSettleMs' : 'landMs';
     input.value = String(timing[key]);
     el(`${id}-v`).textContent = secLabel(timing[key]);
     renderSequence();

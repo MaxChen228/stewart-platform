@@ -14,7 +14,7 @@ function usage() {
 
 Rules:
   - All variants run against one Workspace program id.
-  - Program id/hash is preserved, so leaderboard comparisons stay same-reference.
+  - Program id/hash is preserved, so feature comparisons stay same-reference.
   - Dry-run is default.
 `);
 }
@@ -132,8 +132,8 @@ function runSession(opts, variant, index) {
   execFileSync(process.execPath, args, { stdio: 'inherit' });
 }
 
-function printLeaderboard(programId) {
-  execFileSync(process.execPath, ['sysid/program_leaderboard.js', '--program', programId], { stdio: 'inherit' });
+function printFeatureReport(programId) {
+  execFileSync(process.execPath, ['sysid/program_features.js', '--program', programId], { stdio: 'inherit' });
 }
 
 function printDeepReport(programId) {
@@ -159,7 +159,7 @@ function printWaveforms(programId) {
     await setProgram(opts.base, opts.program);
     runSession(opts, variants[i], i);
     if (opts.live) {
-      printLeaderboard(opts.program);
+      printFeatureReport(opts.program);
       printDeepReport(opts.program);
       printWaveforms(opts.program);
     }

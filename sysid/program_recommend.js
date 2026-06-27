@@ -8,7 +8,7 @@ const {
   summarize,
   programKey,
   programLabel,
-} = require('./program_leaderboard');
+} = require('./program_features');
 
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_FILE = path.join(ROOT, 'sysid', 'config', 'platform.json');
@@ -17,8 +17,8 @@ function usage() {
   console.log(`Usage:
   node sysid/program_recommend.js --program PROGRAM_ID_OR_HASH [--json]
 
-Recommends the next same-program optimization queue. It never compares scores
-across different programs.
+Recommends the next same-program optimization queue from raw run features.
+It avoids scalar run ratings.
 `);
 }
 
@@ -46,9 +46,9 @@ function findProgram(idOrHash) {
   return workspacePrograms().find((p) => p.id === q || p.hash === q || String(p.name || '').includes(q)) || null;
 }
 
-function scoreValue(run, key) {
+function featureValue(run, key) {
   if (!run) return null;
-  const v = key === 'stability' ? run.stability : run.score?.[key];
+  const v = run.health?.[key];
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -84,13 +84,10 @@ function uniqVariants(variants) {
 function recommendation(program, runs) {
   const group = runs.length ? summarize(runs) : null;
   const kind = programKind(program);
-  const best = group?.best || null;
   const latest = group?.latest || null;
-  const bestScore = scoreValue(best, 'stability');
-  const tracking = scoreValue(best, 'trackingCost');
-  const cross = scoreValue(best, 'crossAxisCost');
-  const osc = scoreValue(best, 'oscillationCost');
-  const quality = scoreValue(best, 'qualityPenalty');
+  const maxStep = featureValue(latest, 'maxStepDeg');
+  const cross = featureValue(latest, 'crossPeak');
+  const rxDropPerS = featureValue(latest, 'rxDropPerS');
   const reasons = [];
   let variants = [];
   let preset = 'baseline';
@@ -109,45 +106,45 @@ function recommendation(program, runs) {
       preset = 'baseline';
       variants = [{ label: 'baseline', zBias: 0 }];
     }
-  } else if (quality != null && quality > 6) {
-    reasons.push(`quality penalty is high (${quality.toFixed(2)}); first reduce command pressure`);
+  } else if ((rxDropPerS != null && rxDropPerS > 1) || latest?.health?.canEfOr) {
+    reasons.push(`latest telemetry/CAN health is limiting (rxDrop/s=${fmt(rxDropPerS)}, ef=${latest?.health?.canEfOr ?? '-'}); first reduce command pressure`);
     preset = 'vf-sweep';
     variants = [
-      { label: 'vf60_45', zBias: conditionNumber(best, 'zBias'), vmaxT: 60, vmaxR: 45 },
-      { label: 'vf45_35', zBias: conditionNumber(best, 'zBias'), vmaxT: 45, vmaxR: 35 },
-      { label: 'vf30_25', zBias: conditionNumber(best, 'zBias'), vmaxT: 30, vmaxR: 25 },
+      { label: 'vf60_45', zBias: conditionNumber(latest, 'zBias'), vmaxT: 60, vmaxR: 45 },
+      { label: 'vf45_35', zBias: conditionNumber(latest, 'zBias'), vmaxT: 45, vmaxR: 35 },
+      { label: 'vf30_25', zBias: conditionNumber(latest, 'zBias'), vmaxT: 30, vmaxR: 25 },
     ];
-  } else if (kind === 'heave' && tracking != null && (cross == null || tracking >= cross * 0.8)) {
-    const z = conditionNumber(best, 'zBias');
-    reasons.push(`tracking cost is a main limiter (${tracking.toFixed(2)}); refine zBias around best=${z}`);
+  } else if (kind === 'heave' && maxStep != null && maxStep < 3 && cross != null && cross < 2) {
+    const z = conditionNumber(latest, 'zBias');
+    reasons.push(`latest waveform has no large lifecycle feature; refine static Z compensation around zBias=${z}`);
     preset = 'custom-zbias-refine';
     variants = [
       { label: 'zbias_low', zBias: Math.max(0, z - 1.5) },
-      { label: 'zbias_best', zBias: z },
+      { label: 'zbias_current', zBias: z },
       { label: 'zbias_high', zBias: z + 1.5 },
     ];
-  } else if ((cross != null && cross > 2.5) || (osc != null && osc > 2.5)) {
-    reasons.push(`cross/oscillation cost is limiting (cross=${fmt(cross)}, osc=${fmt(osc)}); try slower follow limits`);
+  } else if ((maxStep != null && maxStep > 3) || (cross != null && cross > 2.5)) {
+    reasons.push(`waveform roughness is limiting (maxStep=${fmt(maxStep)}deg, crossPeak=${fmt(cross)}); try slower follow limits`);
     preset = 'vf-sweep';
     variants = [
-      { label: 'vf60_45', zBias: conditionNumber(best, 'zBias'), vmaxT: 60, vmaxR: 45 },
-      { label: 'vf45_35', zBias: conditionNumber(best, 'zBias'), vmaxT: 45, vmaxR: 35 },
-      { label: 'vf30_25', zBias: conditionNumber(best, 'zBias'), vmaxT: 30, vmaxR: 25 },
+      { label: 'vf60_45', zBias: conditionNumber(latest, 'zBias'), vmaxT: 60, vmaxR: 45 },
+      { label: 'vf45_35', zBias: conditionNumber(latest, 'zBias'), vmaxT: 45, vmaxR: 35 },
+      { label: 'vf30_25', zBias: conditionNumber(latest, 'zBias'), vmaxT: 30, vmaxR: 25 },
     ];
   } else {
-    reasons.push(`current best is reasonably balanced (stability=${fmt(bestScore)}); repeat best once for reproducibility`);
-    preset = 'repeat-best';
+    reasons.push('latest run has no obvious feature escalation; repeat the current condition once for reproducibility');
+    preset = 'repeat-current';
     variants = [{
-      label: 'repeat_best',
-      zBias: conditionNumber(best, 'zBias'),
-      vmaxT: conditionNumber(best, 'vmaxT', 60),
-      vmaxR: conditionNumber(best, 'vmaxR', 45),
+      label: 'repeat_current',
+      zBias: conditionNumber(latest, 'zBias'),
+      vmaxT: conditionNumber(latest, 'vmaxT', 60),
+      vmaxR: conditionNumber(latest, 'vmaxR', 45),
     }];
   }
 
   variants = uniqVariants(variants);
   const variantArgs = variants.map((v) => `--variant '${JSON.stringify(v)}'`).join(' ');
-  const command = preset.startsWith('custom') || preset === 'repeat-best'
+  const command = preset.startsWith('custom') || preset === 'repeat-current'
     ? `npm run workspace:optimize -- --program ${program.id} ${variantArgs}`
     : `npm run workspace:optimize -- --program ${program.id} --preset ${preset}`;
   const liveCommand = `${command} -- --live --i-am-at-rig`;
@@ -159,7 +156,6 @@ function recommendation(program, runs) {
       kind,
     },
     runs: runs.length,
-    best,
     latest,
     reasons,
     preset,
@@ -177,11 +173,11 @@ function fmt(v, d = 2) {
 function printHuman(rec) {
   console.log(`${rec.program.name} (${rec.program.id})`);
   console.log(`kind=${rec.program.kind} runs=${rec.runs}`);
-  if (rec.best) {
-    const s = rec.best.score || {};
-    console.log(`best ${fmt(rec.best.stability)} track=${fmt(s.trackingCost)} cross=${fmt(s.crossAxisCost)} osc=${fmt(s.oscillationCost)} quality=${fmt(s.qualityPenalty)}`);
+  if (rec.latest) {
+    const h = rec.latest.health || {};
+    console.log(`latest ${rec.latest.verdict || ''} maxStep=${fmt(h.maxStepDeg)} cross=${fmt(h.crossPeak)} rxDrop/s=${fmt(h.rxDropPerS)}`);
   } else {
-    console.log('best -');
+    console.log('latest -');
   }
   for (const reason of rec.reasons) console.log(`- ${reason}`);
   console.log('variants:');

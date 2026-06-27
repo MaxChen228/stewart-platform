@@ -18,6 +18,7 @@ const DEFAULT_PLATFORM_CONFIG = Object.freeze({
     settleMs: 800,
     warmupMs: 1000,
     homeMs: 1500,
+    followSettleMs: 800,
     landMs: 1500,
     safeLand: true,
   },
@@ -68,7 +69,7 @@ function mergeConfig(input = {}) {
   if (input.trialDefaults && typeof input.trialDefaults === 'object') {
     const t = input.trialDefaults;
     if (typeof t.profile === 'string') out.trialDefaults.profile = t.profile;
-    for (const k of ['heave', 'zBias', 'ms', 'settleMs', 'warmupMs', 'homeMs', 'landMs']) {
+    for (const k of ['heave', 'zBias', 'ms', 'settleMs', 'warmupMs', 'homeMs', 'followSettleMs', 'landMs']) {
       const v = Number(t[k]);
       if (Number.isFinite(v)) out.trialDefaults[k] = v;
     }

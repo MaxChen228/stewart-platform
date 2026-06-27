@@ -22,9 +22,13 @@ Pose targetPose = {0, 0, NEUTRAL_Z, 0, 0, 0};
 // core1 控制環只在 CAN mutex 下取 latestRaw 快照，避免 int64 tear 與 SPI 競態。
 // 預設開啟：行為仍可用 A0 切回輪詢版。
 int64_t latestRaw[NUM_MOTORS];
+uint32_t latestRawAtMs[NUM_MOTORS] = {0};
 volatile bool autoReturnMode = false;
 volatile bool canRxPaused = false;
 uint16_t arPeriodMs = 10;             // 馬達主動上報週期，可調（AR 指令）；預設 100Hz（10ms）對齊控制迴圈
+constexpr uint32_t AR_FRESH_MS = 120; // 啟動/重啟 auto-return 時用來判斷「近期收到過」的軟門檻
+constexpr uint32_t AR_WARN_MS = 1000; // 長時間沒新 frame 才警告；短缺包沿用 last-known-good，不停機
+bool autoReturnWarnLatched = false;
 
 // ===== 可調速率（item 2 of 本輪）=====
 volatile uint32_t loopPeriodUs = 10000;       // 控制迴圈週期，可調（L 指令，單位 ms→µs）；預設 100Hz（10ms）
@@ -34,6 +38,8 @@ float enableAngle[NUM_MOTORS] = {0};
 
 uint16_t posSpeed = 120;
 uint8_t  posAcc   = 100;
+constexpr float HOLD_PROFILE_MAX_VEL_DPS = 30.0f;
+constexpr uint32_t HOLD_PROFILE_MAX_MS = 20000;
 
 // ===== 匯流排佔用統計（每遙測窗計數，print 後歸零）：實測幀數，client 換算 500kbps 佔用% =====
 uint16_t busTxF5  = 0;   // F5 指令幀（DLC 8）
@@ -72,7 +78,7 @@ struct TelemetrySnapshot {
     uint32_t t, dtMs, canReadUs;
     float lhz;
     uint16_t arMs;
-    uint16_t busF5, busQ, busRx, busMs, busPer[NUM_MOTORS], busOvr;
+    uint16_t busF5, busQ, busRx, busMs, busPer[NUM_MOTORS], busOvr, arAge[NUM_MOTORS];
     uint32_t f5us, f5max;
     uint8_t maxDrain;
     uint32_t teleCycles, dtMinMs, dtMaxMs;
@@ -125,8 +131,25 @@ float    holdTarget[NUM_MOTORS] = {0};   // 移動目標 = IK(目標絕對 pose)
 float    holdStart[NUM_MOTORS]  = {0};   // 本次移動起點（發 P 當下的 holdAngles）
 uint32_t holdMoveStart = 0, holdMoveMs = 0;   // 移動起始時刻、總時長（0=不在移動）
 
+static float minJerk01(float t) {
+    t = constrain(t, 0.0f, 1.0f);
+    return t * t * t * (10.0f + t * (-15.0f + 6.0f * t));
+}
+
+static uint32_t constrainedHoldMoveMs(float requestedMs, const float startAngles[NUM_MOTORS], const float targetAngles[NUM_MOTORS]) {
+    float maxDelta = 0.0f;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        float d = fabsf(targetAngles[i] - startAngles[i]);
+        if (d > maxDelta) maxDelta = d;
+    }
+    // Minimum-jerk peak velocity is 1.875 * distance / duration.
+    uint32_t byVel = (uint32_t)ceilf(1000.0f * 1.875f * maxDelta / HOLD_PROFILE_MAX_VEL_DPS);
+    uint32_t requested = (uint32_t)constrain((int)requestedMs, 1, (int)HOLD_PROFILE_MAX_MS);
+    return constrain((int)max(requested, byVel), 1, (int)HOLD_PROFILE_MAX_MS);
+}
+
 // 跟隨模式（FOLLOW/PF）：HOLD 下接 host 串流的 pose 目標，以速度受限濾波器平滑追過去。
-// 與 P smoothstep 互斥（follow on 時 followStep 接管 holdAngles，忽略 holdMoveMs）。
+// 與 P minimum-jerk profile 互斥（follow on 時 followStep 接管 holdAngles，忽略 holdMoveMs）。
 // 設計：每 cycle 對「pose 誤差」做低通求步進（近目標 ease-out），再把步進的速度 clamp 到
 // vmax → 遠時等速平滑落後（拖快不硬撲）、近時低通收斂。速度上限同時是所有 host 動作的硬體安全閥。
 bool  followMode = false;
@@ -164,7 +187,10 @@ static void controlTask(void*) {
         controlTick();
         uint32_t periodMs = (uint32_t)loopPeriodUs / 1000;
         if (periodMs < 1) periodMs = 1;
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(periodMs));
+        TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
+        TickType_t now = xTaskGetTickCount();
+        if ((now - lastWake) > periodTicks) lastWake = now;
+        vTaskDelayUntil(&lastWake, periodTicks);
     }
 }
 
@@ -288,6 +314,78 @@ static bool applyVFOCPid(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int
     return okCnt == NUM_MOTORS;
 }
 
+static void clearAutoReturnSnapshots() {
+    CanGuard _g(servos.can);
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        latestRaw[i] = INT64_MIN;
+        latestRawAtMs[i] = 0;
+    }
+}
+
+static int waitForFreshAutoReturn(uint32_t timeoutMs) {
+    uint32_t waitStart = millis();
+    int fresh = 0;
+    while (millis() - waitStart < timeoutMs) {
+        fresh = 0;
+        uint32_t now = millis();
+        {
+            CanGuard _g(servos.can);
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                if (latestRaw[i] != INT64_MIN &&
+                    latestRawAtMs[i] != 0 &&
+                    (now - latestRawAtMs[i]) <= AR_FRESH_MS) fresh++;
+            }
+        }
+        if (fresh == NUM_MOTORS) break;
+        delay(5);
+    }
+    return fresh;
+}
+
+static int armAutoReturn(bool waitFresh) {
+    canRxPaused = true;
+    delay(2);
+    clearAutoReturnSnapshots();
+    int okc = 0;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs)) okc++;
+        delay(5);
+    }
+    servos.flushReceiveBuffer();
+    autoReturnMode = true;
+    autoReturnWarnLatched = false;
+    canRxPaused = false;
+    if (waitFresh) {
+        uint32_t waitMs = (uint32_t)arPeriodMs * 4;
+        if (waitMs < AR_FRESH_MS) waitMs = AR_FRESH_MS;
+        waitForFreshAutoReturn(waitMs);
+    }
+    return okc;
+}
+
+static int rearmAutoReturnIfEnabled() {
+    return autoReturnMode ? armAutoReturn(true) : 0;
+}
+
+static void disarmAutoReturn() {
+    canRxPaused = true;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        servos.setAutoReturn(MOTOR_ADDR[i], 0x35, 0);
+        delay(5);
+    }
+    servos.flushReceiveBuffer();
+    clearAutoReturnSnapshots();
+    autoReturnMode = false;
+    autoReturnWarnLatched = false;
+    canRxPaused = false;
+}
+
+static int applyVFOCPidGuarded(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int okMask[NUM_MOTORS], int& okCnt) {
+    if (autoReturnMode) canRxPaused = true;
+    applyVFOCPid(kp, ki, kd, kv, okMask, okCnt);
+    return rearmAutoReturnIfEnabled();
+}
+
 // ===== 控制模式 =====
 // 0 = joint-space（舊版自適應追蹤）
 // 1 = task-space PD（FK + IK）
@@ -399,7 +497,7 @@ static const char* ctlModeName(const TelemetrySnapshot& s) {
 
 static const char* profileName(const TelemetrySnapshot& s) {
     if (s.profile == 1) return "follow";
-    if (s.profile == 2) return "smoothstep";
+    if (s.profile == 2) return "minjerk";
     return "none";
 }
 
@@ -409,6 +507,7 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
                   "\"t\":%u,\"dt\":%u,\"cus\":%u,\"lhz\":%.0f,\"ar\":%d,"
+                  "\"arAge\":[%u,%u,%u,%u,%u,%u],"
                   "\"bus\":{\"f5\":%u,\"q\":%u,\"rx\":%u,\"ms\":%u,"
                   "\"per\":[%u,%u,%u,%u,%u,%u],\"ovr\":%u,\"f5us\":%u,\"mxd\":%u},"
                   "\"tim\":{\"cycles\":%u,\"dtMin\":%u,\"dtMax\":%u,\"dtAvg\":%.2f,"
@@ -426,6 +525,8 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
         s.ok, s.zeroed, s.pos, s.controlMode,
         s.eflg, s.tec, s.rec,
         s.t, s.dtMs, s.canReadUs, s.lhz, s.arMs,
+        s.arAge[0], s.arAge[1], s.arAge[2],
+        s.arAge[3], s.arAge[4], s.arAge[5],
         s.busF5, s.busQ, s.busRx, s.busMs,
         s.busPer[0], s.busPer[1], s.busPer[2],
         s.busPer[3], s.busPer[4], s.busPer[5],
@@ -481,7 +582,7 @@ void canRxTask(void*) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
         if (autoReturnMode && !canRxPaused) {
-            servos.drainInto(latestRaw);
+            servos.drainInto(latestRaw, latestRawAtMs);
         }
     }
 }
@@ -544,10 +645,7 @@ void setup() {
 
     // 預設啟用 auto-return（本輪改為主運行模式）：6 顆每 arPeriodMs(10ms=100Hz) 主動上報 0x35，
     // ESP32 連續排空、控制環只取最新快照 → cus≈0、無輪詢 8ms backstop（runtime A0 可切回輪詢）。
-    for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
-    for (int i = 0; i < NUM_MOTORS; i++) { servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs); delay(5); }
-    autoReturnMode = true;
-    servos.flushReceiveBuffer();
+    armAutoReturn(false);
     startCanRxTask();
 
     // WiFi bring-up（P1）：載入 NVS 憑證，若已啟用則自動連線並印 IP。
@@ -591,25 +689,14 @@ void dispatch(const String& cmd, bool fromNet = false) {
         }
     } else if (cmd == "A1") {
         // 啟用 auto-return：6 顆每 arPeriodMs 主動上報 0x35 位置
-        {
-            CanGuard _g(servos.can);
-            for (int i = 0; i < NUM_MOTORS; i++) latestRaw[i] = INT64_MIN;
-        }
-        int okc = 0;
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            if (servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs)) okc++;
-            delay(5);
-        }
-        servos.flushReceiveBuffer();
-        autoReturnMode = true;
+        int okc = armAutoReturn(true);
         Out.printf("{\"status\":\"auto-return ON\",\"period_ms\":%d,\"cfg_ok\":%d}\n",
                       arPeriodMs, okc);
     } else if (cmd.startsWith("AR ")) {
         // 調整上報週期（ms）；若已啟用則即時重設
         arPeriodMs = constrain(cmd.substring(3).toInt(), 1, 100);
-        if (autoReturnMode)
-            for (int i = 0; i < NUM_MOTORS; i++) { servos.setAutoReturn(MOTOR_ADDR[i], 0x35, arPeriodMs); delay(5); }
-        Out.printf("{\"status\":\"ar period\",\"period_ms\":%d}\n", arPeriodMs);
+        int okc = rearmAutoReturnIfEnabled();
+        Out.printf("{\"status\":\"ar period\",\"period_ms\":%d,\"cfg_ok\":%d}\n", arPeriodMs, okc);
     } else if (cmd.startsWith("C ")) {
         // 設回覆模式：C 0 0=不回覆 / C 1 0=只即時 / C 1 1=預設全回
         int sp = cmd.indexOf(' ', 2);
@@ -624,11 +711,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         loopPeriodUs = ms * 1000;
         Out.printf("{\"status\":\"loop period\",\"period_ms\":%u,\"hz\":%.0f}\n", ms, 1000.0f / ms);
     } else if (cmd == "A0") {
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            servos.setAutoReturn(MOTOR_ADDR[i], 0x35, 0);  // 0 = 停用上報
-            delay(5);
-        }
-        autoReturnMode = false;
+        disarmAutoReturn();
         Out.println("{\"status\":\"auto-return OFF (回輪詢)\"}");
     } else if (cmd == "D") {
         posDisable();
@@ -671,6 +754,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
 
         followMode = false;   // E 啟動 mode0/1 控制 → 清跟隨，避免 follow-HOLD 下殘留追 followTgt
         posEnabled = true;
+        autoReturnWarnLatched = false;
         Out.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d,"
             "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
             controlMode, posSpeed, posAcc,
@@ -714,6 +798,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         holdMode = true;
         followMode = false;   // 進 HOLD 一律純死咬，跟隨須另送 FOLLOW 1
         posEnabled = true;
+        autoReturnWarnLatched = false;
         maxHoldErr = 0;
         Out.printf("{\"status\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
             "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
@@ -740,7 +825,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
     } else if (cmd.startsWith("P ")) {
         // 絕對姿態目標 `P x y z r p y [ms]`。前 6 值=絕對 pose（mm/度）。
         //  - n>=6：一律更新 targetPose（mode0/1 控制器讀它）。
-        //  - HOLD 下：把絕對 pose 用 IK 解成有效馬達角度，重用 holdMoveMs smoothstep 平滑死咬過去。
+        //  - HOLD 下：把絕對 pose 用 IK 解成有效馬達角度，重用 holdMoveMs minimum-jerk 平滑死咬過去。
         //    用 IK 解（非相對增量）保證 6 角度對應真實剛體姿態 → 不 over-constrain 較勁。
         //    第 7 值 ms = 軌跡時長（缺省 1500）。holdAngles==enc==IK 同為下腿絕對幾何角度，可直接插值。
         float v[6]; float ms_f = -1;
@@ -753,15 +838,16 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 if (!ik.valid) {
                     Out.println("{\"error\":\"P pose unreachable (IK invalid)\"}");
                 } else {
-                    uint16_t ms = (n >= 7) ? (uint16_t)constrain((int)ms_f, 1, 10000) : 1500;
+                    uint32_t requestedMs = (n >= 7) ? (uint32_t)constrain((int)ms_f, 1, (int)HOLD_PROFILE_MAX_MS) : 1500;
                     for (int i = 0; i < NUM_MOTORS; i++) {
                         holdStart[i]  = holdAngles[i];     // 從當下死咬目標起步（多段可接續）
                         holdTarget[i] = ik.angles[i];      // IK 解 = 有效幾何角度
                     }
+                    uint32_t ms = constrainedHoldMoveMs((float)requestedMs, holdStart, holdTarget);
                     holdMoveStart = millis();
                     holdMoveMs = ms;
-                    Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%u}\n",
-                        v[0],v[1],v[2],v[3],v[4],v[5], ms);
+                    Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%lu,\"reqMs\":%lu,\"profile\":\"minjerk\"}\n",
+                        v[0],v[1],v[2],v[3],v[4],v[5], (unsigned long)ms, (unsigned long)requestedMs);
                 }
             } else {
                 Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
@@ -785,7 +871,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
                     init[3]=targetPose.roll; init[4]=targetPose.pitch; init[5]=targetPose.yaw;
                 }
                 for (int i = 0; i < 6; i++) { followCur[i] = init[i]; followTgt[i] = init[i]; }
-                holdMoveMs = 0;          // 與 P smoothstep 互斥
+                holdMoveMs = 0;          // 與 P minimum-jerk profile 互斥
                 followMode = true;
                 Out.printf("{\"status\":\"follow on\",\"pose\":[%.2f,%.2f,%.2f,%.3f,%.3f,%.3f],\"fk\":%d}\n",
                     init[0],init[1],init[2],init[3],init[4],init[5], fk.converged?1:0);
@@ -833,12 +919,12 @@ void dispatch(const String& cmd, bool fromNet = false) {
             }
             int okMask[NUM_MOTORS] = {0};
             int okCnt = 0;
-            applyVFOCPid(kp, ki, kd, kv, okMask, okCnt);
+            int arOk = applyVFOCPidGuarded(kp, ki, kd, kv, okMask, okCnt);
             pidSaved = (okCnt == NUM_MOTORS) && saveVFOCPidToNVS();
             Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
-                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d,\"ar_ok\":%d}\n",
                 pidSaved ? 1 : 0, curKp, curKi, curKd, curKv,
-                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt, arOk);
         } else {
             pidSaved = saveVFOCPidToNVS();
             Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
@@ -850,11 +936,11 @@ void dispatch(const String& cmd, bool fromNet = false) {
         pidSaved = false;
         int okMask[NUM_MOTORS] = {0};
         int okCnt = 0;
-        applyVFOCPid(BOOT_KP, BOOT_KI, BOOT_KD, BOOT_KV, okMask, okCnt);
+        int arOk = applyVFOCPidGuarded(BOOT_KP, BOOT_KI, BOOT_KD, BOOT_KV, okMask, okCnt);
         Out.printf("{\"tune\":\"pid\",\"reset\":1,\"saved\":0,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
-            "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+            "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d,\"ar_ok\":%d}\n",
             curKp, curKi, curKd, curKv,
-            okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+            okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt, arOk);
     } else if (cmd.startsWith("K ")) {
         int kp, ki, kd, kv;
         if (sscanf(cmd.c_str(), "K %d %d %d %d", &kp, &ki, &kd, &kv) == 4) {
@@ -864,12 +950,12 @@ void dispatch(const String& cmd, bool fromNet = false) {
             }
             int okMask[NUM_MOTORS] = {0};
             int okCnt = 0;
-            applyVFOCPid(kp, ki, kd, kv, okMask, okCnt);
+            int arOk = applyVFOCPidGuarded(kp, ki, kd, kv, okMask, okCnt);
             pidSaved = currentPidMatchesSaved();
             Out.printf("{\"tune\":\"pid\",\"saved\":%d,\"kp\":%u,\"ki\":%u,\"kd\":%u,\"kv\":%u,"
-                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d,\"ar_ok\":%d}\n",
                 pidSaved ? 1 : 0, curKp, curKi, curKd, curKv,
-                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt, arOk);
         }
     } else if (cmd.startsWith("V ")) {
         int spd, ac;
@@ -1152,14 +1238,35 @@ static void controlTick() {
     int64_t raw[NUM_MOTORS];
     int ok = 0;
     uint32_t canReadUs = 0;
+    uint16_t arAgeMs[NUM_MOTORS] = {0};
     if (autoReturnMode) {
         // core0 canRxTask 連續排空；控制環只在同一把 CAN 鎖下取最新快照，避免 int64 tear。
+        // auto-return 是冗餘串流，短暫缺一兩個 frame 屬正常；沿用 last-known-good，不把它當故障停機。
+        bool warnStale[NUM_MOTORS] = {false};
         {
             CanGuard _g(servos.can);
+            uint32_t nowMsForFreshness = millis();
             for (int i = 0; i < NUM_MOTORS; i++) {
                 raw[i] = latestRaw[i];
-                if (raw[i] != INT64_MIN) ok++;
+                if (raw[i] != INT64_MIN && latestRawAtMs[i] != 0) {
+                    ok++;
+                    uint32_t age = nowMsForFreshness - latestRawAtMs[i];
+                    arAgeMs[i] = age > 65535 ? 65535 : (uint16_t)age;
+                    warnStale[i] = age > AR_WARN_MS;
+                } else {
+                    raw[i] = INT64_MIN;
+                    arAgeMs[i] = 65535;
+                    warnStale[i] = true;
+                }
             }
+        }
+        bool anyWarn = false;
+        for (int i = 0; i < NUM_MOTORS; i++) anyWarn = anyWarn || warnStale[i];
+        if (!anyWarn) autoReturnWarnLatched = false;
+        if (posEnabled && anyWarn && !autoReturnWarnLatched) {
+                autoReturnWarnLatched = true;
+                Out.printf("{\"warn\":\"auto-return old\",\"ok\":%d,\"age\":[%u,%u,%u,%u,%u,%u],\"action\":\"holding last-known-good\"}\n",
+                    ok, arAgeMs[0], arAgeMs[1], arAgeMs[2], arAgeMs[3], arAgeMs[4], arAgeMs[5]);
         }
     } else {
         servos.flushReceiveBuffer();
@@ -1178,17 +1285,17 @@ static void controlTick() {
 
         if (holdMode) {
             // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
-            // 跟隨模式（FOLLOW/PF/動作庫）：速度受限濾波器接管 holdAngles，與 smoothstep 互斥。
+            // 跟隨模式（FOLLOW/PF/動作庫）：速度受限濾波器接管 holdAngles，與 minimum-jerk profile 互斥。
             if (followMode) {
                 followStep(dt);
             } else if (holdMoveMs > 0) {
-            // 姿態移動（P）：平滑過渡 holdAngles → holdTarget（smoothstep 加減速，避免階躍衝擊）
+            // 姿態移動（P）：minimum-jerk 過渡 holdAngles → holdTarget，端點速度/加速度皆為 0。
                 float t = (float)(millis() - holdMoveStart) / holdMoveMs;
                 if (t >= 1.0f) {
                     for (int i = 0; i < NUM_MOTORS; i++) holdAngles[i] = holdTarget[i];
                     holdMoveMs = 0;
                 } else {
-                    float s = t * t * (3.0f - 2.0f * t);   // smoothstep
+                    float s = minJerk01(t);
                     for (int i = 0; i < NUM_MOTORS; i++)
                         holdAngles[i] = holdStart[i] + (holdTarget[i] - holdStart[i]) * s;
                 }
@@ -1322,6 +1429,7 @@ static void controlTick() {
         snap.angles[i] = enc.angles[i];
         snap.raw[i] = raw[i];
         snap.busPer[i] = rxPerId[i];
+        snap.arAge[i] = arAgeMs[i];
         snap.motorTgt[i] = motorTargets[i];
     }
     snap.ok = ok;
