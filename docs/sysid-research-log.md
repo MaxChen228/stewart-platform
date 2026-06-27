@@ -491,3 +491,81 @@ safe landing 仍回原本 configured home/landing，不改安全流程。
 2. 擬合靜態補償模型 `bias = f(pose, load)`，先可用低階多項式/lookup table。
 3. 把模型當 feedforward；殘餘慢誤差才交給 pose-space LQI。
 4. LQR/MPC 使用「pure-P/低 Ki + compensation model」的乾淨資料建模，而不是使用 joint Ki=20 的耦合資料。
+
+## 2026-06-27 — Stability score engine v1 與 Z sweep baseline
+
+### 評估標準
+
+新增 `sysid/stability_score.js` / `npm run stability:score`。目的不是取代工程判斷，而是防止看圖誤判。
+
+分數拆成：
+
+- `trackingCost`：任務/reference 軸的 P95 追蹤誤差。
+- `crossAxisCost`：非任務軸的高頻殘餘；例如 Z sweep 時看 X/Y/Roll/Pitch/Yaw。
+- `oscillationCost`：所有軸去除慢變後的高頻殘餘。
+- `recoveryCost`：若錄檔含 `W` 擾動，計算 peak 與 recovery time。
+- `qualityPenalty`：encoder/FK/CAN/telemetry 品質懲罰。
+
+重要修正：評估要分清楚 `command target` 與 `reference target`。有 feedforward/bias/MPC 時，
+送給韌體的命令不一定等於任務目標；分數必須對任務 reference 評估，否則會把補償成功誤判為 tracking error。
+
+### Z sweep baseline
+
+新增 `sysid/z_sweep_trial.js` / `npm run z:sweep`：
+
+```text
+setup: H -> configured home
+recorded task: relative Z +10 -> +62 -> +10
+after: home -> landing -> D
+```
+
+先跑 Ki=20 baseline：
+
+| Run | one-way | score | tracking | cross-axis | oscillation | quality | cross peak | CAN rxDrop/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `z_sweep_eval_ki20_clean` | 6s | 52.97 | 16.81 | 2.86 | 3.13 | 15.02 | 10.74 | 16.27 |
+| `z_sweep_eval_ki20_clean_slow` | 10s | 57.66 | 16.98 | 1.70 | 1.87 | 14.92 | 7.92 | 16.16 |
+
+資料：
+
+- `sysid/data/z_sweep_eval_ki20_clean_z10-62_c1_ms6000_2026-06-27T05-40-39.jsonl`
+- `sysid/data/z_sweep_eval_ki20_clean_slow_z10-62_c1_ms10000_2026-06-27T05-41-34.jsonl`
+
+### 判斷
+
+慢速 10s 明顯降低 cross-axis / oscillation，但 tracking cost 仍高，CAN drop rate 幾乎沒改善。
+所以大範圍 Z 上下移動的晃動部分來自軌跡激發，但不是全部；仍需要 compensation/control 與 CAN 資料面改善。
+
+下一步用同一評估引擎比較：
+
+1. 不同軌跡時間與 jerk-limited/PF 版本。
+2. 不同 PID / low-Ki + compensation model。
+3. Z sweep 中插入小 `W` 擾動，看 recovery score。
+
+## 2026-06-27 — Run panel, command gating, and fresh Z sweep recording
+
+### 事件
+
+清空 active `sysid/data` 後第一次 `fresh_updown_demo` 失敗：錄檔只有 3 行 `cmd`，沒有 telemetry。
+原因不是平台沒有動，而是 WiFi/TCP transport 在錄製前掉線；舊 runner 仍繼續送命令，server 又把 dropped
+command 寫成正常 `cmd`，造成「看起來有 run、實際沒有資料」的假紀錄。
+
+### 修復
+
+- `server.js`：只有 transport write 成功的命令才寫入 recorder 的 `cmd`；失敗命令寫成 `drop` 並廣播
+  `cmd_dropped`。
+- `sysid/z_sweep_trial.js`：live run 前等待 transport connected 與 fresh telemetry；每個命令等待 server
+  `cmd` ack，遇到 `cmd_dropped` 或 stale telemetry 立刻中止。
+- `web/research/runs.html`：新增 run 管理面板，可查看分數、波形、軌跡回放、參數與原始檔，並可將 run
+  封存到 `sysid/data/archive/` 或 soft-delete 到 `sysid/data/trash/`。
+- `sysid/research_index.js`：支援 active data 為空，不再假設一定存在 heave best run。
+
+### 成功重跑
+
+使用 OTA 重啟恢復 ESP32 TCP 後，重跑 `fresh_updown_demo2`：
+
+| Run | samples | score | tracking | cross-axis | oscillation | quality | CAN rxDrop/s | cross peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `fresh_updown_demo2_z10-62_c1_ms6000_2026-06-27T06-27-08` | 347 | 52.25 | 17.07 | 3.10 | 3.33 | 14.52 | 15.65 | 11.61 |
+
+資料已保存在 active `sysid/data`，可由 `http://localhost:3000/research/runs.html` 查看。

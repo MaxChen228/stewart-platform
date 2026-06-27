@@ -25,6 +25,11 @@ Lab.mountHeader('研究實驗室', { back: { text: '‹ 主控頁', href: '/' },
 // ===== 實驗註冊表：加實驗 = 加一筆 =====
 const EXPERIMENTS = [
   {
+    file: 'runs.html', icon: '▦', name: '執行紀錄面板',
+    desc: '每次實驗一筆 run：集中查看穩定分數、6-DOF 波形、馬達波形、軌跡回放、manifest/summary/stability 與原始檔。',
+    status: 'ready',
+  },
+  {
     file: 'monitor.html', icon: '📈', name: '即時監控研究儀',
     desc: '六軸滾動波形＋選定軸即時 FFT/峰峰/主頻/σ、CAN 健康常駐預警、K-PID 滑桿即時調＋事件標記、U 擾動注入、一鍵錄製。改參數那一刻波形連續可見。',
     status: 'ready',

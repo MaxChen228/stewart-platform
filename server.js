@@ -6,7 +6,7 @@ const net = require('net');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { NEUTRAL_Z } = require('./sysid/kin');
+const { NEUTRAL_Z, solveFK, resetFK } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
@@ -140,7 +140,201 @@ function readRequestBody(req, limit = 65536) {
 }
 
 // ===== HTTP 靜態檔案伺服器 =====
-const MIME = { '.html':'text/html', '.js':'application/javascript', '.css':'text/css', '.json':'application/json' };
+const MIME = {
+  '.html':'text/html',
+  '.js':'application/javascript',
+  '.css':'text/css',
+  '.json':'application/json',
+  '.jsonl':'application/x-ndjson',
+  '.svg':'image/svg+xml',
+};
+
+function safeRelPath(file) {
+  return path.relative(__dirname, file).replaceAll(path.sep, '/');
+}
+
+function safeReadJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function dataFileFromRel(rel) {
+  if (typeof rel !== 'string' || !rel) return null;
+  const p = path.resolve(__dirname, rel);
+  const roots = [REC_DIR, path.join(REC_DIR, 'plots')].map((x) => path.resolve(x));
+  return roots.some((root) => p === root || p.startsWith(root + path.sep)) ? p : null;
+}
+
+function runIdFromJsonl(file) {
+  return path.basename(file, '.jsonl');
+}
+
+function findRunJsonl(id) {
+  const base = path.basename(String(id || ''));
+  if (!/^[a-zA-Z0-9_.-]+$/.test(base)) return null;
+  const p = path.join(REC_DIR, `${base}.jsonl`);
+  return fs.existsSync(p) ? p : null;
+}
+
+function summarizeJsonlMeta(file) {
+  let meta = null, firstT = null, lastT = null, samples = 0, cmdCount = 0;
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let rec; try { rec = JSON.parse(line); } catch { continue; }
+      if (rec.meta) { meta = rec.meta; continue; }
+      if (typeof rec.t === 'number') {
+        if (firstT == null) firstT = rec.t;
+        lastT = rec.t;
+      }
+      if (rec.dir === 'cmd') cmdCount++;
+      if (rec.dir === 'in') {
+        let d; try { d = typeof rec.d === 'string' ? JSON.parse(rec.d) : rec.d; } catch { continue; }
+        if (Array.isArray(d?.a)) samples++;
+      }
+    }
+  } catch {}
+  return { meta, samples, cmdCount, durationS: firstT != null && lastT != null ? (lastT - firstT) / 1000 : null };
+}
+
+function collectRuns() {
+  let files = [];
+  try {
+    files = fs.readdirSync(REC_DIR)
+      .filter((x) => x.endsWith('.jsonl'))
+      .map((x) => path.join(REC_DIR, x))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  } catch {}
+  return files.map((file) => {
+    const id = runIdFromJsonl(file);
+    const stem = file.replace(/\.jsonl$/, '');
+    const summary = safeReadJson(`${stem}.summary.json`);
+    const stability = safeReadJson(`${stem}.stability.json`);
+    const bundle = safeReadJson(`${stem}.bundle.json`);
+    const manifest = bundle?.manifest ? safeReadJson(bundle.manifest) : null;
+    const meta = summarizeJsonlMeta(file);
+    const plotBase = path.basename(stem);
+    const planePlot = bundle?.plot?.planeOut || path.join(REC_DIR, 'plots', `${plotBase}_plane6.svg`);
+    const motorPlot = bundle?.plot?.motorOut || path.join(REC_DIR, 'plots', `${plotBase}_motor6.svg`);
+    const wallClock = meta.meta?.wallClock || summary?.meta?.wallClock || manifest?.wallClock || null;
+    return {
+      id,
+      name: meta.meta?.name || manifest?.name || id,
+      wallClock,
+      mtime: fs.statSync(file).mtimeMs,
+      durationS: summary?.durationS ?? meta.durationS,
+      samples: summary?.samples ?? meta.samples,
+      cmdCount: meta.cmdCount,
+      score: stability?.score?.stability ?? null,
+      profile: manifest?.condition?.profile || (id.includes('z_sweep') ? 'z-sweep' : id.includes('heave-step') ? 'heave-step' : null),
+      condition: manifest?.condition || null,
+      health: {
+        okFailFrac: summary?.encoders?.failFrac ?? null,
+        canEfOr: summary?.canHealth?.efOr ?? stability?.quality?.can?.efOr ?? null,
+        rxDropSum: summary?.canHealth?.rxDropSum ?? stability?.quality?.can?.rxDropSum ?? null,
+        rxDropPerS: stability?.quality?.can?.rxDropPerS ?? null,
+      },
+      files: {
+        recording: safeRelPath(file),
+        summary: fs.existsSync(`${stem}.summary.json`) ? safeRelPath(`${stem}.summary.json`) : null,
+        stability: fs.existsSync(`${stem}.stability.json`) ? safeRelPath(`${stem}.stability.json`) : null,
+        manifest: bundle?.manifest && fs.existsSync(bundle.manifest) ? safeRelPath(bundle.manifest) : null,
+        bundle: fs.existsSync(`${stem}.bundle.json`) ? safeRelPath(`${stem}.bundle.json`) : null,
+        planePlot: fs.existsSync(planePlot) ? safeRelPath(planePlot) : null,
+        motorPlot: fs.existsSync(motorPlot) ? safeRelPath(motorPlot) : null,
+      },
+    };
+  });
+}
+
+function loadRunDetail(id) {
+  const file = findRunJsonl(id);
+  if (!file) return null;
+  const stem = file.replace(/\.jsonl$/, '');
+  const summary = safeReadJson(`${stem}.summary.json`);
+  const stability = safeReadJson(`${stem}.stability.json`);
+  const bundle = safeReadJson(`${stem}.bundle.json`);
+  const manifest = bundle?.manifest ? safeReadJson(bundle.manifest) : null;
+  const commands = [];
+  const samples = [];
+  const rawRows = [];
+  resetFK([0, 0, NEUTRAL_Z, 0, 0, 0]);
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let rec; try { rec = JSON.parse(line); } catch { continue; }
+      if (rec.dir === 'cmd') {
+        commands.push({ t: rec.t, cmd: rec.d });
+        continue;
+      }
+      if (rec.dir !== 'in') continue;
+      let d; try { d = typeof rec.d === 'string' ? JSON.parse(rec.d) : rec.d; } catch { continue; }
+      if (!Array.isArray(d?.a)) continue;
+      const fk = solveFK(d.a);
+      rawRows.push({
+        t: rec.t,
+        a: d.a.map(Number),
+        pose: fk.pose.map(Number),
+        ok: d.ok,
+        lhz: d.lhz,
+        ef: d.can?.ef ?? d.ef,
+        tx: d.can?.tx ?? d.tx,
+        rxDrop: d.can?.rxDrop ?? 0,
+      });
+    }
+  } catch {}
+  const maxSamples = 900;
+  const step = Math.max(1, Math.ceil(rawRows.length / maxSamples));
+  for (let i = 0; i < rawRows.length; i += step) samples.push(rawRows[i]);
+  const run = collectRuns().find((x) => x.id === id);
+  return { run, summary, stability, manifest, bundle, commands, samples, sampleStep: step };
+}
+
+function relatedRunFiles(id) {
+  const file = findRunJsonl(id);
+  if (!file) return null;
+  const stem = file.replace(/\.jsonl$/, '');
+  const bundle = safeReadJson(`${stem}.bundle.json`);
+  const candidates = new Set([
+    file,
+    `${stem}.summary.json`,
+    `${stem}.stability.json`,
+    `${stem}.bundle.json`,
+    bundle?.manifest,
+    bundle?.summary,
+    bundle?.stability,
+    bundle?.plot?.planeOut,
+    bundle?.plot?.motorOut,
+    path.join(REC_DIR, 'plots', `${path.basename(stem)}_plane6.svg`),
+    path.join(REC_DIR, 'plots', `${path.basename(stem)}_motor6.svg`),
+  ].filter(Boolean));
+  return [...candidates]
+    .map((x) => path.resolve(x))
+    .filter((x) => fs.existsSync(x) && !fs.statSync(x).isDirectory());
+}
+
+function moveRunFiles(id, bucket) {
+  if (!['archive', 'trash'].includes(bucket)) throw new Error('bad bucket');
+  if (recStream && recPath && runIdFromJsonl(recPath) === id) throw new Error('cannot move active recording');
+  const files = relatedRunFiles(id);
+  if (!files) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const safeId = path.basename(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const destDir = path.join(REC_DIR, bucket, `${stamp}_${safeId}`);
+  fs.mkdirSync(destDir, { recursive: true });
+  const moved = [];
+  for (const file of files) {
+    const dest = path.join(destDir, path.basename(file));
+    fs.renameSync(file, dest);
+    moved.push({ from: safeRelPath(file), to: safeRelPath(dest) });
+  }
+  fs.writeFileSync(path.join(destDir, '_run-op.json'), JSON.stringify({
+    op: bucket,
+    id,
+    movedAt: new Date().toISOString(),
+    moved,
+  }, null, 2));
+  return { id, op: bucket, dest: safeRelPath(destDir), moved };
+}
 
 const server = http.createServer((req, res) => {
   // REST: 最新資料
@@ -158,6 +352,64 @@ const server = http.createServer((req, res) => {
     transport.forceReconnect('api');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ reconnecting: true, transport: transport.getState() }));
+    return;
+  }
+  if (req.url === '/api/runs') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ runs: collectRuns() }));
+    return;
+  }
+  {
+    const urlPath = req.url.split('?')[0];
+    const m = urlPath.match(/^\/api\/runs\/([^/]+)\/(archive|delete)$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      const op = m[2] === 'delete' ? 'trash' : 'archive';
+      try {
+        const result = moveRunFiles(id, op);
+        if (!result) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'run not found' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+  }
+  if (req.url.startsWith('/api/runs/')) {
+    const id = decodeURIComponent(req.url.split('?')[0].slice('/api/runs/'.length));
+    const detail = loadRunDetail(id);
+    if (!detail) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'run not found' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(detail));
+    return;
+  }
+  if (req.url.split('?')[0] === '/api/run-file') {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const p = dataFileFromRel(u.searchParams.get('p'));
+    if (!p || !fs.existsSync(p) || fs.statSync(p).isDirectory()) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'file not found' }));
+      return;
+    }
+    const ext = path.extname(p);
+    fs.readFile(p, (err, data) => {
+      if (err) { res.writeHead(404); res.end('Not found'); return; }
+      res.writeHead(200, {
+        'Content-Type': MIME[ext] || 'text/plain',
+        'Cache-Control': 'no-store',
+      });
+      res.end(data);
+    });
     return;
   }
   if (req.url === '/api/platform-config' && req.method === 'GET') {
@@ -301,13 +553,14 @@ wss.on('connection', (ws, req) => {
     const cmd = msg.toString().trim();
     if (!cmd) return;
     console.log(`[WS] cmd: ${cmd}`);
-    recWrite('cmd', cmd);
     const wr = transport.write(cmd);     // '\n' 由 transport 內部補；未連線則明確回 dropped
     if (wr.ok) {
+      recWrite('cmd', cmd);
       // echo 給所有 client（含其他來源）→ 操作對等可見，monitor 用此唯一來源畫指令標記
       broadcast(JSON.stringify({ evt: 'cmd', c: cmd, via: wr.kind }));
     } else {
       console.warn(`[WS] dropped cmd (${wr.reason}): ${cmd}`);
+      recWrite('drop', { cmd, reason: wr.reason, transport: currentTransport });
       broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: wr.reason, transport: currentTransport }));
     }
   });

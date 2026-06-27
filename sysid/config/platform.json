@@ -23,6 +23,7 @@
   "trialDefaults": {
     "profile": "heave-step",
     "heave": 60,
+    "zBias": 0,
     "ms": 5000,
     "settleMs": 800,
     "homeMs": 1500,
@@ -81,5 +82,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-27T05:10:07.809Z"
+  "updatedAt": "2026-06-27T06:09:58.275Z"
 }

@@ -106,6 +106,24 @@ function collectBatteryRuns() {
   return files.map((file) => ({ file, name: path.basename(file) }));
 }
 
+function collectStabilityRuns() {
+  const files = listFiles(DATA_DIR, (file) => file.endsWith('.stability.json'));
+  return files.map((file) => {
+    const stability = readJson(file);
+    if (!stability) return null;
+    const bundle = readJson(file.replace(/\.stability\.json$/, '.bundle.json'));
+    return {
+      file,
+      label: path.basename(file).replace(/\.stability\.json$/, ''),
+      stability,
+      bundle,
+      recording: bundle?.recording || stability.path || null,
+      planePlot: bundle?.plot?.planeOut || null,
+      motorPlot: bundle?.plot?.motorOut || null,
+    };
+  }).filter(Boolean).sort((a, b) => (b.stability.score?.stability || 0) - (a.stability.score?.stability || 0));
+}
+
 function fmt(x, digits = 2, unit = '') {
   return Number.isFinite(x) ? `${x.toFixed(digits)}${unit}` : '-';
 }
@@ -117,6 +135,24 @@ function writeMarkdown(index) {
   lines.push('');
   lines.push(`Generated: ${index.generatedAt}`);
   lines.push('');
+  if (!best) {
+    lines.push('## Read This First');
+    lines.push('');
+    lines.push('- No active experiment runs are currently indexed.');
+    lines.push('- Archived runs may exist under `sysid/data/archive/`, but they are intentionally hidden from the active dashboard.');
+    lines.push('- Run a new recorded experiment to repopulate this dashboard and the research run panel.');
+    lines.push('');
+    lines.push('## Data Inventory');
+    lines.push('');
+    lines.push(`- Heave runs indexed: ${index.heaveRuns.length}`);
+    lines.push(`- FreeRTOS/CAN diagnostic files: ${index.canRuns.length}`);
+    lines.push(`- Battery/PID disturbance files: ${index.batteryRuns.length}`);
+    lines.push(`- Stability-scored runs: ${index.stabilityRuns.length}`);
+    lines.push(`- Machine-readable index: ${mdLink('research-index.json', OUT_JSON)}`);
+    lines.push('');
+    fs.writeFileSync(OUT_MD, lines.join('\n'));
+    return;
+  }
   lines.push('## Read This First');
   lines.push('');
   lines.push('- Current best heave finding: use a clean inner loop and move static height compensation upward.');
@@ -147,6 +183,21 @@ function writeMarkdown(index) {
     lines.push(`| ${run.condition.label} | ${pid} | ${fmt(run.condition.zBias, 1, 'mm')} | ${fmt(m.absolute.actualFinalZ, 2, 'mm')} | ${fmt(m.absolute.finalErrorVsNominal143, 2, 'mm')} | ${fmt(m.coupling.crossPeak, 2, 'mm')} | ${fmt(100 * m.coupling.crossOverZ, 1, '%')} | ${m.health.canEfOr ?? '-'}/${m.health.rxDropSum ?? '-'} | ${data} | ${plots} |`);
   }
   lines.push('');
+  const zRuns = index.stabilityRuns.filter((x) => x.label.startsWith('z_sweep') && x.label.includes('_clean'));
+  if (zRuns.length) {
+    lines.push('## Z Sweep Stability Table');
+    lines.push('');
+    lines.push('| Case | Score | tracking | cross-axis | oscillation | quality penalty | CAN rxDrop/s | Data | Plots |');
+    lines.push('|---|---:|---:|---:|---:|---:|---:|---|---|');
+    for (const run of zRuns) {
+      const s = run.stability.score;
+      const q = run.stability.quality?.can || {};
+      const data = run.recording ? mdLink('jsonl', run.recording) : '-';
+      const plots = [run.planePlot ? mdLink('plane', run.planePlot) : null, run.motorPlot ? mdLink('motor', run.motorPlot) : null].filter(Boolean).join(' / ') || '-';
+      lines.push(`| ${run.label} | ${fmt(s.stability, 1)} | ${fmt(s.trackingCost, 2)} | ${fmt(s.crossAxisCost, 2)} | ${fmt(s.oscillationCost, 2)} | ${fmt(s.qualityPenalty, 2)} | ${fmt(q.rxDropPerS, 2)} | ${data} | ${plots} |`);
+    }
+    lines.push('');
+  }
   lines.push('## What To Do Next');
   lines.push('');
   lines.push('1. Treat `zBias=4.5mm` as an anchor point, not a final setting.');
@@ -160,6 +211,7 @@ function writeMarkdown(index) {
   lines.push(`- Heave runs indexed: ${index.heaveRuns.length}`);
   lines.push(`- FreeRTOS/CAN diagnostic files: ${index.canRuns.length}`);
   lines.push(`- Battery/PID disturbance files: ${index.batteryRuns.length}`);
+  lines.push(`- Stability-scored runs: ${index.stabilityRuns.length}`);
   lines.push(`- Machine-readable index: ${mdLink('research-index.json', OUT_JSON)}`);
   lines.push('');
   lines.push('## How To Refresh');
@@ -188,6 +240,7 @@ function main() {
       purePZBias45: cleanHeave.find((x) => x.condition.label === 'pure-P + zBias 4.5') || null,
     },
     heaveRuns,
+    stabilityRuns: collectStabilityRuns(),
     canRuns: collectCanRuns(),
     batteryRuns: collectBatteryRuns(),
   };
