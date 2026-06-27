@@ -26,6 +26,7 @@
     "zBias": 0,
     "ms": 5000,
     "settleMs": 800,
+    "warmupMs": 1000,
     "homeMs": 1500,
     "landMs": 1500,
     "safeLand": true

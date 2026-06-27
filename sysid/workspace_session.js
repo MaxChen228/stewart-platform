@@ -21,7 +21,9 @@ function parseArgs(argv) {
     atRig: false,
     name: '',
     closeMs: 1200,
-    warmupMs: 800,
+    warmupMs: null,
+    homeMs: null,
+    landMs: null,
     zBias: 0,
     vmaxT: null,
     vmaxR: null,
@@ -37,6 +39,8 @@ function parseArgs(argv) {
     else if (a === '--name') out.name = next();
     else if (a === '--close-ms') out.closeMs = Math.max(300, Number(next()) || out.closeMs);
     else if (a === '--warmup-ms') out.warmupMs = Math.max(0, Number(next()) || 0);
+    else if (a === '--home-ms') out.homeMs = Math.max(300, Number(next()) || 0);
+    else if (a === '--land-ms') out.landMs = Math.max(300, Number(next()) || 0);
     else if (a === '--z-bias') out.zBias = Number(next()) || 0;
     else if (a === '--vmaxT') out.vmaxT = Math.max(1, Number(next()) || 0);
     else if (a === '--vmaxR') out.vmaxR = Math.max(1, Number(next()) || 0);
@@ -52,7 +56,7 @@ function parseArgs(argv) {
 function usage() {
   console.log(`Usage:
   npm run workspace:session -- [--base http://localhost:3000] [--name NAME]
-  npm run workspace:session -- --live --i-am-at-rig --name NAME [--z-bias MM] [--vmaxT MM_S] [--vmaxR DEG_S]
+  npm run workspace:session -- --live --i-am-at-rig --name NAME [--warmup-ms MS] [--home-ms MS] [--land-ms MS] [--z-bias MM] [--vmaxT MM_S] [--vmaxR DEG_S]
 
 Dry-run validates the saved Workspace flow and closed-loop contract.
 Live runs: record full lifecycle -> TAKE OFF -> HOME -> FOLLOW -> score window -> LANDING -> RELEASE -> analyze.
@@ -116,11 +120,14 @@ function commandPose(pose, opts) {
 }
 
 function runCondition(opts, config) {
+  const timing = config?.trialDefaults || {};
   const condition = {
     zBias: Number.isFinite(opts.zBias) ? opts.zBias : 0,
     vmaxT: Number.isFinite(opts.vmaxT) ? opts.vmaxT : Number(config.followLimits?.vmaxT || 60),
     vmaxR: Number.isFinite(opts.vmaxR) ? opts.vmaxR : Number(config.followLimits?.vmaxR || 45),
-    warmupMs: Number.isFinite(opts.warmupMs) ? opts.warmupMs : 0,
+    warmupMs: Number.isFinite(opts.warmupMs) ? opts.warmupMs : Math.max(0, Number(timing.warmupMs) || 0),
+    homeMs: Number.isFinite(opts.homeMs) ? opts.homeMs : Math.max(300, Number(timing.homeMs) || 1500),
+    landMs: Number.isFinite(opts.landMs) ? opts.landMs : Math.max(300, Number(timing.landMs) || 1500),
   };
   return Object.fromEntries(Object.entries(condition).filter(([, v]) => Number.isFinite(v)));
 }
@@ -141,7 +148,7 @@ function describePlan(blocks, homePose, landingPose, lib, core, condition = null
     console.log(`  ${i + 1}. ${def.label} x${b.loops} · ${lib.formatMotionParams(def, b.params)}`);
   });
   if (condition) {
-    console.log(`  condition: zBias=${condition.zBias || 0}mm · VF ${condition.vmaxT}/${condition.vmaxR} · warmup ${condition.warmupMs || 0}ms`);
+    console.log(`  condition: zBias=${condition.zBias || 0}mm · VF ${condition.vmaxT}/${condition.vmaxR} · warmup ${condition.warmupMs || 0}ms · takeoff ${condition.homeMs || 0}ms · land ${condition.landMs || 0}ms`);
   }
 }
 
@@ -309,18 +316,17 @@ async function runLive(opts, blocks, homePose, landingPose, config, lib, core) {
     }, 3000, 'HOLD did not arm');
     await verifyLiveApi(opts.base, 'after HOLD', { pos: 1 });
     send(`VF ${condition.vmaxT || config.followLimits?.vmaxT || 60} ${condition.vmaxR || config.followLimits?.vmaxR || 45}`, token);
-    send(`P ${poseLine(homePose)} 1500`, token);
-    await sleep(1900);
+    if (condition.warmupMs > 0) {
+      await api(opts.base, '/api/session/phase', { token, phase: 'holding warmup' });
+      await sleep(condition.warmupMs);
+    }
+    await api(opts.base, '/api/session/phase', { token, phase: 'takeoff' });
+    send(`P ${poseLine(homePose)} ${condition.homeMs}`, token);
+    await sleep(condition.homeMs + 400);
     await verifyLiveApi(opts.base, 'after HOME settle', { pos: 1 });
     send('FOLLOW 1', token);
     await waitUntil(() => state.follow, 3500, 'FOLLOW did not arm');
     await verifyLiveApi(opts.base, 'after FOLLOW on', { pos: 1, fl: 1 });
-    const warmupT0 = Date.now();
-    while (Date.now() - warmupT0 < condition.warmupMs) {
-      healthy(state);
-      send(`PF ${poseLine(commandPose(homePose, opts))}`, token);
-      await sleep(1000 / lib.MOTION_HZ);
-    }
     await api(opts.base, '/api/session/phase', { token, phase: 'recording' });
     await verifyLiveApi(opts.base, 'recording window opened', { pos: 1, fl: 1, phase: 'recording' });
 
@@ -352,9 +358,8 @@ async function runLive(opts, blocks, homePose, landingPose, config, lib, core) {
     send('FOLLOW 0', token);
     await waitUntil(() => !state.follow, 2500, 'FOLLOW did not disarm');
     await verifyLiveApi(opts.base, 'after FOLLOW off', { pos: 1, fl: 0, phase: 'landing' });
-    const landMs = Math.max(500, Number(config.trialDefaults?.landMs) || 1500);
-    send(`P ${poseLine(landingPose)} ${landMs}`, token);
-    await sleep(landMs + 300);
+    send(`P ${poseLine(landingPose)} ${condition.landMs}`, token);
+    await sleep(condition.landMs + 300);
     await verifyLiveApi(opts.base, 'after landing settle', { pos: 1, fl: 0, phase: 'landing' });
     send('D', token);
     await api(opts.base, '/api/session/phase', { token, phase: 'release' });
@@ -371,8 +376,9 @@ async function runLive(opts, blocks, homePose, landingPose, config, lib, core) {
       send(`PF ${poseLine(homePose)}`, token);
       send('FOLLOW 0', token);
       await new Promise((r) => setTimeout(r, 150));
-      send(`P ${poseLine(landingPose)} 1500`, token);
-      await new Promise((r) => setTimeout(r, 1800));
+      const landMs = Number.isFinite(condition?.landMs) ? condition.landMs : 1500;
+      send(`P ${poseLine(landingPose)} ${landMs}`, token);
+      await new Promise((r) => setTimeout(r, landMs + 300));
       send('D', token);
       if (recording) await api(opts.base, '/api/session/rec/stop', { token, analyze: false }).catch(() => ({}));
       await api(opts.base, '/api/session/abort', { token, reason: err.message }).catch(() => ({}));

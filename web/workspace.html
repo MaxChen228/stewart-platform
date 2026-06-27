@@ -296,6 +296,23 @@ body { min-height: 100vh; overflow: hidden; }
           <div class="metric"><b>loop</b><span id="m-loop">—</span></div>
           <div class="metric"><b>ok</b><span id="m-ok">—</span></div>
         </div>
+        <div class="param-list" style="margin-top:12px">
+          <label class="param-row">
+            <span>暖機</span>
+            <input id="warmup-ms" type="range" min="0" max="10000" step="250" value="1000">
+            <output id="warmup-ms-v">1.0s</output>
+          </label>
+          <label class="param-row">
+            <span>TAKE OFF</span>
+            <input id="home-ms" type="range" min="500" max="12000" step="250" value="1500">
+            <output id="home-ms-v">1.5s</output>
+          </label>
+          <label class="param-row">
+            <span>LAND</span>
+            <input id="land-ms" type="range" min="500" max="12000" step="250" value="1500">
+            <output id="land-ms-v">1.5s</output>
+          </label>
+        </div>
         <div class="timeline" style="margin-top:12px">
           <div class="timeline-top"><strong id="clock">00.0 / 00.0s</strong><span id="phase">ready</span></div>
           <div class="timeline-bar"><div class="timeline-fill" id="timeline-fill"></div></div>
@@ -380,6 +397,7 @@ import {
   motionById,
   normalizeBlocks,
   normalizePrograms,
+  normalizeWorkspaceTiming,
   programDuration,
   programHash,
   workspaceProgramMeta,
@@ -533,6 +551,7 @@ function loadDraftFromConfig() {
   blocks = normalizeBlocks(config, MOTIONS, motionLib);
   const current = currentProgram();
   el('program-name').value = current ? current.name : 'Scratch';
+  renderTimingControls();
 }
 
 function currentProgram() {
@@ -571,6 +590,57 @@ function workspacePayload(extraWorkspace = {}) {
     programs: serializePrograms(programs, motionLib),
     ...extraWorkspace,
   };
+}
+
+function workspaceTiming() {
+  return normalizeWorkspaceTiming(config);
+}
+
+function secLabel(ms) {
+  return `${(Math.max(0, Number(ms) || 0) / 1000).toFixed(1)}s`;
+}
+
+function renderTimingControls() {
+  const timing = workspaceTiming();
+  for (const [id, value] of [['warmup-ms', timing.warmupMs], ['home-ms', timing.homeMs], ['land-ms', timing.landMs]]) {
+    const input = el(id);
+    const output = el(`${id}-v`);
+    if (!input || !output) continue;
+    input.value = String(value);
+    output.textContent = secLabel(value);
+  }
+}
+
+function timingFromControls() {
+  const timing = workspaceTiming();
+  const read = (id, fallback) => {
+    const input = el(id);
+    const min = Number(input?.min);
+    const max = Number(input?.max);
+    const v = Number(input?.value);
+    if (!Number.isFinite(v)) return fallback;
+    return Math.max(Number.isFinite(min) ? min : 0, Math.min(Number.isFinite(max) ? max : 60000, v));
+  };
+  return {
+    warmupMs: read('warmup-ms', timing.warmupMs),
+    homeMs: read('home-ms', timing.homeMs),
+    landMs: read('land-ms', timing.landMs),
+  };
+}
+
+async function saveTimingFromControls() {
+  if (runner.active) return;
+  const timing = timingFromControls();
+  config = PlatformSoT.mergeConfig(await json('/api/platform-config', {
+    trialDefaults: {
+      ...(config.trialDefaults || {}),
+      ...timing,
+    },
+  }));
+  renderTimingControls();
+  renderSequence();
+  renderMetrics();
+  setStatus('timing saved', 'good');
 }
 
 function currentProgramMeta() {
@@ -935,6 +1005,7 @@ function renderParams() {
 }
 
 function renderSequence() {
+  const timing = workspaceTiming();
   const mid = blocks.length
     ? blocks.map((block, i) => {
       const def = motionById(MOTIONS, block.id);
@@ -953,10 +1024,10 @@ function renderSequence() {
     }).join('')
     : '<div class="empty-flow">從左邊選動作，調好參數後加入流程</div>';
   el('sequence').innerHTML = `
-    <div class="sequence-step fixed"><b>TAKE OFF</b><div class="step-meta">HOLD → HOME → FOLLOW · not recorded</div></div>
+    <div class="sequence-step fixed"><b>TAKE OFF</b><div class="step-meta">HOLD ${secLabel(timing.warmupMs)} → HOME ${secLabel(timing.homeMs)} → FOLLOW · not recorded</div></div>
     ${mid}
     <div class="sequence-step fixed"><b>CLOSE LOOP</b><div class="step-meta">return HOME → stop recording</div></div>
-    <div class="sequence-step fixed"><b>LAND</b><div class="step-meta">FOLLOW OFF → configured LANDING</div></div>`;
+    <div class="sequence-step fixed"><b>LAND</b><div class="step-meta">FOLLOW OFF → configured LANDING ${secLabel(timing.landMs)}</div></div>`;
   el('sequence').querySelectorAll('[data-block]').forEach((row) => {
     row.addEventListener('click', (ev) => {
       if (ev.target.closest('button')) return;
@@ -970,8 +1041,10 @@ function renderSequence() {
 
 function renderMetrics() {
   const audit = closedLoopAudit(blocks, homePose, Kin, MOTIONS, motionLib);
+  const timing = workspaceTiming();
+  const lifecycleS = workspaceDurationSeconds() + (timing.warmupMs + timing.homeMs + timing.landMs + 1200) / 1000;
   el('m-blocks').textContent = blocks.length;
-  el('m-time').textContent = `${workspaceDurationSeconds().toFixed(1)}s`;
+  el('m-time').textContent = `${lifecycleS.toFixed(1)}s`;
   el('m-loop').textContent = audit.ok ? (blocks.length ? 'PASS' : 'SMOKE') : 'FAIL';
   el('m-loop').style.color = audit.ok ? (blocks.length ? 'var(--contra)' : 'var(--dual)') : 'var(--dev)';
   el('m-ok').textContent = liveTelemetry ? String(liveTelemetry.ok ?? '—') : '—';
@@ -1122,6 +1195,7 @@ function renderAll() {
   renderSequence();
   renderMetrics();
   renderTargetPoses();
+  renderTimingControls();
   if (!actualPose) setActualPose(homePose, 'HOME');
   hideGhost();
   refreshButtons();
@@ -1239,11 +1313,13 @@ async function preflight() {
   if (Number(latest.ok) !== 6) throw new Error(`encoder ok=${latest.ok ?? 'missing'}, expected 6`);
   const ageMs = Number(latest._server?.telemetryAgeMs ?? transport.telemetryAgeMs);
   if (!Number.isFinite(ageMs) || ageMs > 1500) throw new Error(`telemetry stale (${Number.isFinite(ageMs) ? Math.round(ageMs) : 'unknown'}ms)`);
+  const timing = normalizeWorkspaceTiming(cfg);
   const ok = confirm([
     'Run Workspace session?',
     '',
     `blocks: ${blocks.length}`,
     `motion time: ${workspaceDurationSeconds().toFixed(1)}s`,
+    `timing: warmup ${secLabel(timing.warmupMs)}, takeoff ${secLabel(timing.homeMs)}, land ${secLabel(timing.landMs)}`,
     `closed loop: PASS (${blocks.length ? 'HOME → blocks → HOME' : 'HOME smoke window'})`,
     `transport: ${transport.kind || 'unknown'} connected`,
     `telemetry: ok ${latest.ok}, age ${Math.round(ageMs)}ms`,
@@ -1302,6 +1378,7 @@ async function playBlock(block, index, preview) {
 
 async function previewWorkspaceFlow() {
   const startPose = currentActualPose();
+  const timing = workspaceTiming();
   const timeline = workspacePreviewTimeline({
     blocks,
     startPose,
@@ -1310,9 +1387,10 @@ async function previewWorkspaceFlow() {
     motions: MOTIONS,
     motionLib,
     kin: Kin,
-    takeoffSec: 1.5,
+    warmupSec: timing.warmupMs / 1000,
+    takeoffSec: timing.homeMs / 1000,
     closeSec: 1.2,
-    landSec: 1.5,
+    landSec: timing.landMs / 1000,
   });
   const t0 = performance.now();
   while (performance.now() - t0 <= timeline.duration * 1000) {
@@ -1351,12 +1429,18 @@ async function runWorkspace(preview) {
       runner.token = started.token;
       runner.config = cfg;
       runner.landingPose = Array.isArray(cfg.landingPose) ? cfg.landingPose : PlatformSoT.relToAbs(cfg.landingRelative, NEUTRAL_Z);
+      const timing = normalizeWorkspaceTiming(cfg);
       setStatus('takeoff', 'warn');
       send('H');
       await waitUntil(() => live()?.data?.pos === 1 && Array.isArray(live()?.data?.hold), 3000, 'HOLD did not arm');
       send(`VF ${cfg.followLimits?.vmaxT || 60} ${cfg.followLimits?.vmaxR || 45}`);
-      send(`P ${poseLine(homePose)} 1500`);
-      await sleep(1900);
+      if (timing.warmupMs > 0) {
+        setStatus('holding warmup', 'warn');
+        await sleep(timing.warmupMs);
+      }
+      setStatus('takeoff to HOME', 'warn');
+      send(`P ${poseLine(homePose)} ${timing.homeMs}`);
+      await sleep(timing.homeMs + 400);
       send('FOLLOW 1');
       await waitUntil(() => followActive, 3500, 'FOLLOW did not arm');
       await phase('recording');
@@ -1386,7 +1470,7 @@ async function runWorkspace(preview) {
       setStatus('landing', 'warn');
       send('FOLLOW 0');
       await waitUntil(() => !followActive && live(), 2500, 'FOLLOW did not disarm');
-      const landMs = Math.max(500, Number(runner.config?.trialDefaults?.landMs) || 1500);
+      const landMs = normalizeWorkspaceTiming(runner.config).landMs;
       setGhostPose(runner.landingPose || landingPose, true, 'GHOST');
       send(`P ${poseLine(runner.landingPose || landingPose)} ${landMs}`);
       await sleep(landMs + 300);
@@ -1403,8 +1487,9 @@ async function runWorkspace(preview) {
       send(`PF ${poseLine(homePose)}`);
       send('FOLLOW 0');
       await sleep(150);
-      send(`P ${poseLine(runner.landingPose || landingPose)} 1500`);
-      await sleep(1800);
+      const landMs = runner.config ? normalizeWorkspaceTiming(runner.config).landMs : 1500;
+      send(`P ${poseLine(runner.landingPose || landingPose)} ${landMs}`);
+      await sleep(landMs + 300);
       send('D');
       if (runner.recording) await json('/api/session/rec/stop', { token: runner.token, analyze: false }).catch(() => ({}));
       await json('/api/session/abort', { token: runner.token }).catch(() => ({}));
@@ -1512,6 +1597,18 @@ el('loops').addEventListener('input', () => {
   el('loops').value = clampLoops(el('loops').value);
   el('loops-v').textContent = el('loops').value;
 });
+for (const id of ['warmup-ms', 'home-ms', 'land-ms']) {
+  el(id).addEventListener('input', () => {
+    const input = el(id);
+    const timing = timingFromControls();
+    const key = id === 'warmup-ms' ? 'warmupMs' : id === 'home-ms' ? 'homeMs' : 'landMs';
+    input.value = String(timing[key]);
+    el(`${id}-v`).textContent = secLabel(timing[key]);
+    renderSequence();
+    renderMetrics();
+  });
+  el(id).addEventListener('change', saveTimingFromControls);
+}
 
 await loadConfig();
 await loadRuns();

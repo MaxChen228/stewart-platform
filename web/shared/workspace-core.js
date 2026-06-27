@@ -116,6 +116,20 @@ export function totalSeconds(blocks, motions, motionLib) {
   }, 0);
 }
 
+export function normalizeWorkspaceTiming(config = {}) {
+  const defaults = config?.trialDefaults || {};
+  const ms = (key, fallback, min, max) => {
+    const v = Number(defaults[key]);
+    const n = Number.isFinite(v) ? v : fallback;
+    return Math.max(min, Math.min(max, n));
+  };
+  return {
+    warmupMs: ms('warmupMs', 1000, 0, 30000),
+    homeMs: ms('homeMs', 1500, 300, 60000),
+    landMs: ms('landMs', 1500, 300, 60000),
+  };
+}
+
 export function lerpPose(from, to, u, motionLib = {}) {
   const s = typeof motionLib.smoothstep === 'function'
     ? motionLib.smoothstep(u)
@@ -131,6 +145,7 @@ export function workspacePreviewTimeline({
   motions,
   motionLib,
   kin = null,
+  warmupSec = 1.0,
   takeoffSec = 1.5,
   closeSec = 1.2,
   landSec = 1.5,
@@ -147,6 +162,7 @@ export function workspacePreviewTimeline({
     cursor += duration;
   };
 
+  if (Number(warmupSec) > 0) add({ kind: 'warmup', label: 'HOLD WARMUP', from: start, to: start, duration: warmupSec });
   add({ kind: 'takeoff', label: 'TAKE OFF', from: start, to: home, duration: takeoffSec });
   if (blocks.length) {
     for (const [index, block] of blocks.entries()) {
