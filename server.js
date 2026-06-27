@@ -4,6 +4,7 @@ const { WebSocketServer } = require('ws');
 const http = require('http');
 const net = require('net');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { NEUTRAL_Z } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
@@ -18,13 +19,19 @@ const BIND_HOST = process.env.LOOPBACK_ONLY === '1' ? '127.0.0.1' : '0.0.0.0';
 const ESP32_HOST_OVERRIDE = process.env.ESP32_HOST || '';     // 顯式指定 WiFi 主機（跳過自動學 IP）
 const ESP32_PORT = Number(process.env.ESP32_PORT) || 3333;
 const IP_CACHE = path.join(__dirname, '.esp32-ip');           // serial 連線時經 WIFI? 學到的 ESP32 WiFi IP（直連最可靠，避本機 Tailscale 對 .local 不穩解析）
+const TRANSPORT_LOCK_PATH = path.join(os.tmpdir(), `stewart-platform-esp32-${ESP32_PORT}.lock`);
+const TRANSPORT_LOCK_DISABLED = process.env.STEWART_TRANSPORT_LOCK === '0';
 const SERIAL_PATTERN = /usbserial|usbmodem|SLAB|wchusbserial/i;
 const LIVENESS_MS  = 5000;   // 連上後須在此時間內收到有效遙測，否則判死換路（埠開/socket 開 ≠ 會講話）
 const IDLE_MS      = 2500;   // 連線中遙測中斷逾此 → 判斷線
 const RECONNECT_MS = 1500;   // 換路/重連退避
+const RECONNECT_MAX_MS = 12000;
+const RECOVERY_WATCH_MS = 1000; // 修正 transport 狀態機卡在 down/connecting 但未排重連的情況
+const TCP_CONNECT_TIMEOUT_MS = 2500;
 const SERIAL_POLL_MS = 3000; // WiFi 運行時偵測 USB 插入（有線就用線）
 const TCP_HB_MS    = 1000;   // 對 ESP32 心跳（韌體 failsafe 基準）
 const RELEASE_HOLD_MS = Number(process.env.RELEASE_HOLD_MS) || 30000;
+const RELEASE_HOLD_MAX_MS = 180000;
 
 // 最新一筆「遙測」資料（供 REST API 用）。ack/status 不可覆蓋這裡，否則 /api/latest 會失去
 // 「即時姿態」語意。
@@ -147,6 +154,12 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ...currentTransport, lastLineAt: lastLine ? lastLine.t : null }));
     return;
   }
+  if (req.url.split('?')[0] === '/api/transport/reconnect') {
+    transport.forceReconnect('api');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ reconnecting: true, transport: transport.getState() }));
+    return;
+  }
   if (req.url === '/api/platform-config' && req.method === 'GET') {
     const config = loadPlatformConfig();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -224,10 +237,13 @@ const server = http.createServer((req, res) => {
   }
 
   // 釋放傳輸（供韌體上傳用，暫停重連）。語意 transport-aware（見 transport.release）。
-  if (req.url === '/api/release') {
-    transport.release(RELEASE_HOLD_MS);
+  if (req.url.split('?')[0] === '/api/release') {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const requestedMs = Number(u.searchParams.get('ms')) || RELEASE_HOLD_MS;
+    const holdMs = Math.max(1000, Math.min(RELEASE_HOLD_MAX_MS, requestedMs));
+    transport.release(holdMs);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end('{"released":true}');
+    res.end(JSON.stringify({ released: true, holdMs }));
     return;
   }
 
@@ -321,6 +337,39 @@ function onLine(line) {
 function loadCachedIp() { try { return fs.readFileSync(IP_CACHE, 'utf8').trim() || null; } catch { return null; } }
 function saveCachedIp(ip) { try { fs.writeFileSync(IP_CACHE, ip); } catch {} }
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}
+
+function acquireTransportLock() {
+  if (TRANSPORT_LOCK_DISABLED) return { ok: true, disabled: true };
+  let existing = null;
+  try { existing = JSON.parse(fs.readFileSync(TRANSPORT_LOCK_PATH, 'utf8')); } catch {}
+  if (existing && pidAlive(existing.pid)) {
+    return { ok: false, existing };
+  }
+  const lock = {
+    pid: process.pid,
+    cwd: process.cwd(),
+    httpPort: HTTP_PORT,
+    esp32Port: ESP32_PORT,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(TRANSPORT_LOCK_PATH, JSON.stringify(lock, null, 2));
+  const release = () => {
+    try {
+      const cur = JSON.parse(fs.readFileSync(TRANSPORT_LOCK_PATH, 'utf8'));
+      if (cur.pid === process.pid) fs.unlinkSync(TRANSPORT_LOCK_PATH);
+    } catch {}
+  };
+  process.once('exit', release);
+  process.once('SIGINT', () => { release(); process.exit(130); });
+  process.once('SIGTERM', () => { release(); process.exit(143); });
+  return { ok: true, lock };
+}
+
 // ---- attempt-once 啞連線：只負責「開連線/吐行/報一次生死」，不自排重連（policy 全歸 manager）----
 function openSerial({ path: portPath, baud, onLine, onClose }) {
   let closed = false;
@@ -342,13 +391,27 @@ function openSerial({ path: portPath, baud, onLine, onClose }) {
 function openTcp({ host, port, onLine, onClose }) {
   let closed = false, hb = null;
   const sock = net.connect({ host, port });
-  const gone = (why) => { if (closed) return; closed = true; if (hb) clearInterval(hb); onClose(why); };
+  const gone = (why) => {
+    if (closed) return;
+    closed = true;
+    if (hb) clearInterval(hb);
+    try { if (!sock.destroyed) sock.destroy(); } catch {}
+    onClose(why);
+  };
   sock.setNoDelay(true);
   sock.setKeepAlive(true, 5000);
+  sock.setTimeout(TCP_CONNECT_TIMEOUT_MS);
   sock.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', onLine);
-  sock.on('connect', () => { hb = setInterval(() => { if (!sock.destroyed && sock.writable) sock.write('\n'); }, TCP_HB_MS); });
+  sock.on('connect', () => {
+    sock.setTimeout(0);
+    hb = setInterval(() => { if (!sock.destroyed && sock.writable) sock.write('\n'); }, TCP_HB_MS);
+  });
+  sock.on('timeout', () => gone('connect-timeout'));
   sock.on('close', () => gone('closed'));
-  sock.on('error', (e) => { console.error(`[TCP] ${e.message}`); });   // close 隨後觸發 gone
+  sock.on('error', (e) => {
+    console.error(`[TCP] ${e.message}`);
+    gone(`error:${e.code || e.message}`);
+  });
   return {
     write(line) { if (sock.destroyed || !sock.writable) return false; return sock.write(line + '\n'); },
     close() { if (closed) return; closed = true; if (hb) clearInterval(hb); try { sock.destroy(); } catch {} },
@@ -362,8 +425,29 @@ function createTransportManager({ onLine, onState }) {
   let conn = null, kind = null, state = 'init', detail = '';
   let suppressReconnect = false, switching = false;
   let pendingTimer = null;          // 單一重連 timer（互斥、不堆疊）—— 沿用 e0ecae7 不變式
+  let pendingDueAt = 0;
   let livenessTimer = null, idleTimer = null, serialPollTimer = null, serialSeen = 0;
+  let recoveryTimer = null;
   let lastRx = 0, lastPos = 0;
+  let reconnectDelayMs = RECONNECT_MS;
+
+  function resetReconnectDelay() { reconnectDelayMs = RECONNECT_MS; }
+  function clearPending() {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = null;
+    pendingDueAt = 0;
+  }
+  function scheduleSelect() {
+    clearPending();
+    const delay = reconnectDelayMs;
+    reconnectDelayMs = Math.min(RECONNECT_MAX_MS, Math.round(reconnectDelayMs * 1.7));
+    pendingDueAt = Date.now() + delay;
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      pendingDueAt = 0;
+      select();
+    }, delay);
+  }
 
   function setState(s, k, d) {
     state = s; if (k !== undefined) kind = k; if (d !== undefined) detail = d;
@@ -374,6 +458,24 @@ function createTransportManager({ onLine, onState }) {
     if (livenessTimer) { clearTimeout(livenessTimer); livenessTimer = null; }
     if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
     if (serialPollTimer) { clearInterval(serialPollTimer); serialPollTimer = null; serialSeen = 0; }
+  }
+
+  function startRecoveryWatch() {
+    if (recoveryTimer) clearInterval(recoveryTimer);
+    recoveryTimer = setInterval(() => {
+      if (suppressReconnect || switching || conn) return;
+      if (pendingTimer) {
+        if (pendingDueAt && Date.now() > pendingDueAt + RECOVERY_WATCH_MS * 2) {
+          console.warn('[Transport] reconnect timer stale; rescheduling');
+          scheduleSelect();
+        }
+        return;
+      }
+      if (state !== 'connected') {
+        console.warn(`[Transport] recovery watchdog scheduling select from ${state}${detail ? ` (${detail})` : ''}`);
+        scheduleSelect();
+      }
+    }, RECOVERY_WATCH_MS);
   }
 
   async function findSerial() {
@@ -393,6 +495,7 @@ function createTransportManager({ onLine, onState }) {
       if (typeof d.pos === 'number') lastPos = d.pos;
       if (state === 'connecting') {                // 首筆遙測 → 確認 connected
         if (livenessTimer) { clearTimeout(livenessTimer); livenessTimer = null; }
+        resetReconnectDelay();
         setState('connected');
         startIdleWatch();
         if (kind === 'wifi') startSerialPoll();    // WiFi 時才需偵測 USB 插入
@@ -426,8 +529,15 @@ function createTransportManager({ onLine, onState }) {
       switching = true; clearWatches();
       if (conn) { conn.close(); conn = null; }
       setState('switching', 'serial', path);
-      if (pendingTimer) clearTimeout(pendingTimer);
-      pendingTimer = setTimeout(() => { switching = false; select(); }, RECONNECT_MS);
+      clearPending();
+      resetReconnectDelay();
+      pendingDueAt = Date.now() + RECONNECT_MS;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        pendingDueAt = 0;
+        switching = false;
+        select();
+      }, RECONNECT_MS);
     }, SERIAL_POLL_MS);
   }
 
@@ -436,12 +546,12 @@ function createTransportManager({ onLine, onState }) {
     if (conn) { try { conn.close(); } catch {} conn = null; }
     setState('down', kind, why);
     if (suppressReconnect) return;
-    if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(select, RECONNECT_MS);
+    scheduleSelect();
   }
 
   async function select() {
     if (suppressReconnect || conn) return;
+    clearPending();
     setState('selecting', null, '');
     const path = await findSerial();
     if (path) { setState('connecting', 'serial', path); conn = openSerial({ path, baud: BAUD, onLine: handleLine, onClose: (w) => dropAndReselect(w) }); }
@@ -455,7 +565,7 @@ function createTransportManager({ onLine, onState }) {
   }
 
   return {
-    start() { select(); },
+    start() { startRecoveryWatch(); select(); },
     isReady() { return state === 'connected'; },
     write(line) {
       if (!conn) return { ok: false, reason: 'no transport' };
@@ -466,10 +576,26 @@ function createTransportManager({ onLine, onState }) {
     release(holdMs) {                               // 燒錄：暫停重連、放掉連線、holdMs 後重選
       suppressReconnect = true;
       clearWatches();
-      if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+      clearPending();
       if (conn) { conn.close(); conn = null; }
       setState('down', kind, `released ${holdMs}ms`);
-      pendingTimer = setTimeout(() => { suppressReconnect = false; select(); }, holdMs);
+      resetReconnectDelay();
+      pendingDueAt = Date.now() + holdMs;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        pendingDueAt = 0;
+        suppressReconnect = false;
+        select();
+      }, holdMs);
+    },
+    forceReconnect(reason = 'manual') {
+      suppressReconnect = false;
+      clearWatches();
+      clearPending();
+      if (conn) { try { conn.close(); } catch {} conn = null; }
+      setState('down', kind, `force-reconnect:${reason}`);
+      resetReconnectDelay();
+      scheduleSelect();
     },
     getState() { return { kind, state, detail }; },
   };
@@ -489,5 +615,13 @@ server.listen(HTTP_PORT, BIND_HOST, () => {
   console.log('[Server] transport: 自動偵測（有線→serial / 沒線→WiFi）');
   if (BIND_HOST === '0.0.0.0')
     console.log('[Server] ⚠ 全網段可達。不可信網路請以 LOOPBACK_ONLY=1 啟動只綁本機。');
+  const lock = acquireTransportLock();
+  if (!lock.ok) {
+    const e = lock.existing || {};
+    console.error(`[Server] ESP32 transport lock is already held by pid ${e.pid || '?'} (${e.cwd || 'unknown cwd'}, HTTP ${e.httpPort || '?'})`);
+    console.error(`[Server] Refusing to connect to ESP32 :${ESP32_PORT}; stop the other dashboard server or run with STEWART_TRANSPORT_LOCK=0 only for deliberate debugging.`);
+    process.exit(1);
+  }
+  if (lock.disabled) console.warn('[Server] ⚠ ESP32 transport lock disabled by STEWART_TRANSPORT_LOCK=0');
   transport.start();
 });

@@ -33,24 +33,39 @@
     "poseTargetRelative": [
       0,
       0,
-      28,
+      9,
       0,
       0,
       0
     ],
-    "poseMoveMs": 1500,
+    "poseMoveMs": 1000,
     "motion": {
       "selectedId": "helix",
       "loops": 0,
-      "paramsById": {}
+      "paramsById": {
+        "helix": {
+          "r": 15,
+          "zlo": -8,
+          "zhi": 8,
+          "T": 6,
+          "dir": 1
+        },
+        "poke": {},
+        "yaw": {},
+        "coning": {},
+        "idle": {},
+        "fig8": {},
+        "buoy": {},
+        "heartbeat": {}
+      }
     },
     "disturbance": {
       "uMotor": 3,
-      "uDeg": 8,
-      "uMs": 150,
+      "uDeg": 0,
+      "uMs": 0,
       "wMode": "tilt",
-      "wSev": 3,
-      "wMs": 120,
+      "wSev": 0,
+      "wMs": 0,
       "batteryBackstop": 15
     },
     "recorderName": "run"
@@ -66,5 +81,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-26T18:20:21.417Z"
+  "updatedAt": "2026-06-27T05:10:07.809Z"
 }

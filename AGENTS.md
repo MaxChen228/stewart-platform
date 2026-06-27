@@ -7,6 +7,7 @@
 - 涉及硬體通電、馬達 enable、歸零、燒錄、長時間實驗、改 CAN bitrate、改 NVS/校正值時，先確認使用者人在硬體旁且同意。
 - 禁止在遠端 TCP/WiFi 控制流程中執行 `Z`/`Z0`~`Z5` 類校正；校正只能 USB 且需實體 home 姿態。
 - 需要即時狀態時優先讀 `curl localhost:3000/api/latest`。不要憑記憶推斷目前姿態、PID、CAN 錯誤或是否連線。
+- ESP32 WiFi TCP `:3333` 是 single-client 資源。開多個 worktree/dashboard/server 會互相搶連線，症狀像 WiFi 每 ~1.5s 掉線；實驗前用 `lsof -nP -iTCP@<ESP32_IP>:3333` 確認只有一個 owner。
 - 改幾何時必須同步三處：`src/kinematics.h`、`web/index.html`、`sysid/kin.js`。
 - CAN 指令細節以 `docs/servo42d/00-index.md` 作入口；不要只靠本檔摘要猜封包。
 - 系統辨識與控制結論以實測資料為準。新增實驗記錄時追加到 `docs/sysid-research-log.md`，不要改舊 entry。
@@ -184,6 +185,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 ### WiFi 遠端控制（TCP :3333，與 USB 並存）
 
 - TCP 與 USB 共用同一條 dispatch，指令語意一致、ack 經 DualPrint 鏡像回兩路。
+- **single-client reality**：ESP32 `:3333` 同時間只允許一個 dashboard/server。若另一個 worktree 也跑 `node server.js`，兩邊會互相踢掉 socket，造成規律 `connected → closed → reconnect`。目前 `server.js` 啟動會用系統 temp dir 內的 `stewart-platform-esp32-3333.lock` 擋第二個 transport；若舊 worktree 尚未更新，手動用 `lsof -nP -iTCP@<ESP32_IP>:3333` 查 owner。
 - **TCP 禁 `Z`/`Z0~Z5`（校正）**：寫 NVS 不可逆、且校正須實體 home 姿態（手邊操作）→ 僅 USB。
 - **失效保護恢復**：HOLD-current 觸發後（凍結當前姿態、holdMode=true），TCP 重連送 `P`（絕對 pose）即啟動 IK 軌跡恢復驅動。若要完全重置到 mode 0/1 正常控制，送 `E`（或 `S`→`E`）。
 - **heartbeat caveat**：`HB ms`>0 時，client 須週期性「上行」（server tcp 模式每秒送 `\n`）；只收不送的 client 會在逾時後誤觸 failsafe，故預設 `HB 0`（僅靠 socket-close/WiFi-down 偵測）。

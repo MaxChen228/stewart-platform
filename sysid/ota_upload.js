@@ -42,9 +42,23 @@ if (!host) host = 'stewart.local';
 
 const pio = path.join(os.homedir(), '.platformio', 'penv', 'bin', 'pio');
 const args = ['run', '-e', 'esp32_ota', '-t', 'upload', '--upload-port', host];
+const releaseMs = Number(process.env.OTA_RELEASE_MS) || 90000;
 
 console.log(`OTA upload target: ${host}`);
 console.log('Safety: firmware will disable motors when OTA starts.');
+
+const curl = spawnSync('curl', ['-fsS', `http://localhost:3000/api/release?ms=${releaseMs}`], {
+  stdio: 'pipe',
+  encoding: 'utf8',
+  timeout: 3000,
+});
+if (curl.status === 0) {
+  console.log(`Released dashboard transport for ${releaseMs}ms.`);
+  spawnSync('sleep', ['1']);
+} else {
+  console.warn('Warning: could not release dashboard transport; continuing OTA anyway.');
+  if (curl.stderr) console.warn(curl.stderr.trim());
+}
 
 const result = spawnSync(pio, args, { stdio: 'inherit' });
 process.exit(result.status ?? 1);

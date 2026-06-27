@@ -23,6 +23,17 @@ This project supports ArduinoOTA over the existing WiFi station connection.
 
 ## Upload over WiFi
 
+Before uploading, make sure only one process owns the ESP32 TCP transport:
+
+```bash
+lsof -nP -iTCP@192.168.x.x:3333
+```
+
+`npm run upload:ota` asks the dashboard server to release its TCP connection
+before OTA. This matters because ESP32 `:3333` is single-client: another
+dashboard/server from a different worktree can repeatedly steal the socket and
+make WiFi look like it is dropping every ~1.5s.
+
 Use mDNS:
 
 ```bash

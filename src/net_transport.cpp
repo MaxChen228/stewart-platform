@@ -26,9 +26,18 @@ volatile uint32_t lastNetRxMs  = 0;
 static volatile uint32_t netClientSeq = 0;
 static volatile uint32_t netOutLines = 0;
 static volatile uint32_t netOutDrop = 0;
+static volatile uint32_t netOutSkip = 0;
+static volatile uint32_t netOutBackpressure = 0;
+static volatile uint32_t netOutShortWrite = 0;
+static volatile uint32_t netLastWriteAvail = 0;
+static volatile uint32_t netClientReject = 0;
+static volatile uint32_t netClientPreempt = 0;
+static volatile uint32_t netClientStop = 0;
+static volatile uint32_t netWifiDrop = 0;
 static volatile uint32_t netInLines = 0;
 static volatile uint32_t netInDrop = 0;
 static volatile uint32_t netInTooLong = 0;
+static const char* netCloseReason = "none";
 static SemaphoreHandle_t outMux = nullptr;
 
 static void lockOut() {
@@ -51,6 +60,23 @@ static void unlockOut() {
 static bool otaStarted = false;
 static volatile bool otaInProgress = false;
 static void (*otaStartCallback)() = nullptr;
+
+// WiFi/TCP is an observation path, not the control loop. Keep it intentionally
+// lossy so slow browsers, TCP backpressure, or reconnect storms cannot make the
+// ESP32 tear down an otherwise healthy control session.
+static constexpr uint32_t NET_TELEM_MIN_MS = 50;  // cap full telemetry at ~20 Hz over TCP
+static constexpr uint32_t NET_CLIENT_STALE_MS = 3000;
+
+static bool isTelemetryLine(const char* s) {
+    return s && s[0] == '{' && s[1] == '"' && s[2] == 'a' && s[3] == '"' && s[4] == ':';
+}
+
+static void stopNetClient(WiFiClient& client, const char* reason) {
+    if (client) client.stop();
+    netConnected = false;
+    netClientStop++;
+    netCloseReason = reason ? reason : "stop";
+}
 
 void netSetOtaStartCallback(void (*cb)()) {
     otaStartCallback = cb;
@@ -141,39 +167,101 @@ static void netTask(void* arg) {
     WiFiServer server(TCP_PORT);
     WiFiClient client;
     bool started = false;
+    uint32_t lastNetTxMs = 0;
     char  inbuf[128];           // 入站行緩衝（單 client、netTask 獨用）
     size_t inn = 0;
     bool inOverflow = false;
     for (;;) {
         if (WiFi.status() != WL_CONNECTED) {
-            if (started) { client.stop(); server.end(); started = false; }  // 釋放半開資源
+            if (started) {
+                stopNetClient(client, "wifi_down");
+                server.end();
+                started = false;
+                netWifiDrop++;
+            }  // 釋放半開資源
             netConnected = false;
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (!started) { server.begin(); server.setNoDelay(true); started = true; }
 
-        // newest-wins：有新連線就接、並踢掉舊的（含 TCP 半開的死 client）。
-        // 關鍵 robustness——單客戶端 server 否則會卡在偵測不到的死連線上，
-        // 令 server 端每次重連（含 process crash 後）都連不上、需重啟 WiFi 才解。
+        uint32_t nowMs = millis();
+        bool clientAlive = (client && client.connected());
+        // Treat host input, not ESP32 output, as proof of a healthy TCP client.
+        // A half-open socket can keep accepting writes into local buffers, which
+        // previously protected a ghost client and caused every new dashboard
+        // connection to be reset. The Node transport sends a 1Hz newline
+        // heartbeat, so a real client stays fresh without issuing commands.
+        if (clientAlive && lastNetRxMs && nowMs - lastNetRxMs > NET_CLIENT_STALE_MS) {
+            stopNetClient(client, "rx_stale");
+            clientAlive = false;
+        }
+
+        // single-client, but not naive newest-wins:
+        // - a healthy dashboard connection is protected from accidental probes
+        // - stale/half-dead clients are replaced so the server can recover
         if (server.hasClient()) {
             WiFiClient c = server.available();
             if (c) {
-                if (client) client.stop();          // 踢舊（newest-wins，不賭 connected() 準不準）
-                client = c; client.setNoDelay(true); inn = 0; inOverflow = false; lastNetRxMs = millis(); netClientSeq++;
+                if (clientAlive) {
+                    c.stop();
+                    netClientReject++;
+                } else {
+                    if (client) {
+                        stopNetClient(client, "preempt");
+                        netClientPreempt++;
+                    }
+                    client = c;
+                    client.setNoDelay(true);
+                    inn = 0;
+                    inOverflow = false;
+                    lastNetRxMs = nowMs;
+                    lastNetTxMs = nowMs;
+                    netCloseReason = "none";
+                    netClientSeq++;
+                    clientAlive = true;
+                }
             }
         }
         netConnected = (client && client.connected());
 
         // 出站優先：先排空遙測，避免入站背壓餓死遙測（P3 review nit）。
         // 無 client 也排空（丟棄）→ queue 不堆積。
+        static uint32_t lastTeleWriteMs = 0;
         OutLine ol;
         while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {
             if (netConnected) {
                 size_t len = strlen(ol.s);
+                bool tele = isTelemetryLine(ol.s);
+                uint32_t now = millis();
+                if (tele && now - lastTeleWriteMs < NET_TELEM_MIN_MS) {
+                    netOutSkip++;
+                    continue;
+                }
+                int avail = client.availableForWrite();
+                netLastWriteAvail = avail > 0 ? (uint32_t)avail : 0;
+                if (avail > 0 && (size_t)avail < len) {
+                    netOutBackpressure++;
+                    netOutDrop++;
+                    continue;
+                }
                 size_t n = client.write((const uint8_t*)ol.s, len);   // ol.s 已含 '\n'
-                if (n == len) netOutLines++;
-                else { netOutDrop++; client.stop(); netConnected = false; break; }
+                if (n == len) {
+                    netOutLines++;
+                    lastNetTxMs = now;
+                    if (tele) lastTeleWriteMs = now;
+                } else if (n == 0) {
+                    netOutBackpressure++;
+                    netOutDrop++;
+                } else {
+                    // A partial JSON line corrupts framing; close only this rare
+                    // case and let the host reconnect. Backpressure before write
+                    // is handled by dropping whole lines above.
+                    netOutShortWrite++;
+                    netOutDrop++;
+                    stopNetClient(client, "short_write");
+                    break;
+                }
             }
         }
 
@@ -302,7 +390,10 @@ static void netReportStatus() {
                "\"heap\":%u,\"min_heap\":%u,\"fs\":%u,\"hb_ms\":%u,"
                "\"ota\":{\"ready\":%d,\"busy\":%d,\"host\":\"%s\"},"
                "\"tcp\":{\"client\":%d,\"seq\":%u,\"last_rx_age_ms\":%u,"
-               "\"qout\":%u,\"qin\":%u,\"out\":%u,\"out_drop\":%u,\"in\":%u,\"in_drop\":%u,\"in_long\":%u}}}\n",
+               "\"qout\":%u,\"qin\":%u,\"out\":%u,\"out_drop\":%u,\"out_skip\":%u,"
+               "\"out_bp\":%u,\"out_short\":%u,\"wr_avail\":%u,"
+               "\"reject\":%u,\"preempt\":%u,\"stop\":%u,\"wifi_drop\":%u,\"close\":\"%s\","
+               "\"in\":%u,\"in_drop\":%u,\"in_long\":%u}}}\n",
                   netCfg.enabled ? 1 : 0,
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   ssidEsc.c_str(),
@@ -322,6 +413,15 @@ static void netReportStatus() {
                   qInDepth,
                   (unsigned)netOutLines,
                   (unsigned)netOutDrop,
+                  (unsigned)netOutSkip,
+                  (unsigned)netOutBackpressure,
+                  (unsigned)netOutShortWrite,
+                  (unsigned)netLastWriteAvail,
+                  (unsigned)netClientReject,
+                  (unsigned)netClientPreempt,
+                  (unsigned)netClientStop,
+                  (unsigned)netWifiDrop,
+                  netCloseReason,
                   (unsigned)netInLines,
                   (unsigned)netInDrop,
                   (unsigned)netInTooLong);
