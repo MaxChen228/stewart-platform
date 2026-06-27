@@ -25,6 +25,7 @@ const DEFAULT_PLATFORM_CONFIG = Object.freeze({
   uiState: {
     poseTargetRelative: [0, 0, 28, 0, 0, 0],
     poseMoveMs: 1500,
+    poseSpeedIndex: 7,
     motion: {
       selectedId: 'helix',
       loops: 0,
@@ -37,6 +38,24 @@ const DEFAULT_PLATFORM_CONFIG = Object.freeze({
     },
     disturbance: {
       randomSev: 3,
+    },
+    tuning: {
+      currentMa: 1600,
+      posSpeed: 120,
+      posAcc: 100,
+      arHz: 100,
+      loopHz: 100,
+      od: {
+        gain: 0,
+        maxDeg: 1.5,
+        deadbandDps: 1.0,
+      },
+      pid: {
+        kp: 1024,
+        ki: 0,
+        kd: 0,
+        kv: 0,
+      },
     },
     recorderName: 'run',
   },
@@ -80,6 +99,10 @@ function mergeConfig(input = {}) {
     if (finitePose(u.poseTargetRelative)) out.uiState.poseTargetRelative = u.poseTargetRelative.map(Number);
     const poseMoveMs = Number(u.poseMoveMs);
     if (Number.isFinite(poseMoveMs)) out.uiState.poseMoveMs = poseMoveMs;
+    const poseSpeedIndex = Number(u.poseSpeedIndex);
+    if (Number.isFinite(poseSpeedIndex)) {
+      out.uiState.poseSpeedIndex = Math.max(1, poseSpeedIndex);
+    }
     if (u.motion && typeof u.motion === 'object') {
       if (typeof u.motion.selectedId === 'string') out.uiState.motion.selectedId = u.motion.selectedId;
       const loops = Number(u.motion.loops);
@@ -116,6 +139,33 @@ function mergeConfig(input = {}) {
       const d = u.disturbance;
       const randomSev = Number.isFinite(Number(d.randomSev)) ? Number(d.randomSev) : Number(d.wSev);
       if (Number.isFinite(randomSev)) out.uiState.disturbance.randomSev = Math.max(0.5, Math.min(8, randomSev));
+    }
+    if (u.tuning && typeof u.tuning === 'object') {
+      const t = u.tuning;
+      const currentMa = Number(t.currentMa);
+      if (Number.isFinite(currentMa)) out.uiState.tuning.currentMa = Math.max(100, Math.min(3000, currentMa));
+      const posSpeed = Number(t.posSpeed);
+      if (Number.isFinite(posSpeed)) out.uiState.tuning.posSpeed = Math.max(1, Math.min(200, posSpeed));
+      const posAcc = Number(t.posAcc);
+      if (Number.isFinite(posAcc)) out.uiState.tuning.posAcc = Math.max(1, Math.min(255, posAcc));
+      const arHz = Number(t.arHz);
+      if (Number.isFinite(arHz)) out.uiState.tuning.arHz = Math.max(10, Math.min(1000, arHz));
+      const loopHz = Number(t.loopHz);
+      if (Number.isFinite(loopHz)) out.uiState.tuning.loopHz = Math.max(10, Math.min(1000, loopHz));
+      if (t.od && typeof t.od === 'object') {
+        const gain = Number(t.od.gain);
+        if (Number.isFinite(gain)) out.uiState.tuning.od.gain = Math.max(0, Math.min(0.08, gain));
+        const maxDeg = Number(t.od.maxDeg);
+        if (Number.isFinite(maxDeg)) out.uiState.tuning.od.maxDeg = Math.max(0, Math.min(5, maxDeg));
+        const deadbandDps = Number(t.od.deadbandDps);
+        if (Number.isFinite(deadbandDps)) out.uiState.tuning.od.deadbandDps = Math.max(0, Math.min(30, deadbandDps));
+      }
+      if (t.pid && typeof t.pid === 'object') {
+        for (const k of ['kp', 'ki', 'kd', 'kv']) {
+          const v = Number(t.pid[k]);
+          if (Number.isFinite(v)) out.uiState.tuning.pid[k] = Math.max(0, Math.min(1024, v));
+        }
+      }
     }
     if (typeof u.recorderName === 'string') out.uiState.recorderName = u.recorderName;
   }

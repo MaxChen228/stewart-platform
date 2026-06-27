@@ -611,6 +611,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
   <nav class="app-nav nav-center" aria-label="Main navigation">
     <a class="app-link active" href="/" title="即時主控">主控</a>
     <a class="app-link" href="/workspace.html" title="Program Workspace">Workspace</a>
+    <a class="app-link" href="/phone.html" title="手機 IMU 即時控制">Phone</a>
     <a class="app-link" href="/research/runs.html" title="Session 執行紀錄">Runs</a>
   </nav>
   <div class="nav-right">
@@ -645,10 +646,11 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <div class="pose-axis-row" data-pose-axis="4"><span class="axis-name">Pitch</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-p" min="-20" max="20" value="0" step="0.5"></span><span class="pose-axis-value"><span class="target-v" id="ps-p-v">0</span><span class="actual-v" id="ps-p-a">—</span><span class="range-v" id="ps-p-range">—</span></span></div>
         <div class="pose-axis-row" data-pose-axis="5"><span class="axis-name">Yaw</span><span class="pose-slider-wrap"><span class="reach-bands"></span><span class="actual-pin"></span><input type="range" id="ps-w" min="-70" max="70" value="0" step="1"></span><span class="pose-axis-value"><span class="target-v" id="ps-w-v">0</span><span class="actual-v" id="ps-w-a">—</span><span class="range-v" id="ps-w-range">—</span></span></div>
       </div>
-      <div style="display:grid;grid-template-columns:34px 1fr auto;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
-        <span title="移動時長 ms">ms</span><input type="number" id="ps-ms" value="1500" min="200" max="5000" step="100" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
-        <span id="pose-ctl-status" style="color:var(--sub);font-size:10px"></span>
+      <div style="display:grid;grid-template-columns:42px 92px 1fr;gap:8px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-top:8px">
+        <span title="速度指數：前端依本次姿態跨度換算 P 指令時間；可輸入超過 10">速度</span><input type="number" id="ps-speed" value="7" min="1" step="1" style="width:92px;font-family:inherit;font-size:12px;padding:3px 6px;border:1px solid var(--borderBase);border-radius:2px">
+        <span style="color:var(--sub);font-size:10px">1慢 · 可超過10</span>
       </div>
+      <div id="pose-ctl-status" style="color:var(--sub);font-size:10px;font-family:var(--font-mono);min-height:16px;margin-top:3px;white-space:normal"></div>
       <div style="display:flex;gap:6px;margin-top:8px">
         <button class="chip zbtn" onclick="poseGo()" disabled style="flex:2;font-weight:600">GO</button>
         <button class="chip zbtn" onclick="poseHome()" disabled style="flex:1">HOME</button>
@@ -717,6 +719,25 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       </div>
       <div id="tune-motion-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-6px 0 12px 0;min-height:14px"></div>
 
+      <div class="dev-label" style="margin-bottom:6px">Runtime rate (Hz)</div>
+      <div style="display:grid;grid-template-columns:86px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
+        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Loop</span><input type="number" id="rate-loop-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 100Hz · Loop 100Hz</div>
+
+      <div class="dev-label" style="margin-bottom:6px">Runtime damping (OD)</div>
+      <div style="display:grid;grid-template-columns:38px 1fr 38px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
+        <span>Gain</span><input type="number" id="od-gain" value="0.015" min="0" max="0.08" step="0.005" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Max</span><input type="number" id="od-max" value="1.5" min="0" max="5" step="0.25" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div style="display:grid;grid-template-columns:38px 1fr 1fr 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
+        <span>Dead</span><input type="number" id="od-dead" value="1.0" min="0" max="30" step="0.5" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <button class="chip zbtn" onclick="updateOutputDamping()" disabled>套用</button>
+        <button class="chip zbtn" onclick="disableOutputDamping()" disabled>關閉</button>
+      </div>
+      <div id="tune-od-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">OD off</div>
+
       <div class="dev-label" style="margin-bottom:6px">vFOC PID (0x96) <span id="pid-sot" style="color:var(--contra);font-size:9px;letter-spacing:0;margin-left:4px"></span></div>
       <div style="display:grid;grid-template-columns:24px 1fr 24px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
         <span>Kp</span><input type="number" id="m-kp" value="1024" min="0" max="1024" step="10" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
@@ -766,6 +787,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <span class="spacer"></span>
         <span id="scope-viewpos" class="dim"></span>
         <button id="scope-pause">⏸ Pause</button>
+        <button id="scope-data" title="匯出目前畫面時間窗 JSON：6 motors + 6DoF">DATA</button>
         <button id="scope-csv">CSV</button>
         <span id="scope-stats" class="dim"></span>
       </div>
@@ -1187,15 +1209,57 @@ try { const p = JSON.parse(localStorage.getItem('pose.release')); if (Array.isAr
 let platformSaveTimer = null;
 function clampInputValue(el, v) {
   if (!el || !Number.isFinite(v)) return;
-  const min = Number(el.min), max = Number(el.max);
+  const min = el.min === '' ? NaN : Number(el.min);
+  const max = el.max === '' ? NaN : Number(el.max);
   el.value = Math.max(Number.isFinite(min) ? min : v, Math.min(Number.isFinite(max) ? max : v, v));
+}
+function inputNumber(id, fallback = 0) {
+  const v = Number(document.getElementById(id)?.value);
+  return Number.isFinite(v) ? v : fallback;
+}
+function currentTuningState() {
+  return {
+    currentMa: inputNumber('work-current', 1600),
+    posSpeed: inputNumber('pos-speed', 120),
+    posAcc: inputNumber('pos-acc', 100),
+    arHz: inputNumber('rate-ar-hz', 100),
+    loopHz: inputNumber('rate-loop-hz', 100),
+    od: {
+      gain: inputNumber('od-gain', 0),
+      maxDeg: inputNumber('od-max', 1.5),
+      deadbandDps: inputNumber('od-dead', 1.0),
+    },
+    pid: {
+      kp: inputNumber('m-kp', 1024),
+      ki: inputNumber('m-ki', 0),
+      kd: inputNumber('m-kd', 0),
+      kv: inputNumber('m-kv', 0),
+    },
+  };
+}
+function applyTuningUiState(tuning = {}) {
+  clampInputValue(document.getElementById('work-current'), Number(tuning.currentMa));
+  clampInputValue(document.getElementById('pos-speed'), Number(tuning.posSpeed));
+  clampInputValue(document.getElementById('pos-acc'), Number(tuning.posAcc));
+  clampInputValue(document.getElementById('rate-ar-hz'), Number(tuning.arHz));
+  clampInputValue(document.getElementById('rate-loop-hz'), Number(tuning.loopHz));
+  const od = tuning.od || {};
+  clampInputValue(document.getElementById('od-gain'), Number(od.gain));
+  clampInputValue(document.getElementById('od-max'), Number(od.maxDeg));
+  clampInputValue(document.getElementById('od-dead'), Number(od.deadbandDps));
+  const pid = tuning.pid || {};
+  clampInputValue(document.getElementById('m-kp'), Number(pid.kp));
+  clampInputValue(document.getElementById('m-ki'), Number(pid.ki));
+  clampInputValue(document.getElementById('m-kd'), Number(pid.kd));
+  clampInputValue(document.getElementById('m-kv'), Number(pid.kv));
 }
 function currentUiState() {
   const existing = platformConfig?.uiState || {};
   return {
     ...existing,
     poseTargetRelative: poseReadOffset(),
-    poseMoveMs: Number(document.getElementById('ps-ms')?.value) || 1500,
+    poseSpeedIndex: Number(document.getElementById('ps-speed')?.value) || 7,
+    tuning: currentTuningState(),
     disturbance: {
       randomSev: Number(document.getElementById('dist-sev')?.value) || 3,
     },
@@ -1222,12 +1286,16 @@ function applyPersistedUiState() {
     updatePoseReachNow(ui.poseTargetRelative.map(Number));
     for (const [id, idx] of POSE_AXES) clampInputValue(document.getElementById(id), Number(ui.poseTargetRelative[idx]));
   }
-  clampInputValue(document.getElementById('ps-ms'), Number(ui.poseMoveMs));
+  const speedIndex = Number.isFinite(Number(ui.poseSpeedIndex))
+    ? Number(ui.poseSpeedIndex)
+    : (Number.isFinite(Number(ui.poseMoveMs)) ? Math.max(1, Math.round(1500 / Math.max(80, Number(ui.poseMoveMs)) * 5)) : 7);
+  clampInputValue(document.getElementById('ps-speed'), speedIndex);
   const d = ui.disturbance || {};
   const sev = Number.isFinite(Number(d.randomSev))
     ? Number(d.randomSev)
     : (Number.isFinite(Number(d.wSev)) ? Number(d.wSev) : 3);
   clampInputValue(document.getElementById('dist-sev'), sev);
+  applyTuningUiState(ui.tuning);
   updateDisturbUi();
   poseUpdateGhost();
 }
@@ -1294,6 +1362,56 @@ async function poseSaveHomeToServer() {
 async function poseSaveReleaseToServer() {
   await poseSavePlatformPoseToServer({ landingPose: releasePose });
 }
+
+function poseSpeedIndex() {
+  const el = document.getElementById('ps-speed');
+  return Math.max(1, Number(el?.value) || 7);
+}
+
+function poseSpeedDps() {
+  return 6 + (poseSpeedIndex() - 1) * (24 / 9);
+}
+
+const POSE_COMMAND_MIN_MS = 80;
+
+function currentMotorTargetAngles() {
+  const d = latestTelemetry || {};
+  const src = Array.isArray(d.hold) ? d.hold : (Array.isArray(d.tgt) ? d.tgt : (Array.isArray(d.a) ? d.a : null));
+  return Array.isArray(src) && src.length === 6 && src.every(Number.isFinite) ? src.map(Number) : null;
+}
+
+function poseCommandMs(pose) {
+  const ikr = window.Kin.ik(pose);
+  if (!ikr.valid || !Array.isArray(ikr.angles)) return { ok: false, ms: 1500, maxDelta: NaN, dps: poseSpeedDps() };
+  const start = currentMotorTargetAngles();
+  if (!start) return { ok: true, ms: 1500, maxDelta: NaN, dps: poseSpeedDps(), fallback: true };
+  let maxDelta = 0;
+  for (let i = 0; i < 6; i++) maxDelta = Math.max(maxDelta, Math.abs(Number(ikr.angles[i]) - Number(start[i])));
+  const dps = poseSpeedDps();
+  const ms = Math.max(POSE_COMMAND_MIN_MS, Math.min(20000, Math.ceil(1000 * 1.875 * maxDelta / dps)));
+  return { ok: true, ms, maxDelta, dps };
+}
+
+function sendPoseCommand(pose, label) {
+  const st = document.getElementById('pose-ctl-status');
+  if (!isHolding) {
+    if (st) {
+      st.style.color = 'var(--dual)';
+      st.textContent = '先按 HOLD HERE，P 指令才會驅動平台';
+    }
+    return null;
+  }
+  const prof = poseCommandMs(pose);
+  const ms = prof.ms;
+  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
+  if (st) {
+    st.style.color = 'var(--sub)';
+    const span = Number.isFinite(prof.maxDelta) ? ` · Δm ${prof.maxDelta.toFixed(1)}°` : '';
+    st.textContent = `→ ${label} 速度${poseSpeedIndex()} (${prof.dps.toFixed(0)}°/s) · ${ms}ms${span}`;
+  }
+  return prof;
+}
+
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
   const st = document.getElementById('pose-ctl-status');
@@ -1306,9 +1424,7 @@ window.poseGo = function() {
     st.textContent = `→ 跟隨目標 [${pose.map(x=>x.toFixed(1)).join(', ')}]`;
     return;
   }
-  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
-  window.sendCmd(`P ${pose.map(x=>x.toFixed(3)).join(' ')} ${ms}`);
-  st.textContent = `→ 絕對 pose [${pose.map(x=>x.toFixed(1)).join(', ')}] ${ms}ms`;
+  sendPoseCommand(pose, '絕對 pose');
 };
 window.poseHome = function() {
   // 回到 homePose（預設中位，或經「存 Home」設定的姿態）。先把滑桿同步到 home offset。
@@ -1317,8 +1433,7 @@ window.poseHome = function() {
   if (followActive) return;
   const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
-  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
-  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
+  sendPoseCommand(pose, 'HOME');
 };
 window.poseSetHome = function() {
   // 把當前目標姿態（滑桿值→絕對 pose）設為 Home，寫 server SoT；localStorage 只作備援。
@@ -1338,11 +1453,7 @@ window.poseRelease = function() {
   if (followActive) return;
   const o = poseReadOffset();
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
-  const ms = parseInt(document.getElementById('ps-ms').value) || 1500;
-  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${ms}`);
-  const st = document.getElementById('pose-ctl-status');
-  st.style.color = 'var(--sub)';
-  st.textContent = `→ Release pose [${pose.map(x => x.toFixed(1)).join(', ')}] ${ms}ms`;
+  sendPoseCommand(pose, 'RELEASE');
 };
 window.poseSetRelease = function() {
   // 把當前目標姿態設為 Release/Landing，Workspace session 最後會移到此姿態再 D。
@@ -1355,7 +1466,7 @@ window.poseSetRelease = function() {
   st.style.color = 'var(--sub)';
   st.textContent = `⌂ Release 已設為 [${releasePose.map(x => x.toFixed(1)).join(', ')}]`;
 };
-document.getElementById('ps-ms')?.addEventListener('input', savePlatformConfigSoon);
+document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfigSoon);
 
 // ===== 跟隨模式：FOLLOW 1/0 + PF 串流（速度受限濾波器在韌體；拖快不硬撲）=====
 let followActive = false;
@@ -1457,6 +1568,7 @@ new ResizeObserver(fitCanvas).observe(canvasZone);
 let ws = null;
 let wsConnected = false;
 let sessionState = { active: false, owner: 'manual', phase: 'idle' };
+let latestTelemetry = null;
 
 function updateSessionBadge(s = sessionState) {
   const el = document.getElementById('session-badge');
@@ -1476,7 +1588,7 @@ function sessionBlocksCommand(cmd) {
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
     'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
-    'L', 'AR', 'A', 'C', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
+    'L', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
     'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
   ].includes(op);
 }
@@ -1548,6 +1660,7 @@ function connectWS() {
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
       if (data.hold && !data.tgt) data.tgt = data.hold;
+      if (Array.isArray(data.a)) latestTelemetry = data;
       if (window.scope) scope.ingest(data);
 
       // Per-motor 角度 cache：失敗時用上次好值（跨 ESP32 reboot 存活）
@@ -1568,6 +1681,7 @@ function connectWS() {
       if (data.pos !== undefined) {
         const holding = !!(data.pos && data.hold);
         setHoldingUI(holding, data.hmax);
+        setEncoderHealthUI(data);
       }
       // 韌體 followMode（"fl"）為權威，獨立於 pos 判斷：前端以為在跟隨但韌體已退出
       // （failsafe/E/任何路徑）→ 同步歸零，避免持續送被靜默丟棄的 PF。
@@ -1604,6 +1718,14 @@ function connectWS() {
         document.getElementById('status').className = 'nav-status connected';
         if (data.status === 'follow on' && Array.isArray(data.pose)) onFollowOn(data.pose);
         if (data.status === 'follow off') followReset();
+        if (data.status === 'ar period' || data.status === 'auto-return ON' || data.status === 'loop period') {
+          syncRuntimeRates(data, true);
+          savePlatformConfigSoon();
+        }
+        if (data.status === 'output damping') {
+          syncOutputDamping(data, true);
+          savePlatformConfigSoon();
+        }
         if (data.status.includes('zeroed')) {
           window.Kin.resetFK([0, 0, Z_LEGS_UP, 0, 0, 0]);
         }
@@ -1616,12 +1738,18 @@ function connectWS() {
         }
       }
       if (data.tune) {
-        // Apply 成功就把當下值存 localStorage，重整後復原。
-        // PID 不存：telemetry d.pid 是唯一真相源（SoT），開機後反寫，不靠 localStorage 第二來源。
-        try {
-          if (data.tune === 'current' && data.okCnt === 6) localStorage.setItem('tune.mA', data.mA);
-          if (data.tune === 'motion'  && data.okCnt === 6) { localStorage.setItem('tune.speed', data.speed); localStorage.setItem('tune.acc', data.acc); }
-        } catch(e) {}
+        if (data.tune === 'current') clampInputValue(document.getElementById('work-current'), Number(data.mA));
+        if (data.tune === 'motion') {
+          clampInputValue(document.getElementById('pos-speed'), Number(data.speed));
+          clampInputValue(document.getElementById('pos-acc'), Number(data.acc));
+        }
+        if (data.tune === 'pid') {
+          clampInputValue(document.getElementById('m-kp'), Number(data.kp));
+          clampInputValue(document.getElementById('m-ki'), Number(data.ki));
+          clampInputValue(document.getElementById('m-kd'), Number(data.kd));
+          clampInputValue(document.getElementById('m-kv'), Number(data.kv));
+        }
+        if ((data.okCnt || 0) === 6 || data.local) savePlatformConfigSoon();
         const targetMap = {
           current: { el: 'tune-current-status', label: `${data.mA}mA` },
           motion:  { el: 'tune-motion-status',  label: `spd=${data.speed} acc=${data.acc}` },
@@ -1802,6 +1930,19 @@ function setHoldingUI(holding, hmax) {
   }
 }
 
+function setEncoderHealthUI(data) {
+  if (!data || data.ok === undefined || data.ok >= 6) return;
+  const label = document.getElementById('state-label');
+  const sub = document.getElementById('state-hmax');
+  const card = document.getElementById('state-card');
+  if (!label || !sub || !card) return;
+  label.textContent = data.ok <= 0 ? 'NO ENCODER' : `ENC ${data.ok}/6`;
+  label.style.color = 'var(--dev)';
+  card.style.borderColor = 'var(--dev)';
+  sub.textContent = data.ok <= 0 ? '回授中斷：畫面可能是最後一次有效姿態' : '部分馬達回授缺失';
+  sub.style.color = 'var(--dev)';
+}
+
 window.toggleHold = function() {
   sendCmd(isHolding ? 'D' : 'H');
 };
@@ -1812,12 +1953,156 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
+function rateHzToPeriodMs(hz) {
+  const v = Number(hz);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  return Math.min(100, Math.max(1, 1000 / v));
+}
+
+function periodMsToHz(ms) {
+  const v = Number(ms);
+  return Number.isFinite(v) && v > 0 ? 1000 / v : NaN;
+}
+
+function fmtHz(v) {
+  if (!Number.isFinite(v)) return '—';
+  const nearInt = Math.abs(v - Math.round(v)) < 0.005;
+  return nearInt ? v.toFixed(0) : v.toFixed(3);
+}
+
+function fmtRateInputHz(v) {
+  return fmtTrim(v, 3);
+}
+
+const rateDirty = { ar: false, loop: false };
+const rateRequestedHz = { ar: NaN, loop: NaN };
+['rate-ar-hz', 'rate-loop-hz'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const apply = () => id === 'rate-ar-hz' ? updateAutoReturnRate() : updateLoopRate();
+  el.addEventListener('input', () => {
+    rateDirty[id === 'rate-ar-hz' ? 'ar' : 'loop'] = true;
+    const s = document.getElementById('tune-rate-status');
+    if (s) { s.textContent = '未套用'; s.style.color = 'var(--dual)'; }
+  });
+  el.addEventListener('change', apply);
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    apply();
+    el.blur();
+  });
+});
+
+function updateRateStatus(arHz, loopHz, extra = '') {
+  const s = document.getElementById('tune-rate-status');
+  if (!s) return;
+  const parts = [];
+  if (Number.isFinite(arHz)) parts.push(`AR ${fmtHz(arHz)}Hz`);
+  if (Number.isFinite(loopHz)) parts.push(`Loop ${fmtHz(loopHz)}Hz`);
+  s.textContent = (parts.length ? parts.join(' · ') : '—') + extra;
+  const bus = busOccupancy(latestTelemetry?.bus, latestTelemetry?.ar);
+  const hot = (bus?.total ?? 0) > 80 || (latestTelemetry?.can?.rxDrop ?? 0) > 0 || (latestTelemetry?.bus?.ovr ?? 0) > 0;
+  s.style.color = hot ? 'var(--dual)' : 'var(--sub)';
+}
+
+function requestedRateDisplayHz(kind, actualHz, actualPeriodMs = NaN) {
+  let requestedHz = rateRequestedHz[kind];
+  if (!Number.isFinite(requestedHz)) {
+    const id = kind === 'ar' ? 'rate-ar-hz' : 'rate-loop-hz';
+    requestedHz = Number(document.getElementById(id)?.value);
+  }
+  if (!Number.isFinite(requestedHz)) return NaN;
+
+  if (kind === 'ar') {
+    const requestedMs = rateHzToPeriodMs(requestedHz);
+    if (Number.isFinite(requestedMs) && Number.isFinite(actualPeriodMs) &&
+        Math.round(requestedMs) === Math.round(actualPeriodMs)) {
+      return requestedHz;
+    }
+  } else if (kind === 'loop') {
+    return requestedHz;
+  }
+
+  rateRequestedHz[kind] = NaN;
+  return NaN;
+}
+
+function syncRuntimeRates(d, fromAck = false) {
+  const arMs = Number.isFinite(Number(d.period_ms)) && (d.status === 'ar period' || d.status === 'auto-return ON')
+    ? Number(d.period_ms)
+    : Number(d.ar);
+  const loopHz = Number.isFinite(Number(d.hz)) && d.status === 'loop period'
+    ? Number(d.hz)
+    : Number(d.lhz);
+  const arHz = periodMsToHz(arMs);
+  const arEl = document.getElementById('rate-ar-hz');
+  const loopEl = document.getElementById('rate-loop-hz');
+  if (fromAck) {
+    if (d.status === 'ar period' || d.status === 'auto-return ON') {
+      rateDirty.ar = false;
+      if (Number.isFinite(Number(d.requested_hz))) rateRequestedHz.ar = Number(d.requested_hz);
+    }
+    if (d.status === 'loop period') {
+      rateDirty.loop = false;
+    }
+  }
+  const arInputHz = requestedRateDisplayHz('ar', arHz, arMs);
+  const loopInputHz = requestedRateDisplayHz('loop', loopHz);
+  const arDisplayHz = Number.isFinite(arInputHz) ? arInputHz : arHz;
+  const loopDisplayHz = Number.isFinite(loopInputHz) ? loopInputHz : loopHz;
+  if (arEl && Number.isFinite(arDisplayHz) && !rateDirty.ar && document.activeElement !== arEl) arEl.value = fmtRateInputHz(arDisplayHz);
+  if (loopEl && Number.isFinite(loopDisplayHz) && !rateDirty.loop && document.activeElement !== loopEl) loopEl.value = fmtRateInputHz(loopDisplayHz);
+  const arTargetHz = Number.isFinite(arInputHz) ? arInputHz : rateRequestedHz.ar;
+  let requested = '';
+  if (Number.isFinite(arTargetHz) && Number.isFinite(arHz) &&
+      Math.abs(arTargetHz - arHz) > 0.005) {
+    const arPeriod = Number.isFinite(arMs) ? ` → ${fmtTrim(arMs, 3)}ms` : '';
+    requested = ` · target AR ${fmtHz(arTargetHz)}Hz${arPeriod}`;
+  }
+  if (fromAck && Number.isFinite(Number(d.period_us))) {
+    requested = ` · ${Number(d.period_us)}us`;
+  } else if (fromAck && Number.isFinite(Number(d.period_ms))) {
+    requested += ` · ${fmtTrim(Number(d.period_ms), 3)}ms`;
+  }
+  updateRateStatus(arHz, loopHz, requested);
+}
+
+window.updateAutoReturnRate = function() {
+  const el = document.getElementById('rate-ar-hz');
+  const hz = Number(el?.value);
+  const ms = rateHzToPeriodMs(el?.value);
+  if (!ms) { logEv('AR Hz 無效', 'bad'); return; }
+  rateRequestedHz.ar = hz;
+  sendCmd(`AR ${fmtTrim(ms, 3)}`);
+};
+
+window.updateLoopRate = function() {
+  const el = document.getElementById('rate-loop-hz');
+  const hz = Number(el?.value);
+  const ms = rateHzToPeriodMs(el?.value);
+  if (!ms) { logEv('Loop Hz 無效', 'bad'); return; }
+  rateRequestedHz.loop = hz;
+  sendCmd(`L ${fmtTrim(ms, 3)}`);
+};
+
 window.updateMotorPID = function() {
   const kp = document.getElementById('m-kp').value;
   const ki = document.getElementById('m-ki').value;
   const kd = document.getElementById('m-kd').value;
   const kv = document.getElementById('m-kv').value;
   sendCmd(`K ${kp} ${ki} ${kd} ${kv}`);
+};
+
+window.updateOutputDamping = function() {
+  const gain = document.getElementById('od-gain').value;
+  const maxDeg = document.getElementById('od-max').value;
+  const dead = document.getElementById('od-dead').value;
+  sendCmd(`OD ${gain} ${maxDeg} ${dead}`);
+};
+
+window.disableOutputDamping = function() {
+  sendCmd('OD 0');
 };
 
 window.saveMotorPID = function() {
@@ -1860,25 +2145,6 @@ window.resetFK = function() {
   document.getElementById('fk-debug').style.color = 'var(--sub)';
 };
 
-// Restore tuning inputs from localStorage（覆蓋 HTML 預設值）
-(function restoreTuning() {
-  try {
-    // PID 不在此復原：由 telemetry d.pid 反寫（SoT）。僅 mA/speed/acc 無 telemetry 真值源，靠 localStorage。
-    const map = [
-      ['tune.mA',    'work-current'],
-      ['tune.speed', 'pos-speed'],
-      ['tune.acc',   'pos-acc'],
-    ];
-    for (const [k, id] of map) {
-      const v = localStorage.getItem(k);
-      if (v !== null) {
-        const el = document.getElementById(id);
-        if (el) el.value = v;
-      }
-    }
-  } catch(e) {}
-})();
-
 // ===== 監控引擎（scope-core，單一傳輸源：宿主 WS → scope.ingest）=====
 const $o = id => document.getElementById(id);
 const HOST = `${location.hostname}:${location.port || 3000}`;
@@ -1888,7 +2154,7 @@ const scope = new ScopeCore({
             errors:'c-errors', errorsLabel:'lbl-errors', gain:'c-gain', gainLabel:'lbl-gain',
             anglesTitle:'scope-title-main', errorsTitle:'scope-title-error' },
   ui: { legend:'scope-legend', stats:'scope-stats', viewPos:'scope-viewpos',
-        pauseBtn:'scope-pause', csvBtn:'scope-csv', charts:'charts' },
+        pauseBtn:'scope-pause', dataBtn:'scope-data', csvBtn:'scope-csv', charts:'charts' },
   poseFromAngles: solveFK,
   poseNeutralZ: NEUTRAL_Z,
 });
@@ -2016,6 +2282,51 @@ scope.on('telemetry', d => {
   const holding = !!(d.pos && d.hold);
   el.textContent = holding ? '● HOLD 中' : '○ 未鎖位 · 擾動無效';
   el.style.color = holding ? 'var(--contra)' : 'var(--dual)';
+});
+
+const OD_FIELDS = ['od-gain', 'od-max', 'od-dead'];
+const odDirty = [false, false, false];
+OD_FIELDS.forEach((id, i) => {
+  const el = $o(id);
+  if (el) el.addEventListener('input', () => {
+    odDirty[i] = true;
+    const s = $o('tune-od-status');
+    if (s) { s.textContent = 'OD edited · 尚未套用'; s.style.color = 'var(--dual)'; }
+  });
+});
+
+function fmtTrim(v, d) {
+  return Number(v).toFixed(d).replace(/0+$/,'').replace(/\.$/,'');
+}
+
+function syncOutputDamping(d, fromAck = false) {
+  const od = Array.isArray(d.od) ? d.od : null;
+  const gain = Number.isFinite(Number(d.gain)) ? Number(d.gain) : od ? Number(od[0]) : NaN;
+  const maxDeg = Number.isFinite(Number(d.maxDeg)) ? Number(d.maxDeg) : od ? Number(od[1]) : NaN;
+  const corrMax = od ? Number(od[2]) : NaN;
+  const dead = Number.isFinite(Number(d.deadbandDps)) ? Number(d.deadbandDps) : NaN;
+  if (!Number.isFinite(gain) || !Number.isFinite(maxDeg)) return;
+  const fg = $o('od-gain'), fm = $o('od-max'), fd = $o('od-dead');
+  if (fromAck) odDirty.fill(false);
+  if (fg && !odDirty[0] && document.activeElement !== fg) fg.value = fmtTrim(gain, 3);
+  if (fm && !odDirty[1] && document.activeElement !== fm) fm.value = fmtTrim(maxDeg, 2);
+  if (fd && Number.isFinite(dead) && !odDirty[2] && document.activeElement !== fd) fd.value = fmtTrim(dead, 1);
+  const s = $o('tune-od-status'); if (!s) return;
+  const on = gain > 0 && maxDeg > 0;
+  const corr = Number.isFinite(corrMax) ? ` · corr≤${corrMax.toFixed(2)}°` : '';
+  const dirty = odDirty.some(Boolean);
+  if (!dirty || fromAck) {
+    s.textContent = on
+      ? `OD on · gain ${gain.toFixed(3)} · max ${maxDeg.toFixed(2)}°${corr}`
+      : 'OD off';
+    s.style.color = on ? 'var(--contra)' : 'var(--sub)';
+  }
+  if (fromAck) btnResolve('ok');
+}
+
+scope.on('telemetry', d => {
+  syncRuntimeRates(d);
+  if (Array.isArray(d.od)) syncOutputDamping(d);
 });
 
 // vFOC PID 欄位反寫韌體真值（SoT：telemetry d.pid 是唯一真相源，非編輯中才覆寫）

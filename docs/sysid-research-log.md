@@ -664,3 +664,94 @@ Workspace lifecycle 回到單一短路徑 `P home` / `P landing`。
 - 韌體 HOLD `P` 由 cubic smoothstep 改為 minimum-jerk quintic：端點速度與加速度皆為 0。
 - `P` 依最大 joint 角度跨度自動延長時間，限制 minimum-jerk 峰值 joint velocity，避免 runner 給定時間讓馬達硬衝。
 - 後續若還不夠，再往 joint-space constrained trajectory / online MPC 走；但必須先有穩定、可解釋、可重複的 min-jerk baseline。
+
+## 2026-06-28 — Scope CSV quick-look 固化為 motor + 6DoF 雙圖
+
+背景：`/Users/chenliangyu/Downloads/scope_2026-06-27T20-05-24.csv` 的手動分析圖對判讀「大行程中段激發、
+尾段穩態安靜」很有用，但不能留在 `/tmp` 變成一次性孤兒圖。
+
+新增 `sysid/scope_report.py` 與 `npm run scope:report -- /path/to/scope.csv`。輸出固定保存在
+`sysid/data/scope_reports/`：
+
+- `*_motor_scope.png`：六顆馬達 actual angle、target angle、hold error、motor step spikes、kinetic。
+- `*_pose_scope.png`：6DoF actual/target、cross-axis、pose error、kinetic。
+- `*_scope.summary.json`：target rows、pose error、hold error、motor step、top kinetic event 等摘要。
+
+定位：這是 dashboard scope CSV 的 quick-look 視覺檢查入口，不取代 Workspace/JSONL 的 lifecycle evaluation。
+正式 run 比較仍以 `.evaluation.json` 與 raw waveform features 為準。
+
+## 2026-06-28 — Scope report 加入自由 panel/layout 選項
+
+使用者要求 scope CSV quick-look 不只固定輸出雙圖，也要能自由決定「畫什麼、不畫什麼、怎麼排版」。
+
+`sysid/scope_report.py` 新增可配置繪圖入口：
+
+- `--figures motor,pose,custom`：選擇預設圖或自訂混合圖。
+- `--motor-panels actual,target,error,step,kinetic`：控制 motor preset 的 panel。
+- `--pose-panels z-yaw,cross,error,kinetic`：控制 6DoF preset 的 panel。
+- `--panels pose.z-yaw,pose.cross,motor.error`：自訂任意 panel 組合。
+- `--motors 2,4,6` / `--pose-axes z,yaw`：只看指定馬達或 pose error 軸。
+- `--cols 2` / `--figsize 14,8` / `--hide-target-span`：控制排版與標記。
+
+用法已補進 `docs/research-closed-loop.md` 的 `Scope CSV Quick-Look` 章節。預設仍維持一鍵輸出
+motor + 6DoF 雙圖；需要深挖某段現象時再用 custom panel。
+
+## 2026-06-28 — HOLD `P` 軌跡補回 motor-space 峰值速度保護
+
+Scope CSV 顯示主要粗糙感不是穩態噪音，而是大 Z/yaw 轉場期間的 motor target / actual 速度尖峰與 cross-axis wobble。
+因此先處理命令軌跡本身，避免 UI 或 Workspace 給太短 `P ... [ms]` 時把 minimum-jerk 壓成過兇的大角度命令。
+
+韌體 HOLD `P` 保留 minimum-jerk quintic；預設仍尊重 `P ... [ms]` 的整體時間感，不自動拉長。若現場需要保護大行程，
+可開啟 peak joint velocity cap，依六顆馬達最大角度跨度延長 move time。
+
+- `HP` / `HP?`：查目前 HOLD profile peak velocity 上限。
+- `HP 0`：關閉上限，完全尊重 requested move time；這是預設。
+- `HP <deg_per_sec>`：設定上限，韌體 clamp 到 5-360 deg/s。
+
+`P` 回覆會包含 `reqMs`、實際 `ms`、`maxVelDps`、`limitEnabled` 與 `limited`，
+方便 scope/JSONL 對照「是否因平滑保護被拉長」。
+這是第一優先級的 baseline 平滑化；`OD` output damping 仍維持預設關閉，後續要用 A/B 實測再決定是否啟用。
+
+## 2026-06-28 — Workspace 改成 P waypoint + PF streaming 混合語意
+
+重新釐清 `P` / `PF` 的職責：
+
+- `P pose ms`：預編排、有限時間、使用者可感知的「時間感」；適合 takeoff/landing、step、waypoint-like 節目。
+- `PF pose`：即時操作或連續軌跡串流；適合 sine、helix、idle 等每一個 sample 都是新目標的動作。
+
+舊 Workspace runner 只要 program 裡有非 hold block，就整段進 `FOLLOW 1` 並以 30Hz 送 `PF`。這讓 step 類 block
+也被當成即時手控串流，和 dashboard 的 `P` 時間感割裂。
+
+修正後 Workspace 逐 block 選路徑：
+
+- hold：只保持，不進 `FOLLOW/PF`。
+- step 類 motion：使用 motion library 的 `pKeyframes`，例如 home → target → home，送 timed `P`。
+- continuous motion：短暫進 `FOLLOW/PF`，只在該 block 期間串流。
+
+這讓 `PF` 回到「即時/連續」用途，同時保留 Workspace 對連續波形的能力；dry-run description 會列出每個 block
+的 `hold` / `p` / `follow` 模式。
+
+## 2026-06-28 — 新增手機 IMU 即時跟隨入口
+
+使用者希望用手機陀螺儀同步平台姿態，定位上屬於手動即時操作，而不是 Workspace/program 執行。
+
+新增 `/phone.html` 作為手機控制頁：
+
+- 手機瀏覽器讀 `DeviceOrientationEvent`，使用者按鍵授權後才啟動感測器。
+- 校準時把當前手機姿態設為零偏移；FOLLOW ack 回來的當前平台 pose 設為 base pose。
+- roll/pitch 預設開啟，yaw 預設關閉；每軸可開關與反相。
+- phone-side 提供 deadband、低通平滑、姿態限幅與 IK precheck。
+- 只有在 `FOLLOW 1` ack 後才以約 30Hz coalesced `PF` 串流。
+- 不自動 `E`，不執行 `Z`/校正，也不繞過 server session lock。
+
+為了讓手機瀏覽器能取得姿態感測權限，`server.js` 新增 opt-in HTTPS listener：
+
+```bash
+npm run start:phone
+```
+
+此模式保留原 HTTP dashboard，並額外開 `https://<computer-lan-ip>:3443/phone.html`。自簽憑證存於
+`sysid/config/https-*.pem`，已加入 gitignore。
+
+語意結論：Phone IMU 使用 `PF` 是合理的，因為它是人手即時輸入；Workspace 中的 waypoint/step 類 block
+仍應使用 timed `P`，只有 continuous block 才進 `FOLLOW/PF`。

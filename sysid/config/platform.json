@@ -36,15 +36,16 @@
     "poseTargetRelative": [
       0,
       0,
-      31,
-      -0.5,
+      -65,
+      0,
       0,
       65
     ],
-    "poseMoveMs": 3600,
+    "poseMoveMs": 300,
+    "poseSpeedIndex": 21,
     "motion": {
-      "selectedId": "hold",
-      "loops": 1,
+      "selectedId": "buoy",
+      "loops": 10,
       "paramsById": {
         "helix": {
           "r": 15,
@@ -66,7 +67,7 @@
         "buoy": {
           "A": 12,
           "H": 25,
-          "T": 7,
+          "T": 4,
           "dir": 1
         },
         "heartbeat": {},
@@ -81,22 +82,46 @@
         },
         "z-sine": {
           "A": 25,
-          "T": 2
+          "T": 1.5
+        },
+        "roll-sine": {
+          "A": 4,
+          "T": 4
         }
       }
     },
     "workspace": {
       "blocks": [
         {
-          "id": "hold",
+          "id": "buoy",
           "params": {
-            "T": 0.5
+            "A": 12,
+            "H": 25,
+            "T": 4,
+            "dir": 1
           },
-          "loops": 1
+          "loops": 10
         }
       ],
-      "currentProgramId": "00_mqwek9ay",
+      "currentProgramId": "scratch_mqwl9tcc",
       "programs": [
+        {
+          "id": "scratch_mqwl9tcc",
+          "name": "Scratch",
+          "notes": "",
+          "blocks": [
+            {
+              "id": "hold",
+              "params": {
+                "T": 0.5
+              },
+              "loops": 1
+            }
+          ],
+          "hash": "495da376",
+          "createdAt": "2026-06-27T16:43:18.348Z",
+          "updatedAt": "2026-06-27T16:43:18.348Z"
+        },
         {
           "id": "00_mqwek9ay",
           "name": "00",
@@ -117,7 +142,25 @@
       ]
     },
     "disturbance": {
-      "randomSev": 3
+      "randomSev": 8
+    },
+    "tuning": {
+      "currentMa": 3000,
+      "posSpeed": 191,
+      "posAcc": 251,
+      "arHz": 400,
+      "loopHz": 400,
+      "od": {
+        "gain": 0,
+        "maxDeg": 1.5,
+        "deadbandDps": 1
+      },
+      "pid": {
+        "kp": 1024,
+        "ki": 10,
+        "kd": 0,
+        "kv": 0
+      }
     },
     "recorderName": "run"
   },
@@ -132,5 +175,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-27T16:37:04.760Z"
+  "updatedAt": "2026-06-27T20:54:52.736Z"
 }

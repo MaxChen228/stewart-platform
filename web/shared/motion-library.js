@@ -35,6 +35,11 @@ function axisStepMotion({ id, label, axis, unit, min, max, def, step, duration =
     category: '基礎 / 單軸 step',
     envelope: false,
     per: (p) => p.T,
+    pKeyframes: (p) => [
+      { t: 0, pose: [...ZERO_POSE] },
+      { t: p.T / 2, pose: axisPose(axis, p.A) },
+      { t: p.T, pose: [...ZERO_POSE] },
+    ],
     params: [
       { k: 'A', l: '幅度', min, max, def, step, u: unit },
       { k: 'T', l: '時長', min: 0.5, max: 20, def: duration, step: 0.5, u: 's' },

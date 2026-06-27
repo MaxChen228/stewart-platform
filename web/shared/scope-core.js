@@ -40,7 +40,7 @@ class ScopeCore {
     this._yrange = {};                // 每圖的穩定 Y 範圍（遲滯，避免每幀抖動）
 
     const mk6 = () => Array.from({ length: 6 }, () => []);
-    this.buf = { a: mk6(), tgt: mk6(), adj: mk6(), vel: mk6(), herr: mk6(), pose: mk6(), poseTgt: mk6(), poseVel: mk6(), g: [], kinetic: [], ts: [] };
+    this.buf = { a: mk6(), tgt: mk6(), adj: mk6(), vel: mk6(), herr: mk6(), pose: mk6(), poseTgt: mk6(), poseVel: mk6(), g: [], kinetic: [], ts: [], raw: [] };
     this.last = null;                 // 最近一筆原始遙測（研究頁取 ok/tx/herr…）
 
     if (cfg.autostart !== false) this.start();
@@ -97,7 +97,8 @@ class ScopeCore {
     for (let i = 0; i < 6; i++) { const a = b.a[i]; if (a.length >= 2) { const dd = a[a.length - 1] - a[a.length - 2]; kin += dd * dd; } }
     b.kinetic.push(kin);
     b.ts.push(performance.now());
-    if (b.g.length > this.MAX_BUF) { b.g.shift(); b.kinetic.shift(); b.ts.shift(); }
+    b.raw.push(d);
+    if (b.g.length > this.MAX_BUF) { b.g.shift(); b.kinetic.shift(); b.ts.shift(); b.raw.shift(); }
   }
 
   send(cmd) { if (this.ws && this.ws.readyState === 1) { this.ws.send(cmd); return true; } return false; }
@@ -351,7 +352,7 @@ class ScopeCore {
       this.buf.a[i].length = 0; this.buf.tgt[i].length = 0; this.buf.adj[i].length = 0; this.buf.vel[i].length = 0; this.buf.herr[i].length = 0;
       this.buf.pose[i].length = 0; this.buf.poseTgt[i].length = 0; this.buf.poseVel[i].length = 0;
     }
-    this.buf.g.length = 0; this.buf.kinetic.length = 0; this.buf.ts.length = 0; this.events.length = 0; this.sampleCount = 0; this.viewOffset = 0; this._yrange = {};
+    this.buf.g.length = 0; this.buf.kinetic.length = 0; this.buf.ts.length = 0; this.buf.raw.length = 0; this.events.length = 0; this.sampleCount = 0; this.viewOffset = 0; this._yrange = {};
   }
   togglePause(v) {
     this.paused = (v === undefined) ? !this.paused : v;
@@ -378,6 +379,111 @@ class ScopeCore {
     a.download = `scope_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
     a.click();
   }
+  currentWindowBundle() {
+    const n = this.buf.a[0].length;
+    if (!n) return null;
+    const vs = this._vStart(), ve = this._vEnd();
+    const start = Math.max(0, Math.min(n, vs));
+    const end = Math.max(start, Math.min(n, ve));
+    const t0 = this.buf.ts[start] ?? this.buf.ts[0] ?? 0;
+    const samples = [];
+    const finite = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
+    for (let j = start; j < end; j++) {
+      samples.push({
+        sample: j,
+        tRelMs: finite((this.buf.ts[j] ?? t0) - t0),
+        raw: this.buf.raw[j] || null,
+        motors: {
+          angle: this.buf.a.map((x) => finite(x[j])),
+          target: this.buf.tgt.map((x) => finite(x[j])),
+          holdError: this.buf.herr.map((x) => finite(x[j])),
+          velocity: this.buf.vel.map((x) => finite(x[j])),
+        },
+        motor: {
+          angle: this.buf.a.map((x) => finite(x[j])),
+          target: this.buf.tgt.map((x) => finite(x[j])),
+          holdError: this.buf.herr.map((x) => finite(x[j])),
+          velocity: this.buf.vel.map((x) => finite(x[j])),
+        },
+        pose6dof: {
+          names: this.POSE_NAMES,
+          units: ['mm', 'mm', 'mm', 'deg', 'deg', 'deg'],
+          actual: this.buf.pose.map((x) => finite(x[j])),
+          target: this.buf.poseTgt.map((x) => finite(x[j])),
+          velocity: this.buf.poseVel.map((x) => finite(x[j])),
+        },
+        pose: {
+          actual: this.buf.pose.map((x) => finite(x[j])),
+          target: this.buf.poseTgt.map((x) => finite(x[j])),
+          velocity: this.buf.poseVel.map((x) => finite(x[j])),
+        },
+        gain: finite(this.buf.g[j]),
+        kinetic: finite(this.buf.kinetic[j]),
+      });
+    }
+    const arrStats = (vals) => {
+      const xs = vals.map(Number).filter(Number.isFinite);
+      if (!xs.length) return { n: 0, min: null, max: null, mean: null, rms: null, pp: null };
+      let sum = 0, sum2 = 0, min = Infinity, max = -Infinity;
+      for (const x of xs) { sum += x; sum2 += x * x; if (x < min) min = x; if (x > max) max = x; }
+      return { n: xs.length, min, max, mean: sum / xs.length, rms: Math.sqrt(sum2 / xs.length), pp: max - min };
+    };
+    const motorStats = this.NAMES.map((name, i) => ({
+      name,
+      angle: arrStats(samples.map((s) => s.motor.angle[i])),
+      holdError: arrStats(samples.map((s) => s.motor.holdError[i])),
+      velocity: arrStats(samples.map((s) => s.motor.velocity[i])),
+    }));
+    const poseStats = this.POSE_NAMES.map((name, i) => ({
+      name,
+      unit: i < 3 ? 'mm' : 'deg',
+      actual: arrStats(samples.map((s) => s.pose6dof.actual[i])),
+      target: arrStats(samples.map((s) => s.pose6dof.target[i])),
+      error: arrStats(samples.map((s) => {
+        const target = s.pose6dof.target[i], actual = s.pose6dof.actual[i];
+        return target != null && actual != null ? target - actual : null;
+      })),
+      velocity: arrStats(samples.map((s) => s.pose6dof.velocity[i])),
+    }));
+    return {
+      schema: 'stewart.scope.window.v2',
+      createdAt: new Date().toISOString(),
+      source: location.href,
+      displayMode: this.displayMode,
+      contains: ['six_motors', 'six_dof_pose', 'raw_telemetry'],
+      selectedMotor: this.NAMES[this.selectedMotor],
+      visibleMotors: this.NAMES.filter((_, i) => this.motorVisible[i]),
+      window: {
+        startSample: start,
+        endSample: end,
+        samples: end - start,
+        requestedSamples: this.timeWindow,
+        viewOffsetSamples: this.viewOffset,
+        estimatedDurationMs: samples.length > 1 ? samples[samples.length - 1].tRelMs : 0,
+      },
+      summary: {
+        motors: motorStats,
+        pose6dof: poseStats,
+        motor: motorStats,
+        pose: poseStats,
+        kinetic: arrStats(samples.map((s) => s.kinetic)),
+        gain: arrStats(samples.map((s) => s.gain)),
+      },
+      events: this.events
+        .filter((e) => e.sample >= start && e.sample <= end)
+        .map((e) => ({ ...e, sampleInWindow: e.sample - start })),
+      samples,
+    };
+  }
+  exportWindowJSON() {
+    const bundle = this.currentWindowBundle();
+    if (!bundle) return null;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' }));
+    a.download = `scope_window_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+    a.click();
+    return bundle;
+  }
 
   _initUI() {
     this._updateLegend();
@@ -391,6 +497,7 @@ class ScopeCore {
     if (bp) bp.addEventListener('click', () => { const p = this.togglePause(); bp.textContent = p ? '▶ Resume' : '⏸ Pause'; bp.classList.toggle('active', p); });
     const bc = this._el(this.ui.clearBtn); if (bc) bc.addEventListener('click', () => this.clear());
     const bcsv = this._el(this.ui.csvBtn); if (bcsv) bcsv.addEventListener('click', () => this.exportCSV());
+    const bdata = this._el(this.ui.dataBtn); if (bdata) bdata.addEventListener('click', () => this.exportWindowJSON());
     // 指令列
     const ci = this._el(this.ui.cmdInput), bs = this._el(this.ui.sendBtn);
     if (ci) {

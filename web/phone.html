@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phone IMU Control</title>
+<link rel="stylesheet" href="/shared/app-ui.css">
+<style>
+:root {
+  --bg: #f7f4ef;
+  --surface: #fffdf9;
+  --ink: #27231f;
+  --sub: #766f67;
+  --line: #ded7cd;
+  --line2: #ece6dd;
+  --ok: #326f63;
+  --warn: #b2642c;
+  --bad: #b73b36;
+  --blue: #3d6388;
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Noto Sans TC", "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font-family: var(--font-sans); }
+body { padding: max(14px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
+.shell { max-width: 680px; margin: 0 auto; display: grid; gap: 12px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.brand { font-family: var(--font-mono); font-weight: 800; letter-spacing: .08em; font-size: 13px; }
+.nav { display: flex; gap: 6px; }
+.nav a { color: var(--sub); text-decoration: none; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; font-family: var(--font-mono); font-size: 11px; background: var(--surface); }
+.nav a.active { color: var(--blue); border-color: var(--blue); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px; box-shadow: 0 1px 10px rgba(40, 32, 20, .04); }
+.status-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.pill { border: 1px solid var(--line); border-radius: 5px; padding: 7px 5px; text-align: center; font-family: var(--font-mono); font-size: 10px; color: var(--sub); background: #fbf8f2; min-width: 0; }
+.pill b { display: block; color: var(--ink); font-size: 12px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill.ok { border-color: rgba(50,111,99,.55); color: var(--ok); }
+.pill.ok b { color: var(--ok); }
+.pill.warn { border-color: rgba(178,100,44,.55); color: var(--warn); }
+.pill.warn b { color: var(--warn); }
+.pill.bad { border-color: rgba(183,59,54,.55); color: var(--bad); }
+.pill.bad b { color: var(--bad); }
+.hud { display: grid; grid-template-columns: minmax(190px, .9fr) 1fr; gap: 14px; align-items: center; }
+.attitude { position: relative; aspect-ratio: 1; border: 1px solid var(--line); border-radius: 50%; background:
+  radial-gradient(circle at center, rgba(61,99,136,.12) 0 3px, transparent 4px),
+  linear-gradient(90deg, transparent calc(50% - .5px), rgba(39,35,31,.15) calc(50% - .5px) calc(50% + .5px), transparent calc(50% + .5px)),
+  linear-gradient(0deg, transparent calc(50% - .5px), rgba(39,35,31,.15) calc(50% - .5px) calc(50% + .5px), transparent calc(50% + .5px)),
+  #fbf8f2;
+  overflow: hidden;
+}
+.attitude::after { content: ""; position: absolute; inset: 14%; border: 1px dashed rgba(39,35,31,.18); border-radius: 50%; }
+.dot { position: absolute; left: 50%; top: 50%; width: 24px; height: 24px; border-radius: 50%; background: var(--blue); border: 3px solid #fff; transform: translate(-50%, -50%); box-shadow: 0 4px 14px rgba(61,99,136,.28); transition: background .12s; }
+.dot.bad { background: var(--bad); }
+.numbers { display: grid; gap: 8px; }
+.num-row { display: grid; grid-template-columns: 58px 1fr 66px; gap: 8px; align-items: center; font-family: var(--font-mono); }
+.num-row span:first-child { color: var(--sub); font-size: 11px; letter-spacing: .06em; }
+.bar { position: relative; height: 10px; border-radius: 999px; background: rgba(39,35,31,.08); overflow: hidden; }
+.bar i { position: absolute; left: 50%; top: 0; bottom: 0; width: 0; background: rgba(61,99,136,.55); transform-origin: left center; }
+.val { text-align: right; font-size: 15px; font-variant-numeric: tabular-nums; }
+.controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+button, .toggle { min-height: 46px; border: 1px solid var(--line); border-radius: 6px; background: #fbf8f2; color: var(--ink); font: 700 13px var(--font-sans); letter-spacing: .02em; }
+button:active, .toggle:active { transform: translateY(1px); }
+button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+button.danger { color: var(--bad); border-color: rgba(183,59,54,.6); }
+button:disabled { opacity: .45; transform: none; }
+.sliders { display: grid; gap: 12px; }
+.row { display: grid; grid-template-columns: 86px 1fr 48px; gap: 8px; align-items: center; font-family: var(--font-mono); font-size: 11px; color: var(--sub); }
+.row input[type="range"] { width: 100%; accent-color: var(--blue); }
+.row output { color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.axis-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.toggle { display: flex; align-items: center; justify-content: center; gap: 5px; user-select: none; font-family: var(--font-mono); font-size: 11px; font-weight: 700; }
+.toggle input { accent-color: var(--blue); }
+.invert-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 8px; }
+.log { min-height: 38px; color: var(--sub); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log.good { color: var(--ok); }
+.log.warn { color: var(--warn); }
+.log.bad { color: var(--bad); }
+.hint { color: var(--sub); font: 10px/1.5 var(--font-mono); margin-top: 8px; }
+@media (max-width: 560px) {
+  .hud { grid-template-columns: 1fr; }
+  .attitude { width: min(76vw, 330px); justify-self: center; }
+  .controls { grid-template-columns: 1fr 1fr; }
+  .status-grid { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <div class="top">
+    <div class="brand">PHONE IMU</div>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="/">主控</a>
+      <a href="/workspace.html">Workspace</a>
+      <a class="active" href="/phone.html">Phone</a>
+    </nav>
+  </div>
+
+  <section class="card">
+    <div class="status-grid">
+      <div class="pill bad" id="ws-pill"><b>WS</b><span>OFF</span></div>
+      <div class="pill bad" id="rig-pill"><b>RIG</b><span>--</span></div>
+      <div class="pill warn" id="hold-pill"><b>HOLD</b><span>OFF</span></div>
+      <div class="pill warn" id="follow-pill"><b>FOLLOW</b><span>OFF</span></div>
+    </div>
+  </section>
+
+  <section class="card hud">
+    <div class="attitude" id="attitude"><div class="dot" id="dot"></div></div>
+    <div class="numbers">
+      <div class="num-row"><span>ROLL</span><div class="bar"><i id="bar-roll"></i></div><div class="val" id="v-roll">0.0</div></div>
+      <div class="num-row"><span>PITCH</span><div class="bar"><i id="bar-pitch"></i></div><div class="val" id="v-pitch">0.0</div></div>
+      <div class="num-row"><span>YAW</span><div class="bar"><i id="bar-yaw"></i></div><div class="val" id="v-yaw">0.0</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="controls">
+      <button id="sensor-btn" class="primary">感測器</button>
+      <button id="cal-btn">校準</button>
+      <button id="hold-btn">HOLD HERE</button>
+      <button id="follow-btn" class="primary">FOLLOW</button>
+      <button id="home-btn">HOME</button>
+      <button id="stop-btn" class="danger">STOP FOLLOW</button>
+    </div>
+    <div class="log" id="log">ready</div>
+  </section>
+
+  <section class="card sliders">
+    <label class="row"><span>平台角</span><input id="max-tilt" type="range" min="1" max="15" value="8" step="0.5"><output id="max-tilt-v">8.0</output></label>
+    <label class="row"><span>手機滿刻</span><input id="phone-full" type="range" min="8" max="60" value="35" step="1"><output id="phone-full-v">35</output></label>
+    <label class="row"><span>Yaw 上限</span><input id="yaw-max" type="range" min="0" max="25" value="10" step="1"><output id="yaw-max-v">10</output></label>
+    <label class="row"><span>平滑</span><input id="smooth-tau" type="range" min="0.04" max="0.6" value="0.18" step="0.01"><output id="smooth-tau-v">0.18</output></label>
+    <label class="row"><span>死區</span><input id="deadband" type="range" min="0" max="2" value="0.2" step="0.1"><output id="deadband-v">0.2</output></label>
+    <div class="axis-grid">
+      <label class="toggle"><input id="axis-roll" type="checkbox" checked> Roll</label>
+      <label class="toggle"><input id="axis-pitch" type="checkbox" checked> Pitch</label>
+      <label class="toggle"><input id="axis-yaw" type="checkbox"> Yaw</label>
+    </div>
+    <div class="invert-grid">
+      <button id="inv-roll">Roll +/-</button>
+      <button id="inv-pitch">Pitch +/-</button>
+      <button id="inv-yaw">Yaw +/-</button>
+    </div>
+    <div class="hint" id="secure-hint"></div>
+  </section>
+</main>
+
+<script src="/sysid/kin.js"></script>
+<script>
+const Kin = window.Kin;
+const NEUTRAL_Z = Kin.NEUTRAL_Z;
+const clamp = (v, mn, mx) => Math.max(mn, Math.min(mx, v));
+const byId = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => Number.isFinite(v) ? v.toFixed(d) : '--';
+const wrapDeg = (d) => {
+  let v = Number(d) || 0;
+  while (v > 180) v -= 360;
+  while (v < -180) v += 360;
+  return v;
+};
+
+let ws = null;
+let wsConnected = false;
+let rigOk = false;
+let isHolding = false;
+let followActive = false;
+let sessionActive = false;
+let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
+let basePose = homePose.slice();
+let sensorOn = false;
+let sensorRaw = null;
+let sensorBase = null;
+let cmdPose = basePose.slice();
+let cmdRpy = [0, 0, 0];
+let filtRpy = [0, 0, 0];
+let lastSensorAt = 0;
+let pfPending = null;
+let pfLast = 0;
+let pfTimer = null;
+const signs = { roll: 1, pitch: 1, yaw: 1 };
+
+const settings = {
+  maxTilt: 8,
+  phoneFull: 35,
+  yawMax: 10,
+  tau: 0.18,
+  deadband: 0.2,
+  axisRoll: true,
+  axisPitch: true,
+  axisYaw: false,
+};
+
+function setLog(text, tone = '') {
+  const el = byId('log');
+  el.textContent = text;
+  el.className = `log ${tone}`;
+}
+
+function setPill(id, main, sub, tone) {
+  const el = byId(id);
+  el.className = `pill ${tone || ''}`;
+  el.querySelector('b').textContent = main;
+  el.querySelector('span').textContent = sub;
+}
+
+function updateStateUi() {
+  setPill('ws-pill', 'WS', wsConnected ? 'ON' : 'OFF', wsConnected ? 'ok' : 'bad');
+  setPill('rig-pill', 'RIG', rigOk ? 'OK' : '--', rigOk ? 'ok' : 'bad');
+  setPill('hold-pill', 'HOLD', isHolding ? 'ON' : 'OFF', isHolding ? 'ok' : 'warn');
+  setPill('follow-pill', 'FOLLOW', followActive ? 'ON' : 'OFF', followActive ? 'ok' : 'warn');
+  byId('hold-btn').textContent = isHolding ? 'RELEASE' : 'HOLD HERE';
+  byId('follow-btn').disabled = !wsConnected || !isHolding || sessionActive;
+  byId('hold-btn').disabled = !wsConnected || sessionActive;
+  byId('home-btn').disabled = !wsConnected || sessionActive;
+  byId('stop-btn').disabled = !wsConnected || !followActive;
+}
+
+function sendCmd(cmd) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    setLog('WebSocket not connected', 'bad');
+    return false;
+  }
+  ws.send(cmd);
+  return true;
+}
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('phone.imu.settings') || '{}');
+    Object.assign(settings, saved || {});
+    Object.assign(signs, saved?.signs || {});
+  } catch {}
+  byId('max-tilt').value = settings.maxTilt;
+  byId('phone-full').value = settings.phoneFull;
+  byId('yaw-max').value = settings.yawMax;
+  byId('smooth-tau').value = settings.tau;
+  byId('deadband').value = settings.deadband;
+  byId('axis-roll').checked = !!settings.axisRoll;
+  byId('axis-pitch').checked = !!settings.axisPitch;
+  byId('axis-yaw').checked = !!settings.axisYaw;
+  syncControlLabels();
+}
+
+function saveSettings() {
+  const d = {
+    maxTilt: settings.maxTilt,
+    phoneFull: settings.phoneFull,
+    yawMax: settings.yawMax,
+    tau: settings.tau,
+    deadband: settings.deadband,
+    axisRoll: settings.axisRoll,
+    axisPitch: settings.axisPitch,
+    axisYaw: settings.axisYaw,
+    signs,
+  };
+  try { localStorage.setItem('phone.imu.settings', JSON.stringify(d)); } catch {}
+}
+
+function syncControlLabels() {
+  byId('max-tilt-v').textContent = Number(settings.maxTilt).toFixed(1);
+  byId('phone-full-v').textContent = Number(settings.phoneFull).toFixed(0);
+  byId('yaw-max-v').textContent = Number(settings.yawMax).toFixed(0);
+  byId('smooth-tau-v').textContent = Number(settings.tau).toFixed(2);
+  byId('deadband-v').textContent = Number(settings.deadband).toFixed(1);
+  byId('inv-roll').textContent = `Roll ${signs.roll > 0 ? '+' : '-'}`;
+  byId('inv-pitch').textContent = `Pitch ${signs.pitch > 0 ? '+' : '-'}`;
+  byId('inv-yaw').textContent = `Yaw ${signs.yaw > 0 ? '+' : '-'}`;
+}
+
+function bindSettings() {
+  [
+    ['max-tilt', 'maxTilt', Number],
+    ['phone-full', 'phoneFull', Number],
+    ['yaw-max', 'yawMax', Number],
+    ['smooth-tau', 'tau', Number],
+    ['deadband', 'deadband', Number],
+  ].forEach(([id, key, cast]) => {
+    byId(id).addEventListener('input', () => {
+      settings[key] = cast(byId(id).value);
+      syncControlLabels();
+      saveSettings();
+    });
+  });
+  [
+    ['axis-roll', 'axisRoll'],
+    ['axis-pitch', 'axisPitch'],
+    ['axis-yaw', 'axisYaw'],
+  ].forEach(([id, key]) => {
+    byId(id).addEventListener('change', () => {
+      settings[key] = byId(id).checked;
+      saveSettings();
+      computePose(true);
+    });
+  });
+  [
+    ['inv-roll', 'roll'],
+    ['inv-pitch', 'pitch'],
+    ['inv-yaw', 'yaw'],
+  ].forEach(([id, key]) => {
+    byId(id).addEventListener('click', () => {
+      signs[key] *= -1;
+      syncControlLabels();
+      saveSettings();
+      computePose(true);
+    });
+  });
+}
+
+function screenAdjusted(beta, gamma) {
+  const screenAngle = Number(screen.orientation?.angle ?? window.orientation ?? 0);
+  if (screenAngle === 90) return { roll: beta, pitch: -gamma };
+  if (screenAngle === -90 || screenAngle === 270) return { roll: -beta, pitch: gamma };
+  if (Math.abs(screenAngle) === 180) return { roll: -gamma, pitch: -beta };
+  return { roll: gamma, pitch: beta };
+}
+
+function orientationRaw(e) {
+  const beta = Number(e.beta);
+  const gamma = Number(e.gamma);
+  if (!Number.isFinite(beta) || !Number.isFinite(gamma)) return null;
+  const t = screenAdjusted(beta, gamma);
+  return {
+    roll: t.roll,
+    pitch: t.pitch,
+    yaw: Number.isFinite(Number(e.alpha)) ? Number(e.alpha) : 0,
+  };
+}
+
+async function enableSensor() {
+  if (!window.isSecureContext) {
+    setLog('手機感測器需要 HTTPS；請用 npm run start:phone 後開 https://電腦IP:3443/phone.html', 'bad');
+    return false;
+  }
+  if (!window.DeviceOrientationEvent) {
+    setLog('這個瀏覽器沒有 DeviceOrientationEvent', 'bad');
+    return false;
+  }
+  try {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== 'granted') {
+        setLog(`sensor permission: ${perm}`, 'bad');
+        return false;
+      }
+    }
+    window.addEventListener('deviceorientation', onOrientation, true);
+    sensorOn = true;
+    byId('sensor-btn').textContent = '感測 ON';
+    setLog('sensor ready，先校準再 FOLLOW', 'good');
+    return true;
+  } catch (err) {
+    setLog(`sensor error: ${err.message}`, 'bad');
+    return false;
+  }
+}
+
+async function waitForSensorSample(timeoutMs = 1200) {
+  if (sensorRaw) return true;
+  const start = performance.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (sensorRaw) resolve(true);
+      else if (performance.now() - start >= timeoutMs) resolve(false);
+      else setTimeout(tick, 40);
+    };
+    tick();
+  });
+}
+
+function calibrate() {
+  if (!sensorRaw) {
+    setLog('還沒有姿態資料；先按感測器並輕微移動手機', 'warn');
+    return false;
+  }
+  sensorBase = { ...sensorRaw };
+  filtRpy = [0, 0, 0];
+  cmdRpy = [0, 0, 0];
+  computePose(true);
+  setLog('calibrated: current phone pose = zero offset', 'good');
+  return true;
+}
+
+function shaped(v, maxOut) {
+  const db = Number(settings.deadband) || 0;
+  const a = Math.abs(v);
+  if (a <= db) return 0;
+  const live = Math.max(1, Number(settings.phoneFull) || 35) - db;
+  return clamp(Math.sign(v) * ((a - db) / live) * maxOut, -maxOut, maxOut);
+}
+
+function targetRpy() {
+  if (!sensorRaw || !sensorBase) return [0, 0, 0];
+  const roll = settings.axisRoll ? signs.roll * shaped(sensorRaw.roll - sensorBase.roll, Number(settings.maxTilt) || 8) : 0;
+  const pitch = settings.axisPitch ? signs.pitch * shaped(sensorRaw.pitch - sensorBase.pitch, Number(settings.maxTilt) || 8) : 0;
+  const yaw = settings.axisYaw ? signs.yaw * shaped(wrapDeg(sensorRaw.yaw - sensorBase.yaw), Number(settings.yawMax) || 0) : 0;
+  return [roll, pitch, yaw];
+}
+
+function computePose(force = false) {
+  const now = performance.now();
+  const dt = lastSensorAt ? Math.max(0.001, (now - lastSensorAt) / 1000) : 0.016;
+  lastSensorAt = now;
+  const tgt = targetRpy();
+  const tau = Math.max(0.02, Number(settings.tau) || 0.18);
+  const a = force ? 1 : clamp(dt / (tau + dt), 0, 1);
+  for (let i = 0; i < 3; i++) filtRpy[i] += (tgt[i] - filtRpy[i]) * a;
+  cmdRpy = filtRpy.slice();
+  cmdPose = basePose.slice();
+  cmdPose[3] += cmdRpy[0];
+  cmdPose[4] += cmdRpy[1];
+  cmdPose[5] += cmdRpy[2];
+  renderCommand();
+  return Kin.ik(cmdPose).valid;
+}
+
+function renderCommand() {
+  const maxTilt = Math.max(1, Number(settings.maxTilt) || 8);
+  const maxYaw = Math.max(1, Number(settings.yawMax) || 1);
+  const valid = Kin.ik(cmdPose).valid;
+  byId('dot').classList.toggle('bad', !valid);
+  const x = clamp(cmdRpy[0] / maxTilt, -1, 1) * 38;
+  const y = clamp(cmdRpy[1] / maxTilt, -1, 1) * 38;
+  byId('dot').style.transform = `translate(calc(-50% + ${x}%), calc(-50% + ${y}%))`;
+  [
+    ['roll', cmdRpy[0], maxTilt],
+    ['pitch', cmdRpy[1], maxTilt],
+    ['yaw', cmdRpy[2], maxYaw],
+  ].forEach(([name, value, limit]) => {
+    byId(`v-${name}`).textContent = fmt(value, 1);
+    const bar = byId(`bar-${name}`);
+    const pct = clamp(value / limit, -1, 1) * 50;
+    bar.style.left = pct < 0 ? `${50 + pct}%` : '50%';
+    bar.style.width = `${Math.abs(pct)}%`;
+    bar.style.background = valid ? 'rgba(61,99,136,.55)' : 'rgba(183,59,54,.55)';
+  });
+}
+
+function flushPF() {
+  pfTimer = null;
+  if (!pfPending || !followActive) {
+    pfPending = null;
+    return;
+  }
+  pfLast = performance.now();
+  sendCmd(`PF ${pfPending.map((x) => x.toFixed(3)).join(' ')}`);
+  pfPending = null;
+}
+
+function streamPF(pose) {
+  pfPending = pose.slice();
+  const dt = performance.now() - pfLast;
+  if (dt >= 33) flushPF();
+  else if (!pfTimer) pfTimer = setTimeout(flushPF, 33 - dt);
+}
+
+function onOrientation(e) {
+  const raw = orientationRaw(e);
+  if (!raw) return;
+  sensorRaw = raw;
+  if (!sensorBase) sensorBase = { ...sensorRaw };
+  const ok = computePose(false);
+  if (followActive && ok && !sessionActive) streamPF(cmdPose);
+  else if (followActive && !ok) setLog('IK invalid: holding last valid target', 'bad');
+}
+
+async function startFollow() {
+  if (sessionActive) {
+    setLog('session running: phone control locked', 'warn');
+    return;
+  }
+  if (!isHolding) {
+    setLog('先 HOLD HERE，再進 FOLLOW', 'warn');
+    return;
+  }
+  if (!sensorOn) {
+    const ok = await enableSensor();
+    if (!ok) return;
+  }
+  if (!sensorBase) calibrate();
+  if (!sensorBase) {
+    const gotSample = await waitForSensorSample();
+    if (!gotSample || !calibrate()) {
+      setLog('還沒有手機姿態資料；請拿起手機微動一下再 FOLLOW', 'warn');
+      return;
+    }
+  }
+  sendCmd('FOLLOW 1');
+  setLog('waiting for FOLLOW ack...', 'warn');
+}
+
+function stopFollow(send = true) {
+  if (send && followActive) sendCmd('FOLLOW 0');
+  followActive = false;
+  pfPending = null;
+  updateStateUi();
+}
+
+function goHome() {
+  if (!Kin.ik(homePose).valid) {
+    setLog('HOME pose is outside workspace', 'bad');
+    return;
+  }
+  if (followActive) {
+    basePose = homePose.slice();
+    calibrate();
+    streamPF(basePose);
+    setLog('FOLLOW base moved to HOME', 'good');
+    return;
+  }
+  if (!isHolding) {
+    setLog('先 HOLD HERE，再送 HOME', 'warn');
+    return;
+  }
+  sendCmd(`P ${homePose.map((x) => x.toFixed(3)).join(' ')} 1500`);
+  setLog('sent HOME P 1500ms', 'good');
+}
+
+function toggleHold() {
+  if (isHolding) {
+    stopFollow();
+    sendCmd('D');
+  } else {
+    sendCmd('H');
+  }
+}
+
+function onFollowOn(pose) {
+  if (Array.isArray(pose) && pose.length === 6 && pose.every(Number.isFinite)) basePose = pose.map(Number);
+  followActive = true;
+  calibrate();
+  updateStateUi();
+  setLog('FOLLOW on: phone tilt is now live', 'good');
+}
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen = () => {
+    wsConnected = true;
+    updateStateUi();
+    setLog('connected', 'good');
+  };
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.evt === 'session') {
+        sessionActive = !!data.active;
+        if (sessionActive) stopFollow(false);
+        updateStateUi();
+        return;
+      }
+      if (data.evt === 'cmd_dropped') {
+        setLog(`cmd dropped: ${data.reason || data.c}`, 'bad');
+        return;
+      }
+      if (data.ok !== undefined) rigOk = Number(data.ok) === 6;
+      if (data.pos !== undefined) isHolding = !!(data.pos && data.hold);
+      if (data.fl !== undefined) followActive = !!data.fl;
+      if (Array.isArray(data.a) && data.a.length === 6 && !followActive) {
+        const fk = Kin.solveFK(data.a.map(Number));
+        if (fk?.converged && Array.isArray(fk.pose)) basePose = fk.pose.map(Number);
+      }
+      if (data.status === 'follow on' && Array.isArray(data.pose)) onFollowOn(data.pose);
+      if (data.status === 'follow off') followActive = false;
+      if (data.error) setLog(data.error, 'bad');
+      updateStateUi();
+    } catch {}
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    rigOk = false;
+    followActive = false;
+    updateStateUi();
+    setLog('disconnected; reconnecting...', 'warn');
+    setTimeout(connectWS, 1000);
+  };
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/platform-config');
+    if (!r.ok) return;
+    const d = await r.json();
+    const p = Array.isArray(d.homePose) ? d.homePose : d.pose;
+    if (Array.isArray(p) && p.length === 6 && p.every(Number.isFinite)) {
+      homePose = p.map(Number);
+      basePose = homePose.slice();
+      cmdPose = basePose.slice();
+    }
+  } catch {}
+}
+
+function boot() {
+  byId('secure-hint').textContent = window.isSecureContext
+    ? 'secure context: sensor permission available'
+    : 'not secure: phone sensors will be blocked until served over HTTPS';
+  loadSettings();
+  bindSettings();
+  byId('sensor-btn').addEventListener('click', enableSensor);
+  byId('cal-btn').addEventListener('click', calibrate);
+  byId('hold-btn').addEventListener('click', toggleHold);
+  byId('follow-btn').addEventListener('click', startFollow);
+  byId('home-btn').addEventListener('click', goHome);
+  byId('stop-btn').addEventListener('click', stopFollow);
+  renderCommand();
+  updateStateUi();
+  loadConfig();
+  connectWS();
+}
+
+boot();
+</script>
+</body>
+</html>

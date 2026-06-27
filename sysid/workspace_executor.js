@@ -132,7 +132,7 @@ function runCondition(opts = {}, config = {}) {
   return Object.fromEntries(Object.entries(condition).filter(([, v]) => Number.isFinite(v)));
 }
 
-function describePlan(blocks, homePose, landingPose, lib, core, condition = null, executionMode = null) {
+function describePlan(blocks, homePose, landingPose, lib, core, condition = null, executionMode = null, blockModes = null) {
   const lines = [];
   lines.push('Workspace plan');
   lines.push(`  blocks: ${blocks.length}`);
@@ -141,12 +141,22 @@ function describePlan(blocks, homePose, landingPose, lib, core, condition = null
   lines.push(`  landing: [${landingPose.map((x) => x.toFixed(1)).join(', ')}]`);
   blocks.forEach((b, i) => {
     const def = core.motionById(lib.MOTIONS, b.id);
-    lines.push(`  ${i + 1}. ${def.label} x${b.loops} · ${lib.formatMotionParams(def, b.params)}`);
+    const mode = Array.isArray(blockModes) ? ` · ${blockModes[i] || 'hold'}` : '';
+    lines.push(`  ${i + 1}. ${def.label} x${b.loops} · ${lib.formatMotionParams(def, b.params)}${mode}`);
   });
   if (condition) {
     lines.push(`  condition: zBias=${condition.zBias || 0}mm · VF ${condition.vmaxT}/${condition.vmaxR} · warmup ${condition.warmupMs || 0}ms · takeoff ${condition.homeMs || 0}ms · follow settle ${condition.followSettleMs || 0}ms · land ${condition.landMs || 0}ms`);
   }
-  if (executionMode) lines.push(`  execution: ${executionMode === 'hold' ? 'HOLD-only (no FOLLOW/PF)' : 'FOLLOW/PF streaming'}`);
+  if (executionMode) {
+    const label = executionMode === 'hold'
+      ? 'HOLD/P only (no FOLLOW/PF)'
+      : executionMode === 'p'
+        ? 'P waypoint blocks (no FOLLOW/PF)'
+      : executionMode === 'follow'
+        ? 'FOLLOW/PF streaming'
+        : 'hybrid P waypoints + FOLLOW/PF streaming';
+    lines.push(`  execution: ${label}`);
+  }
   return lines;
 }
 
@@ -175,8 +185,41 @@ function blockNeedsStreaming(block, homePose, lib, core) {
   return false;
 }
 
-function planNeedsStreaming(plan) {
-  return plan.blocks.some((block) => blockNeedsStreaming(block, plan.homePose, plan.lib, plan.core));
+function blockPKeyframes(block, lib, core) {
+  const def = core.motionById(lib.MOTIONS, block.id);
+  if (!def || typeof def.pKeyframes !== 'function') return null;
+  const params = lib.motionParams(def, block.params);
+  const frames = def.pKeyframes(params);
+  if (!Array.isArray(frames) || frames.length < 2) return null;
+  const per = lib.motionPeriod(def, params);
+  const normalized = frames.map((frame) => ({
+    t: Number(frame?.t),
+    pose: Array.isArray(frame?.pose) ? frame.pose.map(Number) : null,
+  }));
+  if (!normalized.every((frame) => Number.isFinite(frame.t) && frame.pose?.length === 6 && frame.pose.every(Number.isFinite))) return null;
+  if (normalized[0].t !== 0 || Math.abs(normalized[normalized.length - 1].t - per) > 1e-6) return null;
+  for (let i = 1; i < normalized.length; i++) {
+    if (normalized[i].t <= normalized[i - 1].t) return null;
+  }
+  return normalized;
+}
+
+function blockExecutionMode(block, homePose, lib, core) {
+  const def = core.motionById(lib.MOTIONS, block.id);
+  if (!def) throw new Error(`unknown motion: ${block.id}`);
+  if (blockPKeyframes(block, lib, core)) return 'p';
+  return blockNeedsStreaming(block, homePose, lib, core) ? 'follow' : 'hold';
+}
+
+function planExecutionMode(blockModes) {
+  if (!blockModes.some((mode) => mode !== 'hold')) return 'hold';
+  if (!blockModes.some((mode) => mode !== 'p')) return 'p';
+  if (!blockModes.some((mode) => mode !== 'follow')) return 'follow';
+  return 'hybrid';
+}
+
+function addPose(basePose, deltaPose) {
+  return basePose.map((v, i) => Number(v || 0) + Number(deltaPose[i] || 0));
 }
 
 function assertLivePacket(d, label) {
@@ -248,6 +291,7 @@ async function buildWorkspacePlan(config, opts = {}) {
   const condition = runCondition({ ...opts, normalizeTiming: core.normalizeWorkspaceTiming }, mergedConfig);
   const program = programMeta(mergedConfig, blocks, lib, core, opts);
   const audit = core.closedLoopAudit(blocks, homePose, Kin, lib.MOTIONS, lib);
+  const blockModes = blocks.map((block) => blockExecutionMode(block, homePose, lib, core));
   const result = {
     lib,
     core,
@@ -258,9 +302,10 @@ async function buildWorkspacePlan(config, opts = {}) {
     landingPose,
     condition,
     audit,
+    blockModes,
   };
-  result.executionMode = planNeedsStreaming(result) ? 'follow' : 'hold';
-  result.description = describePlan(blocks, homePose, landingPose, lib, core, condition, result.executionMode);
+  result.executionMode = planExecutionMode(blockModes);
+  result.description = describePlan(blocks, homePose, landingPose, lib, core, condition, result.executionMode, blockModes);
   return result;
 }
 
@@ -269,8 +314,7 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
   const plan = await buildWorkspacePlan(config, opts);
   if (!plan.audit.ok) throw new Error(`closed-loop audit failed: ${plan.audit.issues.join('; ')}`);
   preflightSnapshot(deps);
-  const needsStreaming = plan.executionMode !== 'hold';
-  const sessionCondition = { ...plan.condition, executionMode: needsStreaming ? 'follow' : 'hold' };
+  const sessionCondition = { ...plan.condition, executionMode: plan.executionMode, blockModes: plan.blockModes };
 
   const prefix = plan.program ? plan.program.id : slug(plan.config?.uiState?.workspace?.currentProgramId || 'workspace');
   const suffix = plan.condition.zBias ? `_zbias${String(plan.condition.zBias).replace('-', 'm').replace('.', 'p')}` : '';
@@ -278,8 +322,33 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
   let token = null;
   let recording = false;
   let runId = null;
+  let followOn = false;
 
   const send = (cmd) => deps.send(cmd, token);
+  const ensureFollowOn = async () => {
+    if (followOn) return;
+    send('FOLLOW 1');
+    await waitFor(deps, 'after FOLLOW on', (d) => (d.pos === 1 && d.fl === 1 ? true : `pos=${d.pos}, fl=${d.fl}`), 3500, signal);
+    followOn = true;
+  };
+  const ensureFollowOff = async () => {
+    if (!followOn) return;
+    send('FOLLOW 0');
+    await waitFor(deps, 'after FOLLOW off', (d) => (d.pos === 1 && d.fl === 0 ? true : `pos=${d.pos}, fl=${d.fl}`), 2500, signal);
+    followOn = false;
+  };
+  const runPKeyframeBlock = async (block, modeLabel) => {
+    const frames = blockPKeyframes(block, plan.lib, plan.core);
+    if (!frames) throw new Error(`${modeLabel}: missing P keyframes`);
+    for (let loop = 0; loop < block.loops; loop++) {
+      for (let j = 1; j < frames.length; j++) {
+        healthy(deps, modeLabel);
+        const ms = Math.max(1, Math.round((frames[j].t - frames[j - 1].t) * 1000));
+        send(`P ${poseLine(commandPose(addPose(plan.homePose, frames[j].pose), plan.condition))} ${ms}`);
+        await sleep(ms, signal);
+      }
+    }
+  };
   try {
     const started = deps.startSession({ label, phase: 'takeoff', program: plan.program, condition: sessionCondition });
     token = started.token;
@@ -302,10 +371,9 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
     await sleep(plan.condition.homeMs + 400, signal);
     await waitFor(deps, 'after HOME settle', (d) => (d.pos === 1 ? true : `pos=${d.pos}`), 1800, signal);
 
-    if (needsStreaming) {
-      send('FOLLOW 1');
-      await waitFor(deps, 'after FOLLOW on', (d) => (d.pos === 1 && d.fl === 1 ? true : `pos=${d.pos}, fl=${d.fl}`), 3500, signal);
-      if (plan.condition.followSettleMs > 0) {
+    if (plan.condition.followSettleMs > 0) {
+      if (plan.executionMode === 'follow') {
+        await ensureFollowOn();
         deps.phase(token, 'follow settle');
         const settleT0 = Date.now();
         while (Date.now() - settleT0 < plan.condition.followSettleMs) {
@@ -313,10 +381,10 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
           send(`PF ${poseLine(commandPose(plan.homePose, plan.condition))}`);
           await sleep(1000 / plan.lib.MOTION_HZ, signal);
         }
+      } else {
+        deps.phase(token, 'hold settle');
+        await sleep(plan.condition.followSettleMs, signal);
       }
-    } else if (plan.condition.followSettleMs > 0) {
-      deps.phase(token, 'hold settle');
-      await sleep(plan.condition.followSettleMs, signal);
     }
 
     deps.phase(token, 'recording');
@@ -325,37 +393,47 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
       if (!def) throw new Error(`unknown motion: ${block.id}`);
       const totalMs = blockDurationMs(block, plan.lib, plan.core);
       const t0 = Date.now();
+      const mode = plan.blockModes[i] || 'hold';
       deps.phase(token, `block ${i + 1}/${plan.blocks.length}`);
-      while (Date.now() - t0 <= totalMs) {
-        healthy(deps, 'motion block');
-        if (needsStreaming) {
+      if (mode === 'p') {
+        await ensureFollowOff();
+        await runPKeyframeBlock(block, 'P keyframe block');
+      } else if (mode === 'follow') {
+        await ensureFollowOn();
+        while (Date.now() - t0 <= totalMs) {
+          healthy(deps, 'motion block');
           const t = (Date.now() - t0) / 1000;
           const sample = plan.lib.motionPoseAt(def, block.params, t, plan.homePose, Kin);
           if (sample.ok) send(`PF ${poseLine(commandPose(sample.pose, plan.condition))}`);
           await sleep(1000 / plan.lib.MOTION_HZ, signal);
-        } else {
-          await sleep(Math.min(80, totalMs - (Date.now() - t0)), signal);
+        }
+      } else {
+        await ensureFollowOff();
+        while (Date.now() - t0 <= totalMs) {
+          healthy(deps, 'hold block');
+          await sleep(Math.min(80, Math.max(1, totalMs - (Date.now() - t0))), signal);
         }
       }
     }
 
     deps.phase(token, 'close loop');
-    if (needsStreaming) {
+    if (followOn) {
       const closeT0 = Date.now();
       while (Date.now() - closeT0 < plan.condition.closeMs) {
         healthy(deps, 'close loop');
         send(`PF ${poseLine(commandPose(plan.homePose, plan.condition))}`);
         await sleep(1000 / plan.lib.MOTION_HZ, signal);
       }
+      await ensureFollowOff();
+    } else if (plan.executionMode === 'hybrid' || plan.executionMode === 'p') {
+      send(`P ${poseLine(commandPose(plan.homePose, plan.condition))} ${plan.condition.closeMs}`);
+      await sleep(plan.condition.closeMs, signal);
     } else {
       await sleep(plan.condition.closeMs, signal);
     }
 
     deps.phase(token, 'landing');
-    if (needsStreaming) {
-      send('FOLLOW 0');
-      await waitFor(deps, 'after FOLLOW off', (d) => (d.pos === 1 && d.fl === 0 ? true : `pos=${d.pos}, fl=${d.fl}`), 2500, signal);
-    }
+    await ensureFollowOff();
     send(`P ${poseLine(plan.landingPose)} ${plan.condition.landMs}`);
     await sleep(plan.condition.landMs + 300, signal);
     await waitFor(deps, 'after landing settle', (d) => (d.pos === 1 && d.fl === 0 ? true : `pos=${d.pos}, fl=${d.fl}`), 1800, signal);
@@ -371,9 +449,10 @@ async function runWorkspaceSession({ config, opts = {}, deps, signal = null }) {
     return { label, runId, program: plan.program, condition: sessionCondition };
   } catch (err) {
     if (token) {
-      if (needsStreaming) {
+      if (followOn) {
         try { send(`PF ${poseLine(commandPose(plan.homePose, plan.condition))}`); } catch {}
         try { send('FOLLOW 0'); } catch {}
+        followOn = false;
         await sleep(150).catch(() => {});
       }
       try { send(`P ${poseLine(plan.landingPose)} ${plan.condition.landMs}`); } catch {}

@@ -79,6 +79,91 @@ A completed runner should produce:
 - `sysid/data/plots/*_plane6.svg`: six FK pose curves.
 - `*.bundle.json`: paths to the above.
 
+## Scope CSV Quick-Look
+
+Dashboard scope CSV exports are useful for ad-hoc visual inspection outside the
+JSONL recorder flow. Generate preserved motor and 6DoF quick-look reports with:
+
+```bash
+npm run scope:report -- /path/to/scope.csv
+```
+
+The report writes `sysid/data/scope_reports/*_motor_scope.png`,
+`*_pose_scope.png`, and `*_scope.summary.json`. It is for waveform inspection of
+exported scope windows:
+
+- motor view: six actual motor angles, six motor targets, hold error, motor
+  step spikes, and kinetic.
+- 6DoF view: actual Z/yaw versus target, cross-axis motion, pose error, and
+  kinetic.
+
+The default is intentionally broad, but the plotting is configurable:
+
+```bash
+# Only generate the motor figure, and only show actual/error/step panels.
+npm run scope:report -- /path/to/scope.csv \
+  --figures motor \
+  --motor-panels actual,error,step
+
+# Only inspect selected motors.
+npm run scope:report -- /path/to/scope.csv \
+  --figures motor \
+  --motors 2,4,6
+
+# Build a custom mixed figure and place panels in two columns.
+npm run scope:report -- /path/to/scope.csv \
+  --figures custom \
+  --panels pose.z-yaw,pose.cross,motor.error \
+  --motors 2,4,6 \
+  --cols 2 \
+  --figsize 14,8
+
+# Focus pose error on selected axes.
+npm run scope:report -- /path/to/scope.csv \
+  --figures pose \
+  --pose-panels z-yaw,error,kinetic \
+  --pose-axes z,yaw
+```
+
+Available panel IDs for `--panels` are:
+
+`motor.actual`, `motor.target`, `motor.error`, `motor.step`,
+`motor.kinetic`, `pose.z-yaw`, `pose.cross`, `pose.error`,
+`pose.kinetic`.
+
+Useful options:
+
+- `--figures motor,pose` selects which preset figures to write; add or use
+  `custom` with `--panels`.
+- `--motor-panels actual,target,error,step,kinetic` controls the motor preset.
+- `--pose-panels z-yaw,cross,error,kinetic` controls the 6DoF preset.
+- `--motors all|1,3,6` controls which motor traces appear.
+- `--pose-axes x,y,z,roll,pitch,yaw` controls which pose error traces appear.
+- `--cols N` and `--figsize W,H` control layout.
+- `--hide-target-span` removes the red target-window markers.
+
+It does not replace full lifecycle JSONL evaluation for formal run comparison.
+
+## Manual Real-Time Phone IMU
+
+Phone tilt control is documented in `docs/phone-gyro-control.md`.
+
+It is part of the manual real-time path, not the Workspace/program path:
+
+- `P`: waypoint / settle commands.
+- `PF`: immediate operator follow commands.
+- Phone IMU page: calibration, axis mapping, deadband, smoothing, IK precheck,
+  and 30 Hz `PF` coalescing.
+- Firmware `FOLLOW` / `VF`: hard real-time speed limiting.
+
+Start the HTTPS sensor-capable dashboard with:
+
+```bash
+npm run start:phone
+```
+
+Then open `https://<computer-lan-ip>:3443/phone.html` from the phone.
+
 ## Design Rule
 
 If a control concept appears in both UI and CLI, extract or route it through a
@@ -93,6 +178,7 @@ Workspace live execution is owned by the server-side runner exposed through
 
 The browser Workspace page is the editor/preview/observer. The CLI
 `npm run workspace:session` is the dry-run validator and live request client.
-Neither should stream its own live `PF` loop during normal operation; the only
-normal live `PF` loop is inside `sysid/workspace_executor.js`, under a session
-token owned by `server.js`.
+Neither should stream its own live `PF` loop during normal operation. Workspace
+execution is hybrid: lifecycle moves and waypoint-like blocks use timed `P`;
+only genuinely continuous blocks use `FOLLOW/PF`, under a session token owned by
+`server.js`.

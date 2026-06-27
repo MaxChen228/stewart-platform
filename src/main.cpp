@@ -25,7 +25,7 @@ int64_t latestRaw[NUM_MOTORS];
 uint32_t latestRawAtMs[NUM_MOTORS] = {0};
 volatile bool autoReturnMode = false;
 volatile bool canRxPaused = false;
-uint16_t arPeriodMs = 10;             // 馬達主動上報週期，可調（AR 指令）；預設 100Hz（10ms）對齊控制迴圈
+uint16_t arPeriodMs = 10;             // 馬達主動上報週期；SERVO42D 0x01 timer 固定是整數 ms
 constexpr uint32_t AR_FRESH_MS = 120; // 啟動/重啟 auto-return 時用來判斷「近期收到過」的軟門檻
 constexpr uint32_t AR_WARN_MS = 1000; // 長時間沒新 frame 才警告；短缺包沿用 last-known-good，不停機
 bool autoReturnWarnLatched = false;
@@ -38,8 +38,9 @@ float enableAngle[NUM_MOTORS] = {0};
 
 uint16_t posSpeed = 120;
 uint8_t  posAcc   = 100;
-constexpr float HOLD_PROFILE_MAX_VEL_DPS = 30.0f;
+uint16_t workingCurrentMa = 1600;
 constexpr uint32_t HOLD_PROFILE_MAX_MS = 20000;
+float holdProfileMaxVelDps = 0.0f;    // 0=respect requested P duration; >0 caps min-jerk target peak velocity
 
 // ===== 匯流排佔用統計（每遙測窗計數，print 後歸零）：實測幀數，client 換算 500kbps 佔用% =====
 uint16_t busTxF5  = 0;   // F5 指令幀（DLC 8）
@@ -92,6 +93,7 @@ struct TelemetrySnapshot {
     uint8_t profile;
     TelemetryExtra extra;
     float hold[NUM_MOTORS], herr[NUM_MOTORS], hmax;
+    float holdDampGain, holdDampMax, holdDampCorrMax;
     float fkPose[6], poseErr[6], motorTgt[NUM_MOTORS];
     int fkIterations;
     float jointGain;
@@ -118,6 +120,18 @@ bool holdMode = false;
 float holdAngles[NUM_MOTORS] = {0};
 float maxHoldErr = 0;
 
+// Runtime output damping for HOLD/min-jerk/FOLLOW targets.
+// OD <gain_sec> [max_deg] [deadband_dps]; OD 0 disables.
+float holdDampGainSec = 0.0f;
+float holdDampMaxDeg = 1.5f;
+float holdDampDeadbandDps = 1.0f;
+constexpr float HOLD_DAMP_TAU = 0.06f;
+float holdDampPrevAngle[NUM_MOTORS] = {0};
+float holdDampVel[NUM_MOTORS] = {0};
+float holdDampLastCorr[NUM_MOTORS] = {0};
+float holdDampCorrMaxWin = 0.0f;
+bool holdDampInit = false;
+
 // 擾動注入器（U/W 指令）：對 F5 目標短暫加偏移持續 ms 後歸零。疊加在 F5 匯流口 → 全控制模式通用
 // （HOLD 保持中或運動中皆可注入）。U=單軸、W=六軸協同。
 float    bumpDeg[NUM_MOTORS] = {0};   // 六軸擾動偏移（enc 慣例度）
@@ -142,10 +156,45 @@ static uint32_t constrainedHoldMoveMs(float requestedMs, const float startAngles
         float d = fabsf(targetAngles[i] - startAngles[i]);
         if (d > maxDelta) maxDelta = d;
     }
-    // Minimum-jerk peak velocity is 1.875 * distance / duration.
-    uint32_t byVel = (uint32_t)ceilf(1000.0f * 1.875f * maxDelta / HOLD_PROFILE_MAX_VEL_DPS);
     uint32_t requested = (uint32_t)constrain((int)requestedMs, 1, (int)HOLD_PROFILE_MAX_MS);
+    if (holdProfileMaxVelDps <= 0.0f) return requested;
+    float maxVel = fmaxf(1.0f, holdProfileMaxVelDps);
+    uint32_t byVel = (uint32_t)ceilf(1000.0f * 1.875f * maxDelta / maxVel);
     return constrain((int)max(requested, byVel), 1, (int)HOLD_PROFILE_MAX_MS);
+}
+
+static void resetHoldDampingState() {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        holdDampPrevAngle[i] = enc.angles[i];
+        holdDampVel[i] = 0.0f;
+        holdDampLastCorr[i] = 0.0f;
+    }
+    holdDampCorrMaxWin = 0.0f;
+    holdDampInit = true;
+}
+
+static void applyHoldOutputDamping(float targets[NUM_MOTORS], float dt) {
+    if (holdDampGainSec <= 0.0f || holdDampMaxDeg <= 0.0f || dt <= 0.0f) {
+        for (int i = 0; i < NUM_MOTORS; i++) holdDampLastCorr[i] = 0.0f;
+        holdDampInit = false;
+        return;
+    }
+    if (!holdDampInit) resetHoldDampingState();
+
+    float alpha = constrain(dt / (HOLD_DAMP_TAU + dt), 0.0f, 1.0f);
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        float rawVel = (enc.angles[i] - holdDampPrevAngle[i]) / dt;
+        rawVel = constrain(rawVel, -720.0f, 720.0f);
+        holdDampVel[i] += alpha * (rawVel - holdDampVel[i]);
+        holdDampPrevAngle[i] = enc.angles[i];
+
+        float v = fabsf(holdDampVel[i]) < holdDampDeadbandDps ? 0.0f : holdDampVel[i];
+        float corr = constrain(-holdDampGainSec * v, -holdDampMaxDeg, holdDampMaxDeg);
+        targets[i] += corr;
+        holdDampLastCorr[i] = corr;
+        float ac = fabsf(corr);
+        if (ac > holdDampCorrMaxWin) holdDampCorrMaxWin = ac;
+    }
 }
 
 // 跟隨模式（FOLLOW/PF）：HOLD 下接 host 串流的 pose 目標，以速度受限濾波器平滑追過去。
@@ -182,15 +231,28 @@ static void followStep(float dt) {
 }
 
 static void controlTask(void*) {
-    TickType_t lastWake = xTaskGetTickCount();
+    uint32_t nextUs = micros();
     for (;;) {
         controlTick();
-        uint32_t periodMs = (uint32_t)loopPeriodUs / 1000;
-        if (periodMs < 1) periodMs = 1;
-        TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-        TickType_t now = xTaskGetTickCount();
-        if ((now - lastWake) > periodTicks) lastWake = now;
-        vTaskDelayUntil(&lastWake, periodTicks);
+        uint32_t periodUs = loopPeriodUs;
+        if (periodUs < 1000) periodUs = 1000;
+        nextUs += periodUs;
+
+        uint32_t nowUs = micros();
+        int32_t waitUs = (int32_t)(nextUs - nowUs);
+        if (waitUs < 0 || waitUs > (int32_t)periodUs) {
+            nextUs = nowUs + periodUs;
+            waitUs = periodUs;
+        }
+
+        while (waitUs > 0) {
+            if (waitUs > 2000) {
+                vTaskDelay(pdMS_TO_TICKS((waitUs - 1000) / 1000));
+            } else {
+                delayMicroseconds(waitUs > 100 ? 100 : waitUs);
+            }
+            waitUs = (int32_t)(nextUs - micros());
+        }
     }
 }
 
@@ -298,6 +360,73 @@ static void clearVFOCPidNVS() {
     nvsPidPresent = false;
 }
 
+struct RuntimeTuningNVS {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t currentMa;
+    uint16_t f5Speed;
+    uint8_t f5Acc;
+    uint16_t arMs;
+    uint32_t loopUs;
+    float odGain;
+    float odMaxDeg;
+    float odDeadbandDps;
+};
+
+constexpr uint32_t RUNTIME_TUNE_MAGIC = 0x5254554E; // "RTUN"
+constexpr uint16_t RUNTIME_TUNE_VERSION = 1;
+
+static bool validRuntimeTuning(const RuntimeTuningNVS& cfg) {
+    return cfg.magic == RUNTIME_TUNE_MAGIC &&
+           cfg.version == RUNTIME_TUNE_VERSION &&
+           cfg.currentMa >= 100 && cfg.currentMa <= 3000 &&
+           cfg.f5Speed >= 1 && cfg.f5Speed <= 200 &&
+           cfg.f5Acc >= 1 && cfg.f5Acc <= 255 &&
+           cfg.arMs >= 1 && cfg.arMs <= 100 &&
+           cfg.loopUs >= 1000 && cfg.loopUs <= 100000 &&
+           isfinite(cfg.odGain) && cfg.odGain >= 0.0f && cfg.odGain <= 0.08f &&
+           isfinite(cfg.odMaxDeg) && cfg.odMaxDeg >= 0.0f && cfg.odMaxDeg <= 5.0f &&
+           isfinite(cfg.odDeadbandDps) && cfg.odDeadbandDps >= 0.0f && cfg.odDeadbandDps <= 30.0f;
+}
+
+static bool loadRuntimeTuningFromNVS() {
+    Preferences prefs;
+    RuntimeTuningNVS cfg;
+    prefs.begin("stewart", true);
+    size_t len = prefs.getBytes("runtimeTuneV1", &cfg, sizeof(cfg));
+    prefs.end();
+    if (len != sizeof(cfg) || !validRuntimeTuning(cfg)) return false;
+    workingCurrentMa = cfg.currentMa;
+    posSpeed = cfg.f5Speed;
+    posAcc = cfg.f5Acc;
+    arPeriodMs = cfg.arMs;
+    loopPeriodUs = cfg.loopUs;
+    holdDampGainSec = cfg.odGain;
+    holdDampMaxDeg = cfg.odMaxDeg;
+    holdDampDeadbandDps = cfg.odDeadbandDps;
+    return true;
+}
+
+static bool saveRuntimeTuningToNVS() {
+    RuntimeTuningNVS cfg = {
+        RUNTIME_TUNE_MAGIC,
+        RUNTIME_TUNE_VERSION,
+        workingCurrentMa,
+        posSpeed,
+        posAcc,
+        arPeriodMs,
+        loopPeriodUs,
+        holdDampGainSec,
+        holdDampMaxDeg,
+        holdDampDeadbandDps,
+    };
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    size_t written = prefs.putBytes("runtimeTuneV1", &cfg, sizeof(cfg));
+    prefs.end();
+    return written == sizeof(cfg);
+}
+
 static bool applyVFOCPid(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int okMask[NUM_MOTORS], int& okCnt) {
     okCnt = 0;
     for (int i = 0; i < NUM_MOTORS; i++) {
@@ -311,6 +440,19 @@ static bool applyVFOCPid(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int
         if (okMask[i]) okCnt++;
     }
     curKp = kp; curKi = ki; curKd = kd; curKv = kv;
+    return okCnt == NUM_MOTORS;
+}
+
+static bool applyWorkingCurrent(uint16_t mA, int okMask[NUM_MOTORS], int& okCnt) {
+    workingCurrentMa = constrain((int)mA, 100, 3000);
+    okCnt = 0;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        bool ok = servos.setWorkingCurrent(MOTOR_ADDR[i], workingCurrentMa);
+        okMask[i] = ok ? 1 : 0;
+        if (ok) okCnt++;
+        delay(8);
+        servos.flushReceiveBuffer();
+    }
     return okCnt == NUM_MOTORS;
 }
 
@@ -416,6 +558,7 @@ void posStop() {
     posEnabled = false;
     holdMode = false;
     followMode = false;
+    holdDampInit = false;
     servos.stopAllPosition(5);
 }
 
@@ -423,6 +566,7 @@ void posDisable() {
     posEnabled = false;
     holdMode = false;
     followMode = false;
+    holdDampInit = false;
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -432,6 +576,7 @@ static void otaSafetyStop() {
     posEnabled = false;
     holdMode = false;
     followMode = false;
+    holdDampInit = false;
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -452,6 +597,7 @@ static void enterHoldCurrent() {
     holdMoveMs = 0;        // 取消進行中的姿態移動
     followMode = false;    // 失效保護凍結當前姿態，不殘留跟隨
     maxHoldErr = 0;
+    resetHoldDampingState();
     holdMode = true;       // 切 HOLD 直送，脫離會發散的 PD/joint 外環
     // posEnabled 維持 true
 }
@@ -543,11 +689,13 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
     if (s.extra == TELEM_EXTRA_HOLD) {
         Out.printf(",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                       "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
-                      "\"hmax\":%.2f",
+                      "\"hmax\":%.2f,"
+                      "\"od\":[%.4f,%.2f,%.2f]",
             s.hold[0],s.hold[1],s.hold[2],
             s.hold[3],s.hold[4],s.hold[5],
             s.herr[0],s.herr[1],s.herr[2],s.herr[3],s.herr[4],s.herr[5],
-            s.hmax);
+            s.hmax,
+            s.holdDampGain, s.holdDampMax, s.holdDampCorrMax);
     } else if (s.extra == TELEM_EXTRA_TASK) {
         Out.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
                       "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
@@ -605,6 +753,7 @@ void setup() {
     SPI.setFrequency(10000000);
     delay(50);
 
+    loadRuntimeTuningFromNVS();
     enc.init();
     pidSaved = loadVFOCPidFromNVS();
 
@@ -634,6 +783,10 @@ void setup() {
         servos.setResponseMode(MOTOR_ADDR[i], 1, 0);
         delay(10);
     }
+
+    // 開機持久化 runtime tuning：0x83 工作電流存在 ESP32 NVS，由 ESP32 每次開機下發。
+    int currentOk[NUM_MOTORS] = {0}, currentOkCnt = 0;
+    applyWorkingCurrent(workingCurrentMa, currentOk, currentOkCnt);
 
     // 開機持久化 vFOC PID：馬達重開會回自己的預設，ESP32 每次開機下發本機保存值。
     // 若 NVS 尚未保存，cur* 仍是 BOOT_* 純P工作點。
@@ -690,13 +843,25 @@ void dispatch(const String& cmd, bool fromNet = false) {
     } else if (cmd == "A1") {
         // 啟用 auto-return：6 顆每 arPeriodMs 主動上報 0x35 位置
         int okc = armAutoReturn(true);
-        Out.printf("{\"status\":\"auto-return ON\",\"period_ms\":%d,\"cfg_ok\":%d}\n",
-                      arPeriodMs, okc);
+        Out.printf("{\"status\":\"auto-return ON\",\"period_ms\":%d,\"hz\":%.3f,\"cfg_ok\":%d}\n",
+                      arPeriodMs, 1000.0f / arPeriodMs, okc);
     } else if (cmd.startsWith("AR ")) {
-        // 調整上報週期（ms）；若已啟用則即時重設
-        arPeriodMs = constrain(cmd.substring(3).toInt(), 1, 100);
-        int okc = rearmAutoReturnIfEnabled();
-        Out.printf("{\"status\":\"ar period\",\"period_ms\":%d,\"cfg_ok\":%d}\n", arPeriodMs, okc);
+        // 調整上報週期（ms）；SERVO42D 協定 timer 為 uint16 ms，小數輸入會量化到最接近的整數 ms。
+        float requestedMs = 0.0f;
+        if (sscanf(cmd.c_str(), "AR %f", &requestedMs) == 1 && requestedMs > 0.0f) {
+            float clampedMs = constrain(requestedMs, 1.0f, 100.0f);
+            arPeriodMs = (uint16_t)constrain((int)floorf(clampedMs + 0.5f), 1, 100);
+            int okc = rearmAutoReturnIfEnabled();
+            bool saved = saveRuntimeTuningToNVS();
+            int quantized = fabsf(clampedMs - (float)arPeriodMs) > 0.001f ? 1 : 0;
+            Out.printf("{\"status\":\"ar period\",\"period_ms\":%d,\"hz\":%.3f,"
+                       "\"requested_period_ms\":%.3f,\"requested_hz\":%.3f,"
+                       "\"quantized\":%d,\"cfg_ok\":%d,\"saved\":%d}\n",
+                       arPeriodMs, 1000.0f / arPeriodMs,
+                       clampedMs, 1000.0f / clampedMs, quantized, okc, saved ? 1 : 0);
+        } else {
+            Out.println("{\"error\":\"usage AR period_ms\"}");
+        }
     } else if (cmd.startsWith("C ")) {
         // 設回覆模式：C 0 0=不回覆 / C 1 0=只即時 / C 1 1=預設全回
         int sp = cmd.indexOf(' ', 2);
@@ -706,10 +871,49 @@ void dispatch(const String& cmd, bool fromNet = false) {
         servos.flushReceiveBuffer();
         Out.printf("{\"status\":\"resp mode\",\"xx\":%d,\"yy\":%d}\n", xx, yy);
     } else if (cmd.startsWith("L ")) {
-        // 調整控制迴圈週期（ms）
-        uint32_t ms = constrain(cmd.substring(2).toInt(), 1, 100);
-        loopPeriodUs = ms * 1000;
-        Out.printf("{\"status\":\"loop period\",\"period_ms\":%u,\"hz\":%.0f}\n", ms, 1000.0f / ms);
+        // 調整控制迴圈週期（ms，可小數；內部以 µs 排程）
+        float requestedMs = 0.0f;
+        if (sscanf(cmd.c_str(), "L %f", &requestedMs) == 1 && requestedMs > 0.0f) {
+            float clampedMs = constrain(requestedMs, 1.0f, 100.0f);
+            uint32_t periodUs = (uint32_t)floorf(clampedMs * 1000.0f + 0.5f);
+            if (periodUs < 1000) periodUs = 1000;
+            if (periodUs > 100000) periodUs = 100000;
+            loopPeriodUs = periodUs;
+            bool saved = saveRuntimeTuningToNVS();
+            Out.printf("{\"status\":\"loop period\",\"period_ms\":%.3f,\"period_us\":%u,\"hz\":%.3f,\"saved\":%d}\n",
+                periodUs / 1000.0f, periodUs, 1000000.0f / periodUs, saved ? 1 : 0);
+        } else {
+            Out.println("{\"error\":\"usage L period_ms\"}");
+        }
+    } else if (cmd == "HP" || cmd == "HP?") {
+        Out.printf("{\"status\":\"hold profile\",\"maxVelDps\":%.1f,\"enabled\":%d,\"maxMs\":%lu}\n",
+            holdProfileMaxVelDps, holdProfileMaxVelDps > 0.0f ? 1 : 0, (unsigned long)HOLD_PROFILE_MAX_MS);
+    } else if (cmd.startsWith("HP ")) {
+        float maxVel = 0.0f;
+        if (sscanf(cmd.c_str(), "HP %f", &maxVel) == 1) {
+            holdProfileMaxVelDps = maxVel <= 0.0f ? 0.0f : constrain(maxVel, 5.0f, 360.0f);
+            Out.printf("{\"status\":\"hold profile\",\"maxVelDps\":%.1f,\"enabled\":%d,\"maxMs\":%lu}\n",
+                holdProfileMaxVelDps, holdProfileMaxVelDps > 0.0f ? 1 : 0, (unsigned long)HOLD_PROFILE_MAX_MS);
+        } else {
+            Out.println("{\"error\":\"usage HP max_vel_dps (0 disables)\"}");
+        }
+    } else if (cmd == "OD" || cmd == "OD?") {
+        Out.printf("{\"status\":\"output damping\",\"gain\":%.4f,\"maxDeg\":%.2f,\"deadbandDps\":%.2f}\n",
+            holdDampGainSec, holdDampMaxDeg, holdDampDeadbandDps);
+    } else if (cmd.startsWith("OD ")) {
+        float gain = 0, maxDeg = holdDampMaxDeg, deadband = holdDampDeadbandDps;
+        int n = sscanf(cmd.c_str(), "OD %f %f %f", &gain, &maxDeg, &deadband);
+        if (n >= 1) {
+            holdDampGainSec = constrain(gain, 0.0f, 0.08f);
+            if (n >= 2) holdDampMaxDeg = constrain(maxDeg, 0.0f, 5.0f);
+            if (n >= 3) holdDampDeadbandDps = constrain(deadband, 0.0f, 30.0f);
+            resetHoldDampingState();
+            bool saved = saveRuntimeTuningToNVS();
+            Out.printf("{\"status\":\"output damping\",\"gain\":%.4f,\"maxDeg\":%.2f,\"deadbandDps\":%.2f,\"saved\":%d}\n",
+                holdDampGainSec, holdDampMaxDeg, holdDampDeadbandDps, saved ? 1 : 0);
+        } else {
+            Out.println("{\"error\":\"usage OD gain_sec [max_deg] [deadband_dps]\"}");
+        }
     } else if (cmd == "A0") {
         disarmAutoReturn();
         Out.println("{\"status\":\"auto-return OFF (回輪詢)\"}");
@@ -753,6 +957,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         }
 
         followMode = false;   // E 啟動 mode0/1 控制 → 清跟隨，避免 follow-HOLD 下殘留追 followTgt
+        holdDampInit = false;
         posEnabled = true;
         autoReturnWarnLatched = false;
         Out.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d,"
@@ -800,6 +1005,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         posEnabled = true;
         autoReturnWarnLatched = false;
         maxHoldErr = 0;
+        resetHoldDampingState();
         Out.printf("{\"status\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
             "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
             holdAngles[0],holdAngles[1],holdAngles[2],
@@ -809,18 +1015,13 @@ void dispatch(const String& cmd, bool fromNet = false) {
     } else if (cmd.startsWith("J ")) {
         int mA;
         if (sscanf(cmd.c_str(), "J %d", &mA) == 1) {
-            mA = constrain(mA, 100, 3000);
             int okMask[NUM_MOTORS] = {0};
             int okCnt = 0;
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                bool ok = servos.setWorkingCurrent(MOTOR_ADDR[i], (uint16_t)mA);
-                okMask[i] = ok ? 1 : 0;
-                if (ok) okCnt++;
-                delay(8);
-                servos.flushReceiveBuffer();
-            }
-            Out.printf("{\"tune\":\"current\",\"mA\":%d,\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
-                mA, okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
+            bool allOk = applyWorkingCurrent((uint16_t)mA, okMask, okCnt);
+            bool saved = allOk && saveRuntimeTuningToNVS();
+            Out.printf("{\"tune\":\"current\",\"mA\":%d,\"saved\":%d,\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d}\n",
+                workingCurrentMa, saved ? 1 : 0,
+                okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt);
         }
     } else if (cmd.startsWith("P ")) {
         // 絕對姿態目標 `P x y z r p y [ms]`。前 6 值=絕對 pose（mm/度）。
@@ -846,8 +1047,10 @@ void dispatch(const String& cmd, bool fromNet = false) {
                     uint32_t ms = constrainedHoldMoveMs((float)requestedMs, holdStart, holdTarget);
                     holdMoveStart = millis();
                     holdMoveMs = ms;
-                    Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%lu,\"reqMs\":%lu,\"profile\":\"minjerk\"}\n",
-                        v[0],v[1],v[2],v[3],v[4],v[5], (unsigned long)ms, (unsigned long)requestedMs);
+                    Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%lu,\"reqMs\":%lu,\"profile\":\"minjerk\",\"maxVelDps\":%.1f,\"limitEnabled\":%d,\"limited\":%d}\n",
+                        v[0],v[1],v[2],v[3],v[4],v[5],
+                        (unsigned long)ms, (unsigned long)requestedMs,
+                        holdProfileMaxVelDps, holdProfileMaxVelDps > 0.0f ? 1 : 0, ms > requestedMs ? 1 : 0);
                 }
             } else {
                 Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
@@ -962,9 +1165,10 @@ void dispatch(const String& cmd, bool fromNet = false) {
         if (sscanf(cmd.c_str(), "V %d %d", &spd, &ac) == 2) {
             posSpeed = constrain(spd, 1, 200);
             posAcc = constrain(ac, 1, 255);
+            bool saved = saveRuntimeTuningToNVS();
             // V 是 ESP32 本地變數，下個 cycle 才會用到 → 永遠 ok（無 CAN 動作）
-            Out.printf("{\"tune\":\"motion\",\"speed\":%d,\"acc\":%d,"
-                "\"ok\":[1,1,1,1,1,1],\"okCnt\":6,\"local\":1}\n", posSpeed, posAcc);
+            Out.printf("{\"tune\":\"motion\",\"speed\":%d,\"acc\":%d,\"saved\":%d,"
+                "\"ok\":[1,1,1,1,1,1],\"okCnt\":6,\"local\":1}\n", posSpeed, posAcc, saved ? 1 : 0);
         }
     } else if (cmd.startsWith("M ")) {
         // Joint-space 參數（C 0 模式用）
@@ -1302,6 +1506,7 @@ static void controlTick() {
             }
             // 擾動疊加已移至 F5 共同匯流口（plant-input，全模式通用）→ 此處只設 HOLD 目標。
             for (int i = 0; i < NUM_MOTORS; i++) motorTargets[i] = holdAngles[i];
+            applyHoldOutputDamping(motorTargets, dt);
             float maxAbs = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
                 float e = fabsf(enc.angles[i] - holdAngles[i]);
@@ -1465,6 +1670,9 @@ static void controlTick() {
             snap.herr[i] = enc.angles[i] - holdAngles[i];
         }
         snap.hmax = maxHoldErr;
+        snap.holdDampGain = holdDampGainSec;
+        snap.holdDampMax = holdDampMaxDeg;
+        snap.holdDampCorrMax = holdDampCorrMaxWin;
     } else if (posEnabled && controlMode == 1) {
         const Pose& fk = tsController.currentPose;
         const Pose& er = tsController.poseError;
@@ -1482,6 +1690,7 @@ static void controlTick() {
     busTxF5 = busTxQ = busRxEnc = 0;   // 匯流排計數每窗歸零
     busOvr = 0;                                                // [Phase0]
     f5usMax = 0;
+    holdDampCorrMaxWin = 0.0f;
     ctlIkFailWin = ctlFkFailWin = ctlCoordLimitWin = 0;
     ctlCoordMaxAbs = 0;
 

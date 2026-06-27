@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
+    "start:phone": "STEWART_HTTPS=1 node server.js",
     "build": "~/.platformio/penv/bin/pio run",
     "upload": "curl -s localhost:3000/api/release && sleep 1 && ~/.platformio/penv/bin/pio run -t upload",
     "upload:ota": "node sysid/ota_upload.js",
@@ -22,6 +23,7 @@
     "workspace:deep-report": "node sysid/workspace_deep_report.js",
     "workspace:waveforms": "node sysid/workspace_waveform_report.js",
     "workspace:evaluate": "node sysid/workspace_evaluation.js",
+    "scope:report": "python3 sysid/scope_report.py",
     "z:sweep": "node sysid/z_sweep_trial.js",
     "coupling:probe": "node sysid/coupling_probe.js",
     "coupling:summary": "node sysid/coupling_summary.js",

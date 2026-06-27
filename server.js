@@ -2,6 +2,7 @@ const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const fs = require('fs');
 const os = require('os');
@@ -12,6 +13,8 @@ const PlatformSoT = require('./sysid/platform_sot');
 const WorkspaceExecutor = require('./sysid/workspace_executor');
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
+const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
+const HTTPS_ENABLED = process.env.STEWART_HTTPS === '1' || process.env.HTTPS === '1';
 const BAUD = 460800;
 // 綁定位址：預設 0.0.0.0（方便站在機台旁用手機/平板驅動平台）。
 // 這是會動的實體機械——若在不可信網段，設環境變數 LOOPBACK_ONLY=1 只綁本機。
@@ -48,6 +51,8 @@ const REC_DIR = path.join(__dirname, 'sysid', 'data');
 const CONFIG_DIR = path.join(__dirname, 'sysid', 'config');
 const HOME_POSE_PATH = path.join(CONFIG_DIR, 'pose-home.json');
 const PLATFORM_CONFIG_PATH = path.join(CONFIG_DIR, 'platform.json');
+const HTTPS_KEY_PATH = process.env.HTTPS_KEY || path.join(CONFIG_DIR, 'https-key.pem');
+const HTTPS_CERT_PATH = process.env.HTTPS_CERT || path.join(CONFIG_DIR, 'https-cert.pem');
 let recStream = null;
 let recPath = null;
 let recCount = 0;
@@ -193,7 +198,7 @@ function movementCommand(cmd) {
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
     'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
-    'L', 'AR', 'A', 'C', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
+    'L', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
     'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
   ].includes(op);
 }
@@ -751,7 +756,7 @@ async function startWorkspaceRun(incoming = {}) {
   return { state: publicWorkspaceRunState(), plan: { program: plan.program, condition: plan.condition, blocks: plan.blocks.length, description: plan.description } };
 }
 
-const server = http.createServer((req, res) => {
+const requestHandler = (req, res) => {
   // REST: 最新資料
   if (req.url === '/api/latest') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1182,19 +1187,23 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain' });
     res.end(data);
   });
-});
+};
+
+const server = http.createServer(requestHandler);
 
 // ===== WebSocket =====
-const wss = new WebSocketServer({ server });
+const wsServers = [];
 let clientCount = 0;
 
 // 對等廣播匯流排：所有 client（monitor 頁、腳本）共用同一條送出路徑。
 // telemetry（序列埠回覆）與指令 echo 都走這裡 → 任何來源的操作對所有人可見。
 function broadcast(line) {
-  for (const client of wss.clients) if (client.readyState === 1) client.send(line);
+  for (const wss of wsServers) {
+    for (const client of wss.clients) if (client.readyState === 1) client.send(line);
+  }
 }
 
-wss.on('connection', (ws, req) => {
+function handleWsConnection(ws, req) {
   // 安全：拒絕跨站瀏覽器連線（惡意網頁經 DNS rebinding / CSWSH 可直送指令驅動實體馬達）。
   // 放行本機 + RFC1918 私網來源（保住站機台旁用手機/平板從 LAN IP 控制）；
   // 跨站攻擊頁的 Origin 是攻擊者公網域名、不符此段 → 擋掉。無 Origin 的 Node 腳本放行。
@@ -1232,7 +1241,16 @@ wss.on('connection', (ws, req) => {
     clientCount--;
     console.log(`[WS] client disconnected (${clientCount})`);
   });
-});
+}
+
+function attachWebSocketServer(httpServer) {
+  const wss = new WebSocketServer({ server: httpServer });
+  wsServers.push(wss);
+  wss.on('connection', handleWsConnection);
+  return wss;
+}
+
+attachWebSocketServer(server);
 
 // ===== 傳輸層 =====
 // 傳輸無關的「收到一行」處理：telemetry/狀態/ack 都走這 → broadcast 給所有 WS client。
@@ -1527,13 +1545,58 @@ const transport = createTransportManager({
   onState: (st) => { currentTransport = st; broadcast(JSON.stringify({ evt: 'transport', ...st })); },
 });
 
-// ===== 啟動 =====
-server.listen(HTTP_PORT, BIND_HOST, () => {
-  console.log(`[Server] http://localhost:${HTTP_PORT}  (bind ${BIND_HOST})`);
-  console.log(`[Server] REST: http://localhost:${HTTP_PORT}/api/latest`);
-  console.log('[Server] transport: 自動偵測（有線→serial / 沒線→WiFi）');
-  if (BIND_HOST === '0.0.0.0')
-    console.log('[Server] ⚠ 全網段可達。不可信網路請以 LOOPBACK_ONLY=1 啟動只綁本機。');
+function localHttpsSanList() {
+  const sans = new Set(['DNS:localhost', 'IP:127.0.0.1']);
+  for (const nets of Object.values(os.networkInterfaces())) {
+    for (const n of nets || []) {
+      if (n.family === 'IPv4' && !n.internal) sans.add(`IP:${n.address}`);
+    }
+  }
+  return [...sans];
+}
+
+function localHttpsSans() {
+  return localHttpsSanList().join(',');
+}
+
+function certHasCurrentSans() {
+  if (!fs.existsSync(HTTPS_CERT_PATH)) return false;
+  try {
+    const out = execFileSync('openssl', ['x509', '-in', HTTPS_CERT_PATH, '-noout', '-ext', 'subjectAltName'], { encoding: 'utf8' });
+    return localHttpsSanList().every((san) => {
+      const needle = san.startsWith('IP:') ? `IP Address:${san.slice(3)}` : san;
+      return out.includes(needle);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function loadHttpsCredentials() {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    if (!fs.existsSync(HTTPS_KEY_PATH) || !certHasCurrentSans()) {
+      execFileSync('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+        '-days', '3650',
+        '-keyout', HTTPS_KEY_PATH,
+        '-out', HTTPS_CERT_PATH,
+        '-subj', '/CN=stewart-platform.local',
+        '-addext', `subjectAltName=${localHttpsSans()}`,
+      ], { stdio: 'ignore' });
+    }
+    return {
+      key: fs.readFileSync(HTTPS_KEY_PATH),
+      cert: fs.readFileSync(HTTPS_CERT_PATH),
+    };
+  } catch (err) {
+    console.warn(`[Server] HTTPS disabled: ${err.message}`);
+    console.warn('[Server] Install openssl or provide HTTPS_KEY/HTTPS_CERT to use phone IMU sensors.');
+    return null;
+  }
+}
+
+function startTransport() {
   const lock = acquireTransportLock();
   if (!lock.ok) {
     const e = lock.existing || {};
@@ -1543,4 +1606,26 @@ server.listen(HTTP_PORT, BIND_HOST, () => {
   }
   if (lock.disabled) console.warn('[Server] ⚠ ESP32 transport lock disabled by STEWART_TRANSPORT_LOCK=0');
   transport.start();
+}
+
+// ===== 啟動 =====
+server.listen(HTTP_PORT, BIND_HOST, () => {
+  console.log(`[Server] http://localhost:${HTTP_PORT}  (bind ${BIND_HOST})`);
+  console.log(`[Server] REST: http://localhost:${HTTP_PORT}/api/latest`);
+  console.log('[Server] transport: 自動偵測（有線→serial / 沒線→WiFi）');
+  if (BIND_HOST === '0.0.0.0')
+    console.log('[Server] ⚠ 全網段可達。不可信網路請以 LOOPBACK_ONLY=1 啟動只綁本機。');
+  startTransport();
 });
+
+if (HTTPS_ENABLED) {
+  const creds = loadHttpsCredentials();
+  if (creds) {
+    const httpsServer = https.createServer(creds, requestHandler);
+    attachWebSocketServer(httpsServer);
+    httpsServer.listen(HTTPS_PORT, BIND_HOST, () => {
+      console.log(`[Server] https://localhost:${HTTPS_PORT}/phone.html  (bind ${BIND_HOST})`);
+      console.log(`[Server] Phone IMU page: https://<this-computer-LAN-IP>:${HTTPS_PORT}/phone.html`);
+    });
+  }
+}
