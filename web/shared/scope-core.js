@@ -326,13 +326,18 @@ class ScopeCore {
   }
 
   _render() {
+    requestAnimationFrame(() => this._render());
+    // ~15Hz cap (was every rAF ~60Hz). Halves canvas + 'render'-subscriber cost
+    // (FFT, sparklines); telemetry charts stay visually smooth at 15Hz.
+    const now = (typeof performance !== 'undefined' ? performance : Date).now();
+    if (now - (this._lastRenderAt || 0) < 66) return;
+    this._lastRenderAt = now;
     if (!this.paused) this.viewOffset = 0;
     this._drawAngles(); this._drawErrors(); this._drawGain(); this._drawPhase();
     this._updateScrubber();
     const stats = this._el(this.ui.stats); if (stats) stats.textContent = `${this.sampleCount} samples | ${this.buf.a[0].length} buffered`;
     const pos = this._el(this.ui.viewPos); if (pos) pos.textContent = (this.paused && this.viewOffset > 0) ? `@ -${(this.viewOffset * this.dt).toFixed(1)}s` : '';
     this._emit('render');
-    requestAnimationFrame(() => this._render());
   }
 
   // ===== UI（全部容錯）=====

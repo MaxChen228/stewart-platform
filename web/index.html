@@ -943,6 +943,11 @@ canvasZone.appendChild(labelRenderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 60);
 controls.update();
+// Render-on-demand: only redraw the 3D scene when it actually changes (camera
+// drag, telemetry pose update, ghost move, resize). Idle frames are skipped so
+// the WebGL + CSS2D-label cost stops competing with the rest of the UI.
+let _vizDirty = true;
+controls.addEventListener('change', () => { _vizDirty = true; });
 
 // 燈光
 scene.add(new THREE.AmbientLight(0xffffff, 0.7));
@@ -977,6 +982,7 @@ function updateGhost() {
   const Apt = computeA(angles);
   const Q = platformPointsFromPose(ghostTarget, stewartModel);
   ghostRig.updateFromPoints(Apt, Q);
+  _vizDirty = true;
 }
 
 // ===== 姿態操作（滑桿 → ghost 目標預覽 → 絕對 pose P 指令）=====
@@ -1472,45 +1478,42 @@ document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfi
 // Browser 只提交最新人機輸入；server 只做 latest-wins 轉送，
 // ESP32 以固定 control tick 產生 acceleration/jerk limited PF reference。
 let followActive = false;
-const PF_PUMP_MS = 33;              // target-update throttle, not the physical control clock
-const PF_KEEPALIVE_MS = 1000;
+const PF_PUMP_MS = 33;              // min spacing between target posts; server owns the 100Hz emit clock
 const PF_POSE_EPS = 0.001;
-let _pfPending = null, _pfLast = 0, _pfPumpTimer = null, _pfLastSent = null;
-function _pfPoseFromSliders() {
-  const o = poseReadOffset();
-  return [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
-}
+let _pfPending = null, _pfLast = 0, _pfTrailTimer = null, _pfLastSent = null;
 function _pfPoseDelta(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return Infinity;
   let m = 0;
   for (let i = 0; i < 6; i++) m = Math.max(m, Math.abs(Number(a[i]) - Number(b[i])));
   return m;
 }
-function _pfSchedule(delay = PF_PUMP_MS) {
-  if (_pfPumpTimer || !followActive || sessionState.active) return;
-  _pfPumpTimer = setTimeout(_pfPump, Math.max(0, delay));
-}
 function _pfSend(pose) {
   _pfLast = performance.now();
   _pfLastSent = pose.slice();
   window.sendCmd(`PF ${pose.map(x=>x.toFixed(3)).join(' ')}`);
 }
-function _pfPump() {
-  _pfPumpTimer = null;
+// Event-driven leading+trailing throttle. No idle self-rescheduling timer: the
+// browser only posts the latest intent when sliders/sensors change; server.js
+// re-emits it at a steady 100Hz and holds it when input stops. This frees the
+// main thread (was a perpetual 30Hz setTimeout competing with rendering).
+function _pfFlush() {
+  _pfTrailTimer = null;
   if (!followActive || sessionState.active || !wsConnected) { _pfPending = null; return; }
-  const target = _pfPending || _pfPoseFromSliders();
-  _pfPending = null;
-  const now = performance.now();
-  if (Array.isArray(target) && target.length === 6 && target.every(Number.isFinite) && window.Kin.ik(target).valid) {
-    const changed = _pfPoseDelta(_pfLastSent, target) > PF_POSE_EPS;
-    if (changed || !_pfLast || now - _pfLast > PF_KEEPALIVE_MS) _pfSend(target);
-  }
-  _pfSchedule(PF_PUMP_MS);
+  const target = _pfPending; _pfPending = null;
+  if (!Array.isArray(target) || target.length !== 6 || !target.every(Number.isFinite)) return;
+  if (!window.Kin.ik(target).valid) return;          // don't post unreachable poses
+  if (!_pfLastSent || _pfPoseDelta(_pfLastSent, target) > PF_POSE_EPS) _pfSend(target);
 }
-function streamPF(pose) {        // submit latest target; ESP32 owns PF reference timing
+function streamPF(pose) {
   _pfPending = pose.slice();
+  if (!followActive || sessionState.active) { _pfPending = null; return; }
   const dt = performance.now() - _pfLast;
-  _pfSchedule(dt >= PF_PUMP_MS ? 0 : PF_PUMP_MS - dt);
+  if (dt >= PF_PUMP_MS) {
+    if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
+    _pfFlush();
+  } else if (!_pfTrailTimer) {
+    _pfTrailTimer = setTimeout(_pfFlush, PF_PUMP_MS - dt);
+  }
 }
 function updateFollowUI() {
   const b = document.getElementById('follow-toggle');
@@ -1541,7 +1544,7 @@ function followReset() {
   followActive = false;
   _pfPending = null;
   _pfLastSent = null;
-  if (_pfPumpTimer) { clearTimeout(_pfPumpTimer); _pfPumpTimer = null; }
+  if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
   updateFollowUI();
 }
 
@@ -1557,6 +1560,7 @@ function updateViz(motorAngles) {
   document.getElementById('fk-debug').textContent = fkStatus;
   document.getElementById('fk-debug').style.color =
     fkStatus.startsWith('FK OK') ? 'var(--contra)' : 'var(--dev)';
+  _vizDirty = true;
 }
 
 // 初始顯示 home（刷新後反映 homePose——含 localStorage 存的自訂 home，而非寫死中位）
@@ -1584,6 +1588,8 @@ function updateViz(motorAngles) {
 // ===== 動畫迴圈 =====
 function animate() {
   requestAnimationFrame(animate);
+  if (!_vizDirty) return;        // skip idle frames; redraw only when the scene changed
+  _vizDirty = false;
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
 }
@@ -1597,6 +1603,7 @@ function fitCanvas() {
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   labelRenderer.setSize(w, h);
+  _vizDirty = true;
 }
 new ResizeObserver(fitCanvas).observe(canvasZone);
 
@@ -2416,7 +2423,11 @@ function estSigma(){
   return -((n*sxy-sx*sy)/(n*sxx-sx*sx+1e-9));
 }
 const fft=$o('fft'), fctx=fft.getContext('2d');
+let _fftLast=0;
 scope.on('render', ()=>{
+  if(!fft.offsetParent) return;                           // FFT panel hidden → skip the 512-pt DFT entirely
+  const _n=performance.now(); if(_n-_fftLast<200) return;  // ~5Hz cap (DFT + σ is the heaviest per-frame work)
+  _fftLast=_n;
   $o('sel-name').textContent = scope.NAMES[scope.selectedMotor];
   const r=computeFFT(), sig=estSigma();
   $o('q-pp').textContent=r.pp?r.pp.toFixed(1):'—'; $o('q-f').textContent=r.f?r.f.toFixed(2):'—';
