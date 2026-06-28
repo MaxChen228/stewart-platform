@@ -2193,6 +2193,38 @@ const requestHandler = (req, res) => {
     return;
   }
 
+  // HTTP-pull OTA：板子 outbound 抓 firmware.bin（繞 host 防火牆，比 ArduinoOTA 回連可靠、可全自動）。
+  // 不 release transport（控制鏈保持；板子走獨立 HTTP 連線抓檔，flash 完才 reboot）。
+  if (req.url.split('?')[0] === '/firmware.bin') {
+    const fwPath = path.join(__dirname, '.pio', 'build', 'esp32', 'firmware.bin');
+    fs.stat(fwPath, (err, st) => {
+      if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('firmware.bin not found; run `pio run` first'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': st.size });
+      fs.createReadStream(fwPath).pipe(res);
+    });
+    return;
+  }
+  if (req.url.split('?')[0] === '/api/ota/http') {
+    const info = transport.otaPullInfo();
+    if (info.state !== 'connected') {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, reason: `transport ${info.state}; board not reachable` }));
+      return;
+    }
+    const host = (info.kind === 'wifi' && info.localAddress) ? info.localAddress : lanIpForBoard();
+    if (!host) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, reason: 'cannot determine server LAN IP; use `npm run upload` (USB)' }));
+      return;
+    }
+    const url = `http://${host}:${HTTP_PORT}/firmware.bin`;
+    const wr = transport.write(`OTA ${url}`);
+    console.log(`[OTA] HTTP-pull trigger ${url} → ${wr.ok ? 'sent' : wr.reason}`);
+    res.writeHead(wr.ok ? 200 : 502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: wr.ok, url, transport: info.kind, reason: wr.reason }));
+    return;
+  }
+
   // 靜態檔案（去查詢字串；目錄/結尾 → index.html）
   let urlPath = req.url.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
@@ -2310,6 +2342,25 @@ function onLine(line) {
 function loadCachedIp() { try { return fs.readFileSync(IP_CACHE, 'utf8').trim() || null; } catch { return null; } }
 function saveCachedIp(ip) { try { fs.writeFileSync(IP_CACHE, ip); } catch {} }
 
+// HTTP-pull OTA：找一個「板子能到達」的本機 LAN IPv4（serial transport 或無 socket localAddress 時的後備）。
+// 優先取與快取板子 IP 同 /24 網段者；否則排除 Tailscale CGNAT(100.x) 取第一個非內部位址。
+function lanIpForBoard() {
+  const all = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const ni of ifaces[name] || []) {
+      if (ni.family === 'IPv4' && !ni.internal) all.push(ni.address);
+    }
+  }
+  const boardIp = loadCachedIp();
+  if (boardIp) {
+    const sub = boardIp.split('.').slice(0, 3).join('.') + '.';
+    const m = all.find(a => a.startsWith(sub));
+    if (m) return m;
+  }
+  return all.find(a => !a.startsWith('100.')) || all[0] || null;
+}
+
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; }
@@ -2388,6 +2439,7 @@ function openTcp({ host, port, onLine, onClose }) {
   return {
     write(line) { if (sock.destroyed || !sock.writable) return false; return sock.write(line + '\n'); },
     close() { if (closed) return; closed = true; if (hb) clearInterval(hb); try { sock.destroy(); } catch {} },
+    localAddress() { return sock.localAddress || null; },   // HTTP-pull OTA：此連線本端位址 = 板子能到達的 server IP
   };
 }
 
@@ -2594,6 +2646,9 @@ function createTransportManager({ onLine, onState }) {
       setState('down', kind, `force-reconnect:${reason}`);
       resetReconnectDelay();
       scheduleSelect();
+    },
+    otaPullInfo() {
+      return { kind, state, localAddress: (conn && typeof conn.localAddress === 'function') ? conn.localAddress() : null };
     },
     getState() { return { kind, state, detail }; },
   };

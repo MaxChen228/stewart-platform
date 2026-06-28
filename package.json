@@ -7,6 +7,7 @@
     "build": "~/.platformio/penv/bin/pio run",
     "upload": "curl -s localhost:3000/api/release && sleep 1 && ~/.platformio/penv/bin/pio run -t upload",
     "upload:ota": "node sysid/ota_upload.js",
+    "upload:http": "~/.platformio/penv/bin/pio run && curl -fsS localhost:3000/api/ota/http",
     "can:budget": "node sysid/can_budget.js",
     "can:benchmark": "node sysid/can_benchmark.js",
     "can:bitrate-frames": "node sysid/can_bitrate_frames.js --speed 1m",
