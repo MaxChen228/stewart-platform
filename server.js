@@ -81,7 +81,11 @@ const FOLLOW_DIAG_ENABLED = process.env.FOLLOW_DIAG !== '0';
 const FOLLOW_DIAG_WINDOW_MS = 120000;
 const FOLLOW_DIAG_MAX_SAMPLES = Math.max(300, Math.floor(numberEnv('FOLLOW_DIAG_MAX_SAMPLES', 5000)));
 const PF_MAILBOX_MIN_MS = Math.max(0, numberEnv('PF_MAILBOX_MIN_MS', 10));
-const MANUAL_PF_MODE = 'target-forward';
+// Manual FOLLOW resampler: server owns a fixed-rate PF emission clock so browser/
+// phone input jitter never becomes the physical reference cadence. Default 100 Hz.
+const PF_RESAMPLE_HZ = Math.max(1, Math.min(200, Math.round(numberEnv('PF_RESAMPLE_HZ', 100))));
+const PF_RESAMPLE_MS = Math.max(1, Math.round(1000 / PF_RESAMPLE_HZ));
+const MANUAL_PF_MODE = `server-resample-${PF_RESAMPLE_HZ}hz`;
 let followDiagStream = null;
 let followDiagPath = null;
 let followDiagT0 = performance.now();
@@ -143,7 +147,14 @@ const manualPf = {
   vmaxT: 60,
   vmaxR: 45,
   lastReason: null,
+  // resampler emit-side accounting (Part A); emitDtMaxSession reset at session start
+  writeFail: 0,
+  transportSkip: 0,
+  emitDtMaxSession: 0,
 };
+
+// Fixed-rate manual PF emission timer (server is the 100 Hz reference clock).
+let manualPfTimer = null;
 
 // UI/session ownership gate. Manual pose controls and program sessions share the
 // same WebSocket transport, so the server owns the final arbitration. Workspace
@@ -595,6 +606,7 @@ function parseVfCommand(cmd) {
 
 function manualPfStop(reason = 'stopped') {
   const wasActive = !!manualPf.target;
+  manualPfResamplerStop(reason);
   manualPf.target = null;
   manualPf.output = null;
   manualPf.lastReason = reason;
@@ -619,8 +631,9 @@ function manualPfSummary(now = Date.now()) {
   return {
     enabled: true,
     mode: MANUAL_PF_MODE,
-    hz: null,
-    intervalMs: null,
+    hz: PF_RESAMPLE_HZ,
+    intervalMs: PF_RESAMPLE_MS,
+    running: !!manualPfTimer,
     active: !!manualPf.target,
     targetUpdates: manualPf.targetUpdates,
     emitted: manualPf.emitted,
@@ -646,6 +659,62 @@ function manualPfSetLimits(cmd) {
   followDiagWrite('manual_pf_limits', { vmaxT: manualPf.vmaxT, vmaxR: manualPf.vmaxR });
 }
 
+// ===== Manual FOLLOW 100 Hz resampler =====
+// browser/phone only post the latest intent (manualPf.target). This fixed-rate
+// timer is the single physical PF clock: each tick re-emits the latest target,
+// fully decoupled from browser main-thread jitter. ESP32 followStep still owns
+// the 400 Hz jerk/accel/vel-limited reference; this only guarantees a steady
+// target-update cadence on the wire.
+function manualPfResamplerStart() {
+  if (manualPfTimer || activeSession) return;
+  manualPfTimer = setInterval(manualPfEmitTick, PF_RESAMPLE_MS);
+  followDiagWrite('manual_pf_resampler', { state: 'start', hz: PF_RESAMPLE_HZ });
+}
+
+function manualPfResamplerStop(reason = 'stopped') {
+  if (!manualPfTimer) return;
+  clearInterval(manualPfTimer);
+  manualPfTimer = null;
+  followDiagWrite('manual_pf_resampler', { state: 'stop', reason });
+}
+
+// One emission tick. Inline transport write (NOT enqueuePfCommand): the mailbox
+// is a latest-wins coalescer for bursty browser input and its own ~10ms flush
+// clock would beat against this timer, corrupting both the steady cadence and
+// the emit accounting (mailbox flush is shared with session PF). Mirrors the
+// gate/transport checks of flushPfMailbox().
+function manualPfEmitTick() {
+  const target = manualPf.target;
+  if (!Array.isArray(target) || target.length !== 6) return;
+  const cmd = `PF ${target.map((x) => Number(x).toFixed(3)).join(' ')}`;
+  const gate = commandAllowed(cmd, null);
+  if (!gate.ok) { manualPf.lastReason = gate.reason; return; }
+  if (currentTransport.state !== 'connected') {
+    manualPf.transportSkip++;
+    manualPf.lastReason = `transport ${currentTransport.state || 'unknown'}`;
+    return;
+  }
+  const wr = transport.write(cmd);
+  if (!wr.ok) {
+    manualPf.writeFail++;
+    manualPf.lastReason = wr.reason;
+    recWrite('drop', { cmd, reason: wr.reason, transport: currentTransport, highRate: true });
+    return;
+  }
+  const now = Date.now();
+  if (manualPf.lastEmitAt) {
+    const dt = now - manualPf.lastEmitAt;
+    if (dt > manualPf.emitDtMaxSession) manualPf.emitDtMaxSession = dt;
+  }
+  manualPf.output = target.slice();
+  manualPf.emitted++;
+  manualPf.lastEmitAt = now;
+  manualPf.lastReason = null;
+  pushWindow(manualPf.emitWindow, { at: now, pose: target.slice() }, now);
+  observeCommand(cmd, 'manual-resample', null);   // feeds followDiag.pf + lastPfAt (nearFollow gate)
+  recWrite('cmd', cmd);
+}
+
 function manualPfUpdateTarget(cmd) {
   const pose = parsePoseCommand(cmd, 'PF');
   if (!pose) {
@@ -663,15 +732,8 @@ function manualPfUpdateTarget(cmd) {
     targetUpdates: manualPf.targetUpdates,
     output: manualPf.output,
   });
-  const result = enqueuePfCommand(cmd, null);
-  if (result.ok) {
-    manualPf.output = pose.slice();
-    manualPf.emitted++;
-    manualPf.lastEmitAt = now;
-    pushWindow(manualPf.emitWindow, { at: now, pose: pose.slice() }, now);
-    followDiagWrite('manual_pf_forward', { pose, emitted: manualPf.emitted });
-  }
-  return result.ok ? { ok: true, via: 'manual-pf-target-forward' } : result;
+  manualPfResamplerStart();
+  return { ok: true, via: 'manual-pf-resample' };
 }
 
 function followDiagWrite(type, data = {}) {
@@ -1882,6 +1944,7 @@ function handleWsConnection(ws, req) {
   ws.on('close', () => {
     clientCount--;
     console.log(`[WS] client disconnected (${clientCount})`);
+    if (clientCount <= 0) manualPfStop('all clients disconnected');
   });
 }
 
