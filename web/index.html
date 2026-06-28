@@ -1469,8 +1469,8 @@ window.poseSetRelease = function() {
 document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfigSoon);
 
 // ===== 跟隨模式：FOLLOW 1/0 + PF target updates =====
-// Browser 只提交最新人機輸入；server 以固定頻率產生平滑 PF reference，
-// 韌體仍保留最後的速度受限保護。
+// Browser 只提交最新人機輸入；server 只做 latest-wins 轉送，
+// ESP32 以固定 control tick 產生 acceleration/jerk limited PF reference。
 let followActive = false;
 const PF_PUMP_MS = 33;              // target-update throttle, not the physical control clock
 const PF_KEEPALIVE_MS = 1000;
@@ -1507,7 +1507,7 @@ function _pfPump() {
   }
   _pfSchedule(PF_PUMP_MS);
 }
-function streamPF(pose) {        // submit latest target; server owns manual PF reference timing
+function streamPF(pose) {        // submit latest target; ESP32 owns PF reference timing
   _pfPending = pose.slice();
   const dt = performance.now() - _pfLast;
   _pfSchedule(dt >= PF_PUMP_MS ? 0 : PF_PUMP_MS - dt);

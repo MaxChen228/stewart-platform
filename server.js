@@ -43,6 +43,15 @@ const RELEASE_HOLD_MAX_MS = 180000;
 let lastTelemetry = null;
 let lastTelemetryAt = 0;
 let lastLine = null;
+let lastParseWarningAt = 0;
+const lineParseStats = {
+  errors: 0,
+  lastAt: 0,
+  lastLen: 0,
+  lastError: null,
+  lastHead: null,
+  lastTail: null,
+};
 
 // ===== Phase 0 系統辨識：資料記錄器 =====
 // 把每筆進來的遙測（dir:"in"）與每筆送出的指令（dir:"cmd"）寫成 JSONL，
@@ -72,10 +81,7 @@ const FOLLOW_DIAG_ENABLED = process.env.FOLLOW_DIAG !== '0';
 const FOLLOW_DIAG_WINDOW_MS = 120000;
 const FOLLOW_DIAG_MAX_SAMPLES = Math.max(300, Math.floor(numberEnv('FOLLOW_DIAG_MAX_SAMPLES', 5000)));
 const PF_MAILBOX_MIN_MS = Math.max(0, numberEnv('PF_MAILBOX_MIN_MS', 10));
-const MANUAL_PF_HZ = Math.max(5, Math.min(100, numberEnv('MANUAL_PF_HZ', 60)));
-const MANUAL_PF_INTERVAL_MS = 1000 / MANUAL_PF_HZ;
-const MANUAL_PF_KEEPALIVE_MS = Math.max(250, numberEnv('MANUAL_PF_KEEPALIVE_MS', 1000));
-const MANUAL_PF_EPS = Math.max(0.0001, numberEnv('MANUAL_PF_EPS', 0.001));
+const MANUAL_PF_MODE = 'target-forward';
 let followDiagStream = null;
 let followDiagPath = null;
 let followDiagT0 = performance.now();
@@ -121,14 +127,13 @@ const pfMailbox = {
 };
 
 // Manual FOLLOW is not allowed to use browser/input events as the physical
-// reference clock. Browser/phone PF messages are treated as "latest intent";
-// this server-side generator emits a smooth, fixed-rate PF stream toward that
-// intent. Workspace/session PF keeps its own deterministic path and bypasses it.
+// reference clock. Browser/phone PF messages are treated as latest intent and
+// forwarded through the host latest-wins mailbox. ESP32 followStep owns the
+// fixed-rate acceleration/jerk-limited reference. Workspace/session PF keeps
+// its own deterministic path and bypasses this manual accounting.
 const manualPf = {
   target: null,
   output: null,
-  timer: null,
-  lastTickAt: 0,
   lastInputAt: 0,
   lastEmitAt: 0,
   targetUpdates: 0,
@@ -545,8 +550,37 @@ function poseDelta(prev, next) {
   };
 }
 
-function fmtPose(pose) {
-  return pose.map((x) => Number(x).toFixed(3));
+function finiteOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseFollowReference(fref) {
+  if (!fref || typeof fref !== 'object') return null;
+  let errT = null;
+  let errR = null;
+  if (Array.isArray(fref.e) && fref.e.length >= 2) {
+    errT = finiteOrNull(fref.e[0]);
+    errR = finiteOrNull(fref.e[1]);
+  } else if (Array.isArray(fref.cur) && Array.isArray(fref.tgt)) {
+    const frefErr = poseDelta(fref.cur, fref.tgt);
+    errT = frefErr ? frefErr.maxT : null;
+    errR = frefErr ? frefErr.maxR : null;
+  }
+  errT = errT ?? finiteOrNull(fref.errT);
+  errR = errR ?? finiteOrNull(fref.errR);
+  const out = {
+    gen: fref.gen || (Number(fref.g) === 1 ? 'esp32_jerk_limited' : null),
+    errT,
+    errR,
+    vel: Array.isArray(fref.v) ? fref.v : (Array.isArray(fref.vel) ? fref.vel : null),
+    vmax: Array.isArray(fref.lim) ? fref.lim : (Array.isArray(fref.vmax) ? fref.vmax : null),
+  };
+  if (Array.isArray(fref.cur)) out.cur = fref.cur;
+  if (Array.isArray(fref.tgt)) out.tgt = fref.tgt;
+  if (Array.isArray(fref.amax)) out.amax = fref.amax;
+  if (Array.isArray(fref.jmax)) out.jmax = fref.jmax;
+  return out;
 }
 
 function parseVfCommand(cmd) {
@@ -559,41 +593,10 @@ function parseVfCommand(cmd) {
     : null;
 }
 
-function clampStepPose(current, target, dtSec, vmaxT, vmaxR) {
-  const delta = target.map((x, i) => x - current[i]);
-  let scale = 1.0;
-  const capT = Math.max(0, vmaxT * dtSec);
-  const capR = Math.max(0, vmaxR * dtSec);
-  for (let i = 0; i < 3; i++) {
-    const a = Math.abs(delta[i]);
-    if (a > capT && capT > 0) scale = Math.min(scale, capT / a);
-  }
-  for (let i = 3; i < 6; i++) {
-    const a = Math.abs(delta[i]);
-    if (a > capR && capR > 0) scale = Math.min(scale, capR / a);
-  }
-  return current.map((x, i) => x + delta[i] * scale);
-}
-
-function poseClose(a, b, eps = MANUAL_PF_EPS) {
-  const d = poseDelta(a, b);
-  return !!d && d.maxT <= eps && d.maxR <= eps;
-}
-
-function manualPfSchedule(delayMs = 0) {
-  if (manualPf.timer || !manualPf.target) return;
-  manualPf.timer = setTimeout(manualPfTick, Math.max(0, Math.ceil(delayMs)));
-}
-
 function manualPfStop(reason = 'stopped') {
-  const wasActive = !!manualPf.target || !!manualPf.timer;
-  if (manualPf.timer) {
-    clearTimeout(manualPf.timer);
-    manualPf.timer = null;
-  }
+  const wasActive = !!manualPf.target;
   manualPf.target = null;
   manualPf.output = null;
-  manualPf.lastTickAt = 0;
   manualPf.lastReason = reason;
   if (wasActive) followDiagWrite('manual_pf_stop', { reason });
 }
@@ -615,8 +618,9 @@ function manualPfSummary(now = Date.now()) {
     : 0;
   return {
     enabled: true,
-    hz: MANUAL_PF_HZ,
-    intervalMs: round(MANUAL_PF_INTERVAL_MS, 2),
+    mode: MANUAL_PF_MODE,
+    hz: null,
+    intervalMs: null,
     active: !!manualPf.target,
     targetUpdates: manualPf.targetUpdates,
     emitted: manualPf.emitted,
@@ -650,7 +654,6 @@ function manualPfUpdateTarget(cmd) {
   }
   const now = Date.now();
   manualPf.target = pose;
-  if (!manualPf.output) manualPf.output = pose.slice();
   manualPf.lastInputAt = now;
   manualPf.targetUpdates++;
   manualPf.lastReason = null;
@@ -660,48 +663,15 @@ function manualPfUpdateTarget(cmd) {
     targetUpdates: manualPf.targetUpdates,
     output: manualPf.output,
   });
-  if (manualPf.timer) {
-    clearTimeout(manualPf.timer);
-    manualPf.timer = null;
+  const result = enqueuePfCommand(cmd, null);
+  if (result.ok) {
+    manualPf.output = pose.slice();
+    manualPf.emitted++;
+    manualPf.lastEmitAt = now;
+    pushWindow(manualPf.emitWindow, { at: now, pose: pose.slice() }, now);
+    followDiagWrite('manual_pf_forward', { pose, emitted: manualPf.emitted });
   }
-  manualPfSchedule(0);
-  return { ok: true, via: 'manual-pf-target' };
-}
-
-function manualPfTick() {
-  manualPf.timer = null;
-  if (!manualPf.target) return;
-  if (activeSession) {
-    manualPfStop('session active');
-    return;
-  }
-
-  const now = Date.now();
-  const dtMs = manualPf.lastTickAt ? now - manualPf.lastTickAt : MANUAL_PF_INTERVAL_MS;
-  manualPf.lastTickAt = now;
-  const dtSec = Math.max(0.001, Math.min(0.05, dtMs / 1000));
-  const prev = manualPf.output || manualPf.target.slice();
-  const next = clampStepPose(prev, manualPf.target, dtSec, manualPf.vmaxT, manualPf.vmaxR);
-  const moved = !poseClose(prev, next);
-  manualPf.output = next;
-
-  const keepaliveDue = !manualPf.lastEmitAt || (now - manualPf.lastEmitAt) >= MANUAL_PF_KEEPALIVE_MS;
-  if ((moved || keepaliveDue) && currentTransport.state === 'connected') {
-    const outCmd = `PF ${fmtPose(next).join(' ')}`;
-    const result = enqueuePfCommand(outCmd, null);
-    if (result.ok) {
-      manualPf.emitted++;
-      manualPf.lastEmitAt = now;
-      pushWindow(manualPf.emitWindow, { at: now, pose: next.slice() }, now);
-    }
-  }
-
-  const atTarget = poseClose(manualPf.output, manualPf.target);
-  const sinceEmit = manualPf.lastEmitAt ? now - manualPf.lastEmitAt : 0;
-  const delay = atTarget
-    ? Math.max(50, MANUAL_PF_KEEPALIVE_MS - sinceEmit)
-    : MANUAL_PF_INTERVAL_MS;
-  manualPfSchedule(delay);
+  return result.ok ? { ok: true, via: 'manual-pf-target-forward' } : result;
 }
 
 function followDiagWrite(type, data = {}) {
@@ -720,7 +690,7 @@ function followDiagWrite(type, data = {}) {
           windowMs: FOLLOW_DIAG_WINDOW_MS,
           maxSamples: FOLLOW_DIAG_MAX_SAMPLES,
           pfMailboxMinMs: PF_MAILBOX_MIN_MS,
-          manualPfHz: MANUAL_PF_HZ,
+          manualPfMode: MANUAL_PF_MODE,
         },
       }) + '\n');
       console.log(`[FollowDiag] writing ${followDiagPath}`);
@@ -777,6 +747,15 @@ function followDiagSummary(now = Date.now()) {
     },
     manual: manualPfSummary(now),
     mailbox: pfMailboxSummary(now),
+    parse: {
+      errors: lineParseStats.errors,
+      lastAt: lineParseStats.lastAt || null,
+      lastAgeMs: lineParseStats.lastAt ? now - lineParseStats.lastAt : null,
+      lastLen: lineParseStats.lastLen || null,
+      lastError: lineParseStats.lastError,
+      lastHead: lineParseStats.lastHead,
+      lastTail: lineParseStats.lastTail,
+    },
     latest: recentTele ? recentTele.sample : null,
     warnings: followDiag.warnings.slice(-12),
   };
@@ -869,14 +848,43 @@ function observeIncoming(d) {
     ar: d.ar,
     arAgeMax: Array.isArray(d.arAge) ? maxFinite(d.arAge.map(Number)) : null,
   };
+  sample.fref = parseFollowReference(d.fref);
+  if (!sample.fref) delete sample.fref;
   pushWindow(followDiag.tele, { at: now, dtMs, sample }, now);
 
   if (now - followDiagLastSummaryAt > 2000) {
     followDiagLastSummaryAt = now;
     const s = followDiagSummary(now);
     followDiagWrite('summary', s);
-    console.log(`[FollowDiag] fl=${s.state.fl} profile=${s.state.profile} pf=${s.pf.hz ?? '-'}Hz pfDt95=${s.pf.dtP95 ?? '-'}ms manualIn=${s.manual.inputHz ?? '-'}Hz manualOut=${s.manual.emitHz ?? '-'}Hz mb=${s.mailbox.flushed}/${s.mailbox.received} coal=${s.mailbox.coalesced} drop=${s.mailbox.dropped} tele=${s.tele.hz ?? '-'}Hz teleDt95=${s.tele.dtP95 ?? '-'}ms herr=${round(sample.herrMax, 2) ?? '-'} ok=${sample.ok ?? '-'} ef=${sample.ef ?? '-'} rxDrop=${sample.rxDrop ?? '-'} jitter=${sample.jitterUs ?? '-'}us`);
+    console.log(`[FollowDiag] fl=${s.state.fl} profile=${s.state.profile} pf=${s.pf.hz ?? '-'}Hz pfDt95=${s.pf.dtP95 ?? '-'}ms manualIn=${s.manual.inputHz ?? '-'}Hz manualOut=${s.manual.emitHz ?? '-'}Hz mb=${s.mailbox.flushed}/${s.mailbox.received} coal=${s.mailbox.coalesced} drop=${s.mailbox.dropped} tele=${s.tele.hz ?? '-'}Hz teleDt95=${s.tele.dtP95 ?? '-'}ms frefErr=${round(sample.fref?.errT, 2) ?? '-'}/${round(sample.fref?.errR, 2) ?? '-'} herr=${round(sample.herrMax, 2) ?? '-'} ok=${sample.ok ?? '-'} ef=${sample.ef ?? '-'} rxDrop=${sample.rxDrop ?? '-'} jitter=${sample.jitterUs ?? '-'}us`);
   }
+}
+
+function observeLineParseError(line, err) {
+  const now = Date.now();
+  lineParseStats.errors++;
+  lineParseStats.lastAt = now;
+  lineParseStats.lastLen = line.length;
+  lineParseStats.lastError = err?.message || String(err || 'parse failed');
+  lineParseStats.lastHead = line.slice(0, 120);
+  lineParseStats.lastTail = line.slice(-120);
+  const nearFollow = followDiag.lastFl === 1 || (followDiag.lastPfAt && now - followDiag.lastPfAt < 5000);
+  if (!nearFollow && !line.startsWith('{"a":')) return;
+  if (now - lastParseWarningAt < 1000) return;
+  lastParseWarningAt = now;
+  const warning = {
+    type: 'json_parse_failed',
+    count: lineParseStats.errors,
+    len: lineParseStats.lastLen,
+    error: lineParseStats.lastError,
+    head: lineParseStats.lastHead,
+    tail: lineParseStats.lastTail,
+    at: now,
+  };
+  followDiag.warnings.push(warning);
+  while (followDiag.warnings.length > 30) followDiag.warnings.shift();
+  followDiagWrite('parse_error', warning);
+  console.warn(`[FollowDiag] incoming JSON parse failed len=${warning.len}: ${warning.error}`);
 }
 
 function recStart(name, owner = null) {
@@ -1893,14 +1901,19 @@ function onLine(line) {
   line = line.trim();
   if (!line) return;
   lastLine = { t: Date.now(), line };
+  let d;
   try {
-    const d = JSON.parse(line);
-    if (d && Array.isArray(d.a)) {
-      lastTelemetry = line;
-      lastTelemetryAt = Date.now();
-    }
-    observeIncoming(d);
-  } catch {}
+    d = JSON.parse(line);
+  } catch (err) {
+    observeLineParseError(line, err);
+    recWrite('in', line);
+    return;
+  }
+  if (d && Array.isArray(d.a)) {
+    lastTelemetry = line;
+    lastTelemetryAt = Date.now();
+  }
+  observeIncoming(d);
   recWrite('in', line);
   broadcast(line);
 }
@@ -2002,6 +2015,7 @@ function createTransportManager({ onLine, onState }) {
   let recoveryTimer = null;
   let lastRx = 0, lastPos = 0;
   let reconnectDelayMs = RECONNECT_MS;
+  let wifiHostIndex = 0;
 
   function resetReconnectDelay() { reconnectDelayMs = RECONNECT_MS; }
   function clearPending() {
@@ -2055,7 +2069,23 @@ function createTransportManager({ onLine, onState }) {
     const p = ports.find(x => SERIAL_PATTERN.test(x.path));
     return p ? p.path.replace('/dev/tty.', '/dev/cu.') : null;
   }
-  function wifiHost() { return ESP32_HOST_OVERRIDE || loadCachedIp() || 'stewart.local'; }
+  function wifiCandidates() {
+    if (ESP32_HOST_OVERRIDE) return [ESP32_HOST_OVERRIDE];
+    return [...new Set([loadCachedIp(), 'stewart.local'].filter(Boolean))];
+  }
+  function wifiHost() {
+    const hosts = wifiCandidates();
+    return hosts[wifiHostIndex % hosts.length] || 'stewart.local';
+  }
+  function advanceWifiHost(why) {
+    if (ESP32_HOST_OVERRIDE) return;
+    const hosts = wifiCandidates();
+    if (hosts.length <= 1) return;
+    const prev = hosts[wifiHostIndex % hosts.length];
+    wifiHostIndex = (wifiHostIndex + 1) % hosts.length;
+    const next = hosts[wifiHostIndex % hosts.length];
+    console.warn(`[Transport] WiFi host ${prev} failed (${why}); trying ${next}`);
+  }
 
   // manager 統一「收到一行」：liveness/idle 計時、學 ESP32 IP、再轉發給匯流排
   function handleLine(line) {
@@ -2074,7 +2104,7 @@ function createTransportManager({ onLine, onState }) {
       }
     }
     if (d && d.wifi && /^\d+\.\d+\.\d+\.\d+$/.test(d.wifi.ip || '') && d.wifi.ip !== '0.0.0.0') {
-      if (loadCachedIp() !== d.wifi.ip) { saveCachedIp(d.wifi.ip); console.log(`[Transport] learned ESP32 IP ${d.wifi.ip}`); }
+      if (loadCachedIp() !== d.wifi.ip) { saveCachedIp(d.wifi.ip); wifiHostIndex = 0; console.log(`[Transport] learned ESP32 IP ${d.wifi.ip}`); }
     }
     onLine(line);
   }
@@ -2114,8 +2144,10 @@ function createTransportManager({ onLine, onState }) {
   }
 
   function dropAndReselect(why) {
+    const failedKind = kind;
     clearWatches();
     if (conn) { try { conn.close(); } catch {} conn = null; }
+    if (failedKind === 'wifi') advanceWifiHost(why);
     setState('down', kind, why);
     if (suppressReconnect) return;
     scheduleSelect();
@@ -2127,7 +2159,13 @@ function createTransportManager({ onLine, onState }) {
     setState('selecting', null, '');
     const path = await findSerial();
     if (path) { setState('connecting', 'serial', path); conn = openSerial({ path, baud: BAUD, onLine: handleLine, onClose: (w) => dropAndReselect(w) }); }
-    else { const host = wifiHost(); setState('connecting', 'wifi', `${host}:${ESP32_PORT}`); conn = openTcp({ host, port: ESP32_PORT, onLine: handleLine, onClose: (w) => dropAndReselect(w) }); }
+    else {
+      const host = wifiHost();
+      const hosts = wifiCandidates();
+      const suffix = hosts.length > 1 ? ` host ${wifiHostIndex % hosts.length + 1}/${hosts.length}` : '';
+      setState('connecting', 'wifi', `${host}:${ESP32_PORT}${suffix}`);
+      conn = openTcp({ host, port: ESP32_PORT, onLine: handleLine, onClose: (w) => dropAndReselect(w) });
+    }
     lastRx = Date.now();
     if (livenessTimer) clearTimeout(livenessTimer);
     livenessTimer = setTimeout(() => {              // liveness gate：開了但不講話 → 判死換路（非 silent 坐死）

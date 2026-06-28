@@ -7,6 +7,7 @@ const path = require('path');
 function usage() {
   console.log(`Usage:
   node sysid/follow_diag_summary.js sysid/data/follow-diagnostics/follow_*.jsonl
+  node sysid/follow_diag_summary.js latest
 `);
 }
 
@@ -39,7 +40,7 @@ function round(v, d = 3) {
 }
 
 function load(file) {
-  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [], manualTargets: [], manualStops: [], manualLimits: [] };
+  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [], manualTargets: [], manualForwards: [], manualStops: [], manualLimits: [], parseErrors: [] };
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     if (!line.trim()) continue;
     let rec;
@@ -51,10 +52,34 @@ function load(file) {
     else if (rec.type === 'status') out.statuses.push(rec);
     else if (rec.type === 'summary') out.summaries.push(rec);
     else if (rec.type === 'manual_pf_target') out.manualTargets.push(rec);
+    else if (rec.type === 'manual_pf_forward') out.manualForwards.push(rec);
     else if (rec.type === 'manual_pf_stop') out.manualStops.push(rec);
     else if (rec.type === 'manual_pf_limits') out.manualLimits.push(rec);
+    else if (rec.type === 'parse_error') out.parseErrors.push(rec);
   }
   return out;
+}
+
+function frefVelTOf(x) {
+  if (!Array.isArray(x.vel)) return null;
+  if (x.vel.length === 2) return Math.abs(Number(x.vel[0]));
+  return max(x.vel.slice(0, 3).map((v) => Math.abs(Number(v))));
+}
+
+function frefVelROf(x) {
+  if (!Array.isArray(x.vel)) return null;
+  if (x.vel.length === 2) return Math.abs(Number(x.vel[1]));
+  return max(x.vel.slice(3, 6).map((v) => Math.abs(Number(v))));
+}
+
+function latestFollowDiagFile() {
+  const dir = path.join(__dirname, 'data', 'follow-diagnostics');
+  const files = fs.readdirSync(dir)
+    .filter((x) => /^follow_.*\.jsonl$/.test(x))
+    .map((x) => path.join(dir, x))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  if (!files.length) throw new Error(`no follow diagnostics found in ${dir}`);
+  return files[0];
 }
 
 function summarize(file) {
@@ -86,6 +111,11 @@ function summarize(file) {
   const cmdDrop = samples.map((x) => Number(x.cmdDrop)).filter(Number.isFinite);
   const teleDrop = samples.map((x) => Number(x.teleDrop)).filter(Number.isFinite);
   const ikFail = samples.map((x) => Number(x.ikFail)).filter(Number.isFinite);
+  const fref = samples.map((x) => x.fref).filter((x) => x && typeof x === 'object');
+  const frefErrT = fref.map((x) => Number(x.errT)).filter(Number.isFinite);
+  const frefErrR = fref.map((x) => Number(x.errR)).filter(Number.isFinite);
+  const frefVelT = fref.map(frefVelTOf).filter(Number.isFinite);
+  const frefVelR = fref.map(frefVelROf).filter(Number.isFinite);
 
   return {
     file: path.basename(file),
@@ -124,8 +154,24 @@ function summarize(file) {
       first: firstSummary?.manual || null,
       last: lastSummary?.manual || null,
       targetEvents: d.manualTargets.length,
+      forwardEvents: d.manualForwards.length,
       stopEvents: d.manualStops.map((x) => ({ t: x.t, reason: x.reason })),
       limits: d.manualLimits.map((x) => ({ t: x.t, vmaxT: x.vmaxT, vmaxR: x.vmaxR })),
+    },
+    fref: {
+      samples: fref.length,
+      gen: fref.length ? fref[fref.length - 1].gen || null : null,
+      errTMax: round(max(frefErrT), 3),
+      errTP95: round(percentile(frefErrT, 95), 3),
+      errRMax: round(max(frefErrR), 3),
+      errRP95: round(percentile(frefErrR, 95), 3),
+      velTMax: round(max(frefVelT), 3),
+      velRMax: round(max(frefVelR), 3),
+      latest: fref.length ? fref[fref.length - 1] : null,
+    },
+    parse: {
+      errors: d.parseErrors.length || lastSummary?.parse?.errors || 0,
+      latest: d.parseErrors.length ? d.parseErrors[d.parseErrors.length - 1] : null,
     },
     followState: {
       states: d.states.map((x) => ({ t: x.t, fl: x.fl, profile: x.profile, pos: x.pos, mode: x.mode })),
@@ -152,7 +198,7 @@ function summarize(file) {
 }
 
 function main() {
-  const files = process.argv.slice(2);
+  const files = process.argv.slice(2).map((x) => x === 'latest' ? latestFollowDiagFile() : x);
   if (!files.length) { usage(); process.exit(1); }
   const out = files.map(summarize);
   console.log(JSON.stringify(out.length === 1 ? out[0] : out, null, 2));

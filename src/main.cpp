@@ -25,7 +25,9 @@ int64_t latestRaw[NUM_MOTORS];
 uint32_t latestRawAtMs[NUM_MOTORS] = {0};
 volatile bool autoReturnMode = false;
 volatile bool canRxPaused = false;
-uint16_t arPeriodMs = 10;             // 馬達主動上報週期；SERVO42D 0x01 timer 固定是整數 ms
+constexpr uint16_t AR_PERIOD_MIN_MS = 20;  // MCP2515/500K: 6x stream + F5 must stay below redline.
+constexpr uint16_t AR_PERIOD_MAX_MS = 100;
+uint16_t arPeriodMs = AR_PERIOD_MIN_MS;    // 馬達主動上報週期；SERVO42D 0x01 timer 固定是整數 ms
 constexpr uint32_t AR_FRESH_MS = 120; // 啟動/重啟 auto-return 時用來判斷「近期收到過」的軟門檻
 constexpr uint32_t AR_WARN_MS = 1000; // 長時間沒新 frame 才警告；短缺包沿用 last-known-good，不停機
 bool autoReturnWarnLatched = false;
@@ -91,6 +93,8 @@ struct TelemetrySnapshot {
     int pidSaved;
     int followMode;
     uint8_t profile;
+    float followCurPose[6], followTgtPose[6], followVelPose[6];
+    float followVmax[2], followAmax[2], followJmax[2];
     TelemetryExtra extra;
     float hold[NUM_MOTORS], herr[NUM_MOTORS], hmax;
     float holdDampGain, holdDampMax, holdDampCorrMax;
@@ -197,36 +201,106 @@ static void applyHoldOutputDamping(float targets[NUM_MOTORS], float dt) {
     }
 }
 
-// 跟隨模式（FOLLOW/PF）：HOLD 下接 host 串流的 pose 目標，以速度受限濾波器平滑追過去。
+// 跟隨模式（FOLLOW/PF）：HOLD 下接 host 的「最新 pose 目標」，ESP32 在控制 tick 內產生唯一物理 reference。
 // 與 P minimum-jerk profile 互斥（follow on 時 followStep 接管 holdAngles，忽略 holdMoveMs）。
-// 設計：每 cycle 對「pose 誤差」做低通求步進（近目標 ease-out），再把步進的速度 clamp 到
-// vmax → 遠時等速平滑落後（拖快不硬撲）、近時低通收斂。速度上限同時是所有 host 動作的硬體安全閥。
+// 設計：host/browser/server 只更新 followTgt；followStep 以固定 control loop 做 acceleration/jerk limited
+// online trajectory。這避免低頻/抖動 PF 目標直接變成馬達階梯，也避免 server/browser 成為物理時鐘。
 bool  followMode = false;
 float followCur[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 當前濾波後 pose（IK 對象）
 float followTgt[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 串流進來的目標 pose（PF 設）
+float followVel[6] = {0, 0, 0, 0, 0, 0};            // pose reference velocity（mm/s 或 deg/s）
+float followAcc[6] = {0, 0, 0, 0, 0, 0};            // pose reference acceleration
 float followVmaxT  = 60.0f;    // 平移速度上限 mm/s（VF 可調）
 float followVmaxR  = 45.0f;    // 旋轉速度上限 deg/s（VF 可調）
-const float FOLLOW_TAU = 0.15f;   // 低通時間常數 s（近目標減速的柔順度）
+constexpr float FOLLOW_ACCEL_TIME_S = 0.16f;  // 約多久允許 reference 加速到 VF；越小越跟手。
+constexpr float FOLLOW_JERK_TIME_S  = 0.08f;  // 約多久允許 acceleration 拉到上限；抑制方向切換抽動。
+constexpr float FOLLOW_EPS_T = 0.003f;        // mm，到目標後 snap，避免微小尾巴造成 keep-alive 抖動。
+constexpr float FOLLOW_EPS_R = 0.002f;        // deg
+
+static inline float followVmaxForAxis(int i) {
+    return i < 3 ? followVmaxT : followVmaxR;
+}
+
+static inline float followAmaxForAxis(int i) {
+    return followVmaxForAxis(i) / FOLLOW_ACCEL_TIME_S;
+}
+
+static inline float followJmaxForAxis(int i) {
+    return followAmaxForAxis(i) / FOLLOW_JERK_TIME_S;
+}
+
+static void resetFollowDynamics(const float init[6]) {
+    for (int i = 0; i < 6; i++) {
+        followCur[i] = init[i];
+        followTgt[i] = init[i];
+        followVel[i] = 0.0f;
+        followAcc[i] = 0.0f;
+    }
+}
 
 static inline Pose poseFromArr(const float a[6]) {
     return Pose{a[0], a[1], a[2], a[3], a[4], a[5]};
 }
 
-// 跟隨濾波器一步：低通步進 + 全域速度 clamp（統一縮放保 pose 直線同步）→ IK → holdAngles。
-// IK 無效（拖出工作空間）→ 維持上一有效點，不前進、不 snap。
+static void followAxisCandidate(int i, float dt, float cand[6], float velNext[6], float accNext[6]) {
+    const float vmax = followVmaxForAxis(i);
+    const float amax = followAmaxForAxis(i);
+    const float jmax = followJmaxForAxis(i);
+    const float eps = i < 3 ? FOLLOW_EPS_T : FOLLOW_EPS_R;
+
+    const float x = followCur[i];
+    const float err = followTgt[i] - x;
+    const float v = followVel[i];
+    const float a = followAcc[i];
+
+    if (fabsf(err) <= eps && fabsf(v) <= eps / fmaxf(dt, 0.001f) && fabsf(a) <= amax * 0.01f) {
+        cand[i] = followTgt[i];
+        velNext[i] = 0.0f;
+        accNext[i] = 0.0f;
+        return;
+    }
+
+    const float dir = err >= 0.0f ? 1.0f : -1.0f;
+    const float vBrake = sqrtf(fmaxf(0.0f, 2.0f * amax * fabsf(err)));
+    const float vDesired = dir * fminf(vmax, vBrake);
+    const float aDesired = constrain((vDesired - v) / fmaxf(dt, 0.001f), -amax, amax);
+    const float da = constrain(aDesired - a, -jmax * dt, jmax * dt);
+    float nextA = constrain(a + da, -amax, amax);
+    float nextV = constrain(v + nextA * dt, -vmax, vmax);
+    float nextX = x + nextV * dt;
+
+    if ((followTgt[i] - x) * (followTgt[i] - nextX) <= 0.0f) {
+        nextX = followTgt[i];
+        nextV = 0.0f;
+        nextA = 0.0f;
+    }
+
+    cand[i] = nextX;
+    velNext[i] = nextV;
+    accNext[i] = nextA;
+}
+
+// 跟隨生成器一步：acceleration/jerk limited pose reference → IK → holdAngles。
+// IK 無效（拖出工作空間）→ 維持上一有效點，並清速度/加速度，避免重新進可達區時帶著舊動量衝出去。
 static void followStep(float dt) {
-    float alpha = constrain(dt / FOLLOW_TAU, 0.0f, 1.0f);
-    float step[6];
-    for (int i = 0; i < 6; i++) step[i] = alpha * (followTgt[i] - followCur[i]);
-    // 速度上限：平移(0,1,2)→vmaxT·dt、旋轉(3,4,5)→vmaxR·dt；取最嚴比例統一縮放
-    float scale = 1.0f, capT = followVmaxT * dt, capR = followVmaxR * dt;
-    for (int i = 0; i < 3; i++) { float a = fabsf(step[i]); if (a > capT) scale = fminf(scale, capT / a); }
-    for (int i = 3; i < 6; i++) { float a = fabsf(step[i]); if (a > capR) scale = fminf(scale, capR / a); }
-    float cand[6];
-    for (int i = 0; i < 6; i++) cand[i] = followCur[i] + step[i] * scale;
+    dt = constrain(dt, 0.001f, 0.02f);
+    float cand[6], velNext[6], accNext[6];
+    for (int i = 0; i < 6; i++) followAxisCandidate(i, dt, cand, velNext, accNext);
+
     IKResult ik = inverse_kinematics(poseFromArr(cand));
     if (ik.valid) {
-        for (int i = 0; i < 6; i++) { followCur[i] = cand[i]; holdAngles[i] = ik.angles[i]; }
+        for (int i = 0; i < 6; i++) {
+            followCur[i] = cand[i];
+            followVel[i] = velNext[i];
+            followAcc[i] = accNext[i];
+            holdAngles[i] = ik.angles[i];
+        }
+    } else {
+        ctlIkFailWin++;
+        for (int i = 0; i < 6; i++) {
+            followVel[i] = 0.0f;
+            followAcc[i] = 0.0f;
+        }
     }
 }
 
@@ -382,11 +456,16 @@ static bool validRuntimeTuning(const RuntimeTuningNVS& cfg) {
            cfg.currentMa >= 100 && cfg.currentMa <= 3000 &&
            cfg.f5Speed >= 1 && cfg.f5Speed <= 200 &&
            cfg.f5Acc >= 1 && cfg.f5Acc <= 255 &&
-           cfg.arMs >= 1 && cfg.arMs <= 100 &&
+           cfg.arMs >= 1 && cfg.arMs <= AR_PERIOD_MAX_MS &&
            cfg.loopUs >= 1000 && cfg.loopUs <= 100000 &&
            isfinite(cfg.odGain) && cfg.odGain >= 0.0f && cfg.odGain <= 0.08f &&
            isfinite(cfg.odMaxDeg) && cfg.odMaxDeg >= 0.0f && cfg.odMaxDeg <= 5.0f &&
            isfinite(cfg.odDeadbandDps) && cfg.odDeadbandDps >= 0.0f && cfg.odDeadbandDps <= 30.0f;
+}
+
+static uint16_t clampAutoReturnPeriodMs(float requestedMs) {
+    float clampedMs = constrain(requestedMs, (float)AR_PERIOD_MIN_MS, (float)AR_PERIOD_MAX_MS);
+    return (uint16_t)constrain((int)floorf(clampedMs + 0.5f), (int)AR_PERIOD_MIN_MS, (int)AR_PERIOD_MAX_MS);
 }
 
 static bool loadRuntimeTuningFromNVS() {
@@ -399,7 +478,7 @@ static bool loadRuntimeTuningFromNVS() {
     workingCurrentMa = cfg.currentMa;
     posSpeed = cfg.f5Speed;
     posAcc = cfg.f5Acc;
-    arPeriodMs = cfg.arMs;
+    arPeriodMs = clampAutoReturnPeriodMs((float)cfg.arMs);
     loopPeriodUs = cfg.loopUs;
     holdDampGainSec = cfg.odGain;
     holdDampMaxDeg = cfg.odMaxDeg;
@@ -713,6 +792,19 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
             s.motorTgt[3],s.motorTgt[4],s.motorTgt[5],
             s.jointGain);
     }
+    if (s.followMode) {
+        float errT = 0.0f, errR = 0.0f, velT = 0.0f, velR = 0.0f;
+        for (int i = 0; i < 3; i++) {
+            errT = fmaxf(errT, fabsf(s.followTgtPose[i] - s.followCurPose[i]));
+            velT = fmaxf(velT, fabsf(s.followVelPose[i]));
+        }
+        for (int i = 3; i < 6; i++) {
+            errR = fmaxf(errR, fabsf(s.followTgtPose[i] - s.followCurPose[i]));
+            velR = fmaxf(velR, fabsf(s.followVelPose[i]));
+        }
+        Out.printf(",\"fref\":{\"g\":1,\"e\":[%.2f,%.3f],\"v\":[%.2f,%.3f],\"lim\":[%.1f,%.1f]}",
+            errT, errR, velT, velR, s.followVmax[0], s.followVmax[1]);
+    }
     Out.println("}");
 }
 
@@ -796,7 +888,7 @@ void setup() {
     delay(200);
     servos.flushReceiveBuffer();
 
-    // 預設啟用 auto-return（本輪改為主運行模式）：6 顆每 arPeriodMs(10ms=100Hz) 主動上報 0x35，
+    // 預設啟用 auto-return：MCP2515/500K 下保守用 20ms(50Hz)，避免 6 顆 streaming + F5 壓爆 2 格 RX buffer。
     // ESP32 連續排空、控制環只取最新快照 → cus≈0、無輪詢 8ms backstop（runtime A0 可切回輪詢）。
     armAutoReturn(false);
     startCanRxTask();
@@ -849,16 +941,20 @@ void dispatch(const String& cmd, bool fromNet = false) {
         // 調整上報週期（ms）；SERVO42D 協定 timer 為 uint16 ms，小數輸入會量化到最接近的整數 ms。
         float requestedMs = 0.0f;
         if (sscanf(cmd.c_str(), "AR %f", &requestedMs) == 1 && requestedMs > 0.0f) {
-            float clampedMs = constrain(requestedMs, 1.0f, 100.0f);
-            arPeriodMs = (uint16_t)constrain((int)floorf(clampedMs + 0.5f), 1, 100);
+            uint16_t prevArPeriodMs = arPeriodMs;
+            arPeriodMs = clampAutoReturnPeriodMs(requestedMs);
             int okc = rearmAutoReturnIfEnabled();
             bool saved = saveRuntimeTuningToNVS();
-            int quantized = fabsf(clampedMs - (float)arPeriodMs) > 0.001f ? 1 : 0;
+            int quantized = fabsf(requestedMs - (float)arPeriodMs) > 0.001f ? 1 : 0;
+            int clamped = (requestedMs < (float)AR_PERIOD_MIN_MS || requestedMs > (float)AR_PERIOD_MAX_MS) ? 1 : 0;
             Out.printf("{\"status\":\"ar period\",\"period_ms\":%d,\"hz\":%.3f,"
                        "\"requested_period_ms\":%.3f,\"requested_hz\":%.3f,"
-                       "\"quantized\":%d,\"cfg_ok\":%d,\"saved\":%d}\n",
+                       "\"min_period_ms\":%d,\"max_period_ms\":%d,"
+                       "\"quantized\":%d,\"clamped\":%d,\"prev_period_ms\":%d,\"cfg_ok\":%d,\"saved\":%d}\n",
                        arPeriodMs, 1000.0f / arPeriodMs,
-                       clampedMs, 1000.0f / clampedMs, quantized, okc, saved ? 1 : 0);
+                       requestedMs, 1000.0f / requestedMs,
+                       AR_PERIOD_MIN_MS, AR_PERIOD_MAX_MS,
+                       quantized, clamped, prevArPeriodMs, okc, saved ? 1 : 0);
         } else {
             Out.println("{\"error\":\"usage AR period_ms\"}");
         }
@@ -1073,10 +1169,11 @@ void dispatch(const String& cmd, bool fromNet = false) {
                     init[0]=targetPose.x; init[1]=targetPose.y; init[2]=targetPose.z;
                     init[3]=targetPose.roll; init[4]=targetPose.pitch; init[5]=targetPose.yaw;
                 }
-                for (int i = 0; i < 6; i++) { followCur[i] = init[i]; followTgt[i] = init[i]; }
+                resetFollowDynamics(init);
                 holdMoveMs = 0;          // 與 P minimum-jerk profile 互斥
                 followMode = true;
-                Out.printf("{\"status\":\"follow on\",\"pose\":[%.2f,%.2f,%.2f,%.3f,%.3f,%.3f],\"fk\":%d}\n",
+                Out.printf("{\"status\":\"follow on\",\"pose\":[%.2f,%.2f,%.2f,%.3f,%.3f,%.3f],"
+                           "\"fk\":%d,\"gen\":\"esp32_jerk_limited\"}\n",
                     init[0],init[1],init[2],init[3],init[4],init[5], fk.converged?1:0);
             }
         } else {
@@ -1084,19 +1181,25 @@ void dispatch(const String& cmd, bool fromNet = false) {
             Out.println("{\"status\":\"follow off\"}");
         }
     } else if (cmd.startsWith("PF ")) {
-        // 跟隨目標串流 `PF x y z r p y`：高頻、僅更新 followTgt，不回 ack（避免塞爆接收）。
-        // IK 有效性由 followStep 每 cycle 把關（超工作空間維持上一有效點）；非 followMode 忽略。
+        // 跟隨目標更新 `PF x y z r p y`：只更新最新意圖，不回 ack（避免塞爆接收）。
+        // 物理 reference 由 ESP32 followStep 每 control tick 產生；非 followMode 忽略。
         float v[6];
         int n = sscanf(cmd.c_str(), "PF %f %f %f %f %f %f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]);
         if (n >= 6 && followMode) { for (int i = 0; i < 6; i++) followTgt[i] = v[i]; }
     } else if (cmd.startsWith("VF ")) {
         // 跟隨速度上限 `VF vmaxT vmaxR`（mm/s, deg/s）：所有 host 動作的硬體安全閥。
+        // acceleration/jerk 上限由 VF 派生，保持單一安全旋鈕。
         float vt, vr;
         int n = sscanf(cmd.c_str(), "VF %f %f", &vt, &vr);
         if (n >= 2) {
             followVmaxT = constrain(vt, 1.0f, 500.0f);
             followVmaxR = constrain(vr, 1.0f, 360.0f);
-            Out.printf("{\"status\":\"follow vmax\",\"t\":%.1f,\"r\":%.1f}\n", followVmaxT, followVmaxR);
+            Out.printf("{\"status\":\"follow vmax\",\"t\":%.1f,\"r\":%.1f,"
+                       "\"at\":%.1f,\"ar\":%.1f,\"jt\":%.1f,\"jr\":%.1f,"
+                       "\"gen\":\"esp32_jerk_limited\"}\n",
+                followVmaxT, followVmaxR,
+                followAmaxForAxis(0), followAmaxForAxis(3),
+                followJmaxForAxis(0), followJmaxForAxis(3));
         }
     } else if (cmd.startsWith("CM ")) {
         // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
@@ -1489,7 +1592,7 @@ static void controlTick() {
 
         if (holdMode) {
             // ===== HOLD：直送 snapshot，跳過所有 PD/IK/平滑 =====
-            // 跟隨模式（FOLLOW/PF/動作庫）：速度受限濾波器接管 holdAngles，與 minimum-jerk profile 互斥。
+            // 跟隨模式（FOLLOW/PF/動作庫）：ESP32 線上 reference generator 接管 holdAngles，與 minimum-jerk profile 互斥。
             if (followMode) {
                 followStep(dt);
             } else if (holdMoveMs > 0) {
@@ -1655,6 +1758,17 @@ static void controlTick() {
     snap.pidSaved = pidSaved ? 1 : 0;
     snap.followMode = followMode ? 1 : 0;
     snap.profile = followMode ? 1 : (holdMoveMs > 0 ? 2 : 0);
+    for (int i = 0; i < 6; i++) {
+        snap.followCurPose[i] = followCur[i];
+        snap.followTgtPose[i] = followTgt[i];
+        snap.followVelPose[i] = followVel[i];
+    }
+    snap.followVmax[0] = followVmaxT;
+    snap.followVmax[1] = followVmaxR;
+    snap.followAmax[0] = followAmaxForAxis(0);
+    snap.followAmax[1] = followAmaxForAxis(3);
+    snap.followJmax[0] = followJmaxForAxis(0);
+    snap.followJmax[1] = followJmaxForAxis(3);
     snap.ctrlUs = ctrlUs;
     snap.ctrlMaxUs = controlMaxUs;
     snap.jitterUs = jitterUs;

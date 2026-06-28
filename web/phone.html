@@ -445,8 +445,8 @@ function flushPF() {
   pfPending = null;
 }
 
-// Phone submits the latest IMU target. The server converts manual targets into
-// a fixed-rate smooth PF reference; this local throttle only bounds browser IO.
+// Phone submits the latest IMU target. The server forwards latest intent; ESP32
+// owns the fixed-rate acceleration/jerk limited reference.
 function streamPF(pose) {
   pfPending = pose.slice();
   const dt = performance.now() - pfLast;

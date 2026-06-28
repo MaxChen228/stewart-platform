@@ -34,6 +34,10 @@ static volatile uint32_t netClientReject = 0;
 static volatile uint32_t netClientPreempt = 0;
 static volatile uint32_t netClientStop = 0;
 static volatile uint32_t netWifiDrop = 0;
+static volatile uint32_t netWifiReconnect = 0;
+static volatile uint32_t netWifiHardReset = 0;
+static volatile uint32_t netWifiDownSinceMs = 0;
+static volatile uint32_t netWifiLastAttemptMs = 0;
 static volatile uint32_t netInLines = 0;
 static volatile uint32_t netInDrop = 0;
 static volatile uint32_t netInTooLong = 0;
@@ -66,9 +70,45 @@ static void (*otaStartCallback)() = nullptr;
 // ESP32 tear down an otherwise healthy control session.
 static constexpr uint32_t NET_TELEM_MIN_MS = 50;  // cap full telemetry at ~20 Hz over TCP
 static constexpr uint32_t NET_CLIENT_STALE_MS = 3000;
+static constexpr uint32_t NET_WIFI_RETRY_MS = 5000;
+static constexpr uint32_t NET_WIFI_HARD_RESET_MS = 30000;
+
+static void netAdvertiseMDNS();
 
 static bool isTelemetryLine(const char* s) {
     return s && s[0] == '{' && s[1] == '"' && s[2] == 'a' && s[3] == '"' && s[4] == ':';
+}
+
+static void netBeginSta() {
+    WiFi.mode(WIFI_STA);
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(netCfg.ssid.c_str(), netCfg.pass.c_str());
+}
+
+static void netMaintainWifi(uint32_t nowMs) {
+    if (!netCfg.enabled || netCfg.ssid.length() == 0) return;
+    if (WiFi.status() == WL_CONNECTED) {
+        netWifiDownSinceMs = 0;
+        return;
+    }
+
+    if (!netWifiDownSinceMs) netWifiDownSinceMs = nowMs ? nowMs : 1;
+    if (netWifiLastAttemptMs && nowMs - netWifiLastAttemptMs < NET_WIFI_RETRY_MS) return;
+    netWifiLastAttemptMs = nowMs;
+
+    if (nowMs - netWifiDownSinceMs >= NET_WIFI_HARD_RESET_MS) {
+        WiFi.disconnect(false);
+        WiFi.mode(WIFI_OFF);
+        delay(20);
+        netWifiHardReset++;
+        netWifiDownSinceMs = nowMs;
+    } else {
+        WiFi.disconnect(false);
+    }
+    netBeginSta();
+    netWifiReconnect++;
 }
 
 static void stopNetClient(WiFiClient& client, const char* reason) {
@@ -172,6 +212,7 @@ static void netTask(void* arg) {
     size_t inn = 0;
     bool inOverflow = false;
     for (;;) {
+        uint32_t nowMs = millis();
         if (WiFi.status() != WL_CONNECTED) {
             if (started) {
                 stopNetClient(client, "wifi_down");
@@ -180,12 +221,19 @@ static void netTask(void* arg) {
                 netWifiDrop++;
             }  // 釋放半開資源
             netConnected = false;
+            netMaintainWifi(nowMs);
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
-        if (!started) { server.begin(); server.setNoDelay(true); started = true; }
+        netWifiDownSinceMs = 0;
+        if (!started) {
+            netAdvertiseMDNS();
+            netOtaBegin();
+            server.begin();
+            server.setNoDelay(true);
+            started = true;
+        }
 
-        uint32_t nowMs = millis();
         bool clientAlive = (client && client.connected());
         // Treat host input, not ESP32 output, as proof of a healthy TCP client.
         // A half-open socket can keep accepting writes into local buffers, which
@@ -342,25 +390,33 @@ static void netAdvertiseMDNS() {
 
 bool netWifiBegin(uint32_t waitMs) {
     if (netCfg.ssid.length() == 0) return false;
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);                       // 關 modem sleep（即時控制必要）
-    WiFi.begin(netCfg.ssid.c_str(), netCfg.pass.c_str());
+    netBeginSta();
+    netWifiLastAttemptMs = millis();
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < waitMs) delay(100);
     bool ok = (WiFi.status() == WL_CONNECTED);
     if (ok) {
+        netWifiDownSinceMs = 0;
         netAdvertiseMDNS();                     // boot 與 WIFION 都經此 → mDNS 單一啟動點
         netOtaBegin();
+    } else {
+        netWifiDownSinceMs = millis();
     }
     return ok;
 }
 
 void netWifiStop() {
+    netConnected = false;
+    lastNetRxMs = 0;
+    netCloseReason = "wifi_off";
     otaStarted = false;
     otaInProgress = false;
     ArduinoOTA.end();
+    MDNS.end();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    netWifiDownSinceMs = 0;
+    netWifiLastAttemptMs = 0;
 }
 
 void netBoot() {
@@ -388,6 +444,7 @@ static void netReportStatus() {
     unsigned qInDepth = qIn ? uxQueueMessagesWaiting(qIn) : 0;
     Out.printf("{\"wifi\":{\"enabled\":%d,\"connected\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,"
                "\"heap\":%u,\"min_heap\":%u,\"fs\":%u,\"hb_ms\":%u,"
+               "\"reconnect\":%u,\"hard_reset\":%u,\"down_ms\":%u,"
                "\"ota\":{\"ready\":%d,\"busy\":%d,\"host\":\"%s\"},"
                "\"tcp\":{\"client\":%d,\"seq\":%u,\"last_rx_age_ms\":%u,"
                "\"qout\":%u,\"qin\":%u,\"out\":%u,\"out_drop\":%u,\"out_skip\":%u,"
@@ -403,6 +460,9 @@ static void netReportStatus() {
                   (unsigned)ESP.getMinFreeHeap(),
                   (unsigned)netCfg.failsafe,
                   (unsigned)netCfg.hbTimeoutMs,
+                  (unsigned)netWifiReconnect,
+                  (unsigned)netWifiHardReset,
+                  (unsigned)(netWifiDownSinceMs ? now - netWifiDownSinceMs : 0),
                   otaStarted ? 1 : 0,
                   otaInProgress ? 1 : 0,
                   OTA_HOSTNAME,
