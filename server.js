@@ -185,6 +185,7 @@ const FOLLOW_VERDICT = {
   ctrlBudgetUs: numberEnv('FOLLOW_VERDICT_CTRL_BUDGET_US', 0),   // 0 = auto (0.8 x loop period)
   satPct: numberEnv('FOLLOW_VERDICT_SAT_PCT', 20),
   lhzFloorFrac: numberEnv('FOLLOW_LHZ_FLOOR_FRAC', 0.9),
+  rateTol: numberEnv('FOLLOW_VERDICT_RATE_TOL', 0.2),   // emit-vs-control rate mismatch advisory band (+/-)
 };
 let lastFollowReport = null;
 let followReportSeq = 0;
@@ -749,8 +750,8 @@ function manualPfResamplerStop(reason = 'stopped') {
 function manualPfAdvance() {
   manualPfNextAt += PF_RESAMPLE_MS;
   const now = Date.now();
-  if (manualPfNextAt < now) {
-    manualPfNextAt = now + PF_RESAMPLE_MS;   // fell behind: drop missed slots, emit latest once, resync
+  if (manualPfNextAt <= now) {
+    manualPfNextAt = now + PF_RESAMPLE_MS;   // >=1 period late (slot already due/past): drop missed, emit once, resync
   }
 }
 
@@ -1138,7 +1139,7 @@ function computeFollowVerdict(emit, wire, fw, limits) {
   // to eyeball emitHz vs lhzNominal.
   if (emit.applicable && emit.emitHz != null && Number.isFinite(fw.lhzNominal) && fw.lhzNominal > 0) {
     const ratio = emit.emitHz / fw.lhzNominal;
-    if (ratio > 1.2 || ratio < 0.8) {
+    if (ratio > 1 + V.rateTol || ratio < 1 - V.rateTol) {
       advisory.push(`emit rate ${emit.emitHz}Hz vs firmware control rate ${fw.lhzNominal}Hz mismatch (ratio ${round(ratio, 2)}); match PF_RESAMPLE_HZ to the firmware loop (\`L <ms>\`) so the coupled rate knob stays consistent`);
     }
   }
