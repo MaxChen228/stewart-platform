@@ -150,6 +150,7 @@ const manualPf = {
   // resampler emit-side accounting (Part A); emitDtMaxSession reset at session start
   writeFail: 0,
   transportSkip: 0,
+  emitErrors: 0,   // manualPfEmit() threw (unexpected); persistent so a recovered one-shot stays visible
   emitDtMaxSession: 0,
 };
 
@@ -166,15 +167,18 @@ const FOLLOW_STALE_MS = numberEnv('FOLLOW_STALE_MS', 3000);
 const FOLLOW_RESERVOIR_MAX = Math.max(100, Math.floor(numberEnv('FOLLOW_RESERVOIR_MAX', 2000)));
 const FOLLOW_SAT_FRAC = numberEnv('FOLLOW_SAT_FRAC', 0.95);
 const FOLLOW_VERDICT = {
-  // Emission band tracks PF_RESAMPLE_HZ so control rate + emit rate move as ONE
+  // Emission band tracks the resampler rate so control rate + emit rate move as ONE
   // coupled knob: raise the firmware control loop (runtime `L <ms>`) and set
   // PF_RESAMPLE_HZ to match -> this pass window follows automatically. The CAN bus
   // is not the binding constraint (150Hz F5+encoder = 47% of 500kbps per
   // `node sysid/can_budget.js --sweep`); the real limit is per-tick ctrlMaxUs,
-  // which the report's `control` check measures empirically. Defaults reduce to the
-  // prior 100Hz tuning (90-110Hz, 13ms p95); explicit env overrides still win.
-  emitHzLo: numberEnv('FOLLOW_VERDICT_EMIT_HZ_LO', round(PF_RESAMPLE_HZ * 0.9, 1)),
-  emitHzHi: numberEnv('FOLLOW_VERDICT_EMIT_HZ_HI', round(PF_RESAMPLE_HZ * 1.1, 1)),
+  // which the report's `control` check measures empirically. Both band and p95 are
+  // derived from the EFFECTIVE rate 1000/PF_RESAMPLE_MS (the actual setTimeout
+  // cadence after ms quantization), not nominal PF_RESAMPLE_HZ -- at e.g. 150Hz the
+  // period quantizes to 7ms (142.86Hz), so the band must center there to stay honest.
+  // At 100Hz this reduces exactly to the prior 90-110Hz / 13ms; env overrides win.
+  emitHzLo: numberEnv('FOLLOW_VERDICT_EMIT_HZ_LO', round((1000 / PF_RESAMPLE_MS) * 0.9, 1)),
+  emitHzHi: numberEnv('FOLLOW_VERDICT_EMIT_HZ_HI', round((1000 / PF_RESAMPLE_MS) * 1.1, 1)),
   emitDtP95Ms: numberEnv('FOLLOW_VERDICT_EMIT_DTP95_MS', round(PF_RESAMPLE_MS * 1.3, 1)),
   emitDtMaxMs: numberEnv('FOLLOW_VERDICT_EMIT_DTMAX_MS', 50),
   missedMax: numberEnv('FOLLOW_VERDICT_MISSED_MAX', 5),
@@ -680,6 +684,9 @@ function manualPfSummary(now = Date.now()) {
     vmaxR: manualPf.vmaxR,
     target: manualPf.target,
     output: manualPf.output,
+    writeFail: manualPf.writeFail,
+    transportSkip: manualPf.transportSkip,
+    emitErrors: manualPf.emitErrors,
     lastReason: manualPf.lastReason,
   };
 }
@@ -695,20 +702,22 @@ function manualPfSetLimits(cmd) {
   }
 }
 
-// ===== Manual FOLLOW 100 Hz resampler =====
+// ===== Manual FOLLOW resampler (configurable rate, default 100 Hz) =====
 // browser/phone only post the latest intent (manualPf.target). This fixed-rate
 // timer is the single physical PF clock: each tick re-emits the latest target,
-// fully decoupled from browser main-thread jitter. ESP32 followStep still owns
-// the 400 Hz jerk/accel/vel-limited reference; this only guarantees a steady
-// target-update cadence on the wire.
+// fully decoupled from browser main-thread jitter. The ESP32 control loop (default
+// 100 Hz, runtime-settable via `L <ms>`) owns the jerk/accel/vel-limited followStep
+// reference; this resampler only guarantees a steady target-update cadence on the
+// wire. Keep PF_RESAMPLE_HZ matched to the firmware loop rate (coupled knob).
 // We drive a self-correcting setTimeout chain against an ABSOLUTE tick schedule
 // (manualPfNextAt += period) rather than setInterval. setInterval silently slips
 // under event-loop congestion (telemetry parse + WS broadcast share this loop)
 // and gives no hook to fold a fresh input into the cadence. Absolute-clock gives:
 //   - drift-free cadence: each tick aims at its ideal wall-clock slot, so a late
 //     callback is corrected on the next hop instead of accumulating.
-//   - spiral protection: a stall past >1 period drops the missed slots (resync to
-//     now+period) instead of firing a back-to-back catch-up burst onto the wire.
+//   - spiral protection: once a tick fires late enough to skip a slot, drop the
+//     missed slots (resync to now+period) so a stalled loop emits the latest target
+//     ONCE on recovery instead of firing a back-to-back catch-up burst onto the wire.
 //   - leading-edge fold-in: a fresh target whose slot is already due fires now via
 //     manualPfUpdateTarget, cutting up-to-one-period of input->wire latency.
 function manualPfArm() {
@@ -733,12 +742,15 @@ function manualPfResamplerStop(reason = 'stopped') {
   followDiagWrite('manual_pf_resampler', { state: 'stop', reason });
 }
 
-// Advance the absolute schedule one slot, dropping missed slots on stall.
+// Advance the absolute schedule one slot, dropping missed slots on stall. The
+// resync test is AFTER the increment: if the next slot is already in the past, the
+// tick fired >=1 period late (skipped a slot), so resync to now+period rather than
+// re-arming at delay 0 for each missed slot (which would emit a duplicate burst).
 function manualPfAdvance() {
   manualPfNextAt += PF_RESAMPLE_MS;
   const now = Date.now();
-  if (manualPfNextAt < now - PF_RESAMPLE_MS) {
-    manualPfNextAt = now + PF_RESAMPLE_MS;   // >1 period behind: resync, drop missed slots (no burst)
+  if (manualPfNextAt < now) {
+    manualPfNextAt = now + PF_RESAMPLE_MS;   // fell behind: drop missed slots, emit latest once, resync
   }
 }
 
@@ -750,6 +762,7 @@ function manualPfTick() {
   try {
     manualPfEmit();
   } catch (err) {
+    manualPf.emitErrors++;   // persistent counter: a one-shot throw that recovers must stay observable
     manualPf.lastReason = `emit error: ${err && err.message ? err.message : err}`;
   } finally {
     manualPfAdvance();
@@ -928,7 +941,7 @@ function newFollowAcc() {
     counters: {},
     ctrlMaxUs: null, jitterUsMax: null, herrMax: null, lhzMin: null, lhzMax: null,
     teleSamples: 0, counterResetDetected: false,
-    emittedAtStart: 0, writeFailAtStart: 0, transportSkipAtStart: 0,
+    emittedAtStart: 0, writeFailAtStart: 0, transportSkipAtStart: 0, emitErrorsAtStart: 0,
     mailbox: { received: 0, flushed: 0, coalesced: 0, dropped: 0, writeFail: 0, transportDrop: 0 },
   };
 }
@@ -979,6 +992,7 @@ function followSessionStart(now, sample, trigger) {
   acc.emittedAtStart = manualPf.emitted;
   acc.writeFailAtStart = manualPf.writeFail;
   acc.transportSkipAtStart = manualPf.transportSkip;
+  acc.emitErrorsAtStart = manualPf.emitErrors;
   acc.mailbox = {
     received: pfMailbox.received, flushed: pfMailbox.flushed, coalesced: pfMailbox.coalesced,
     dropped: pfMailbox.dropped, writeFail: pfMailbox.writeFail, transportDrop: pfMailbox.transportDrop,
@@ -1079,9 +1093,10 @@ function computeFollowVerdict(emit, wire, fw, limits) {
   if (!emit.applicable) {
     checks.push({ check: 'wire', pass: null, reason: 'n/a: no resampler emits this session' });
   } else {
-    const ok = (wire.resampler.writeFail || 0) === 0 && (wire.resampler.transportSkip || 0) === 0;
+    const ok = (wire.resampler.writeFail || 0) === 0 && (wire.resampler.transportSkip || 0) === 0
+      && (wire.resampler.emitErrors || 0) === 0;
     checks.push({ check: 'wire', pass: ok,
-      reason: `${ok ? 'PASS' : 'FAIL'}: writeFail=${wire.resampler.writeFail}, transportSkip=${wire.resampler.transportSkip}` });
+      reason: `${ok ? 'PASS' : 'FAIL'}: writeFail=${wire.resampler.writeFail}, transportSkip=${wire.resampler.transportSkip}, emitErrors=${wire.resampler.emitErrors}` });
   }
 
   pushCounterCheck(checks, 'kinematics', hasTele, fw.counterResetDetected,
@@ -1116,6 +1131,17 @@ function computeFollowVerdict(emit, wire, fw, limits) {
   if (fw.counterResetDetected) {
     advisory.push('firmware counter reset detected mid-session (reboot?); affected checks downgraded to warn');
   }
+  // Coupled-knob guard: emit rate and firmware control rate should match. If they
+  // diverge (operator raised PF_RESAMPLE_HZ without the firmware `L`, or vice versa)
+  // the server over/under-feeds the loop. Benign (followStep coalesces to latest) so
+  // it stays advisory, not a FAIL -- but surface it rather than leaving the operator
+  // to eyeball emitHz vs lhzNominal.
+  if (emit.applicable && emit.emitHz != null && Number.isFinite(fw.lhzNominal) && fw.lhzNominal > 0) {
+    const ratio = emit.emitHz / fw.lhzNominal;
+    if (ratio > 1.2 || ratio < 0.8) {
+      advisory.push(`emit rate ${emit.emitHz}Hz vs firmware control rate ${fw.lhzNominal}Hz mismatch (ratio ${round(ratio, 2)}); match PF_RESAMPLE_HZ to the firmware loop (\`L <ms>\`) so the coupled rate knob stays consistent`);
+    }
+  }
 
   // tri-state: any FAIL -> false; else any real PASS -> true; else null (inconclusive,
   // e.g. status-triggered session with no telemetry and no resampler emits).
@@ -1147,6 +1173,7 @@ function buildFollowReport(now = Date.now(), status = null, trigger = null, dura
     resampler: {
       writeFail: manualPf.writeFail - acc.writeFailAtStart,
       transportSkip: manualPf.transportSkip - acc.transportSkipAtStart,
+      emitErrors: manualPf.emitErrors - acc.emitErrorsAtStart,
     },
     mailbox: {
       received: pfMailbox.received - acc.mailbox.received,
