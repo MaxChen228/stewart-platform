@@ -165,7 +165,7 @@ function summarize(file) {
       const r = d.reports[d.reports.length - 1];
       return { count: d.reports.length, status: r.status, durationMs: r.session?.durationMs, verdict: r.verdict, emit: r.emit, saturation: r.firmware?.saturation, advisory: r.advisory };
     })() : { count: 0 },
-    sessions: { count: d.sessions.length, aborts: d.sessions.filter((s) => s.state === 'abort').length },
+    sessions: { count: d.sessions.filter((s) => s.state === 'start').length, aborts: d.sessions.filter((s) => s.state === 'abort').length },
     fref: {
       samples: fref.length,
       gen: fref.length ? fref[fref.length - 1].gen || null : null,

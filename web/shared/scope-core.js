@@ -9,7 +9,7 @@
  *   });
  *   scope.on('telemetry', d => {...});   // 每筆遙測（研究頁加 FFT/σ/CAN）
  *   scope.on('cmd', echo => {...});      // 指令 echo（core 已自動 markEvent）
- *   scope.on('render', () => {...});     // 每幀（研究頁畫自己的面板）
+ *   scope.on('render', () => {...});     // ~15Hz 節流（研究頁畫自己的面板）
  *   scope.send(cmd);  scope.markEvent(label, kind);  scope.buf;
  *
  * UI 綁定全部容錯：傳入的 id 不存在就跳過 → 同一引擎適配「全 UI 的 scope」與「精簡的研究頁」。

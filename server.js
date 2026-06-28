@@ -1005,7 +1005,7 @@ function computeFollowVerdict(emit, wire, fw, limits) {
   const advisory = [];
   const hasTele = fw.teleSamples > 0;
 
-  if (!emit.applicable || emit.emitted === 0) {
+  if (!emit.applicable) {
     checks.push({ check: 'emission', pass: null, reason: 'n/a: session-PF follow (manual resampler did not emit)' });
   } else {
     const ok = emit.emitHz != null && emit.emitHz >= V.emitHzLo && emit.emitHz <= V.emitHzHi
@@ -1015,7 +1015,7 @@ function computeFollowVerdict(emit, wire, fw, limits) {
       reason: `${ok ? 'PASS' : 'FAIL'}: hz=${emit.emitHz} (want ${V.emitHzLo}-${V.emitHzHi}), dtP95=${emit.emitDtP95}ms (<=${V.emitDtP95Ms}), dtMax=${emit.emitDtMaxSession}ms (<=${V.emitDtMaxMs})` });
   }
 
-  if (!emit.applicable || emit.emitted === 0) {
+  if (!emit.applicable) {
     checks.push({ check: 'wire', pass: null, reason: 'n/a: no resampler emits this session' });
   } else {
     const ok = (wire.resampler.writeFail || 0) === 0 && (wire.resampler.transportSkip || 0) === 0;
