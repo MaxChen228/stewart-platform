@@ -694,6 +694,7 @@ function manualPfSetLimits(cmd) {
 // target-update cadence on the wire.
 function manualPfResamplerStart() {
   if (manualPfTimer || activeSession) return;
+  manualPf.lastEmitAt = 0;   // fresh emit run: first tick must not measure the cross-session idle gap
   manualPfTimer = setInterval(manualPfEmitTick, PF_RESAMPLE_MS);
   followDiagWrite('manual_pf_resampler', { state: 'start', hz: PF_RESAMPLE_HZ });
 }
@@ -732,6 +733,9 @@ function manualPfEmitTick() {
   if (manualPf.lastEmitAt) {
     const dt = now - manualPf.lastEmitAt;
     if (dt > manualPf.emitDtMaxSession) manualPf.emitDtMaxSession = dt;
+    if (followSession.active && followSession.acc) {
+      reservoirAdd(followSession.acc.emitDt, dt, ++followSession.acc.emitDtSeen, FOLLOW_RESERVOIR_MAX);
+    }
   }
   manualPf.output = target.slice();
   manualPf.emitted++;
@@ -858,6 +862,7 @@ function followDiagSummary(now = Date.now()) {
 function newFollowAcc() {
   return {
     errT: [], errR: [], errSeenT: 0, errSeenR: 0,
+    emitDt: [], emitDtSeen: 0,
     satCount: 0, frefSamples: 0, satAxis: [0, 0, 0, 0, 0, 0],
     counters: {},
     ctrlMaxUs: null, jitterUsMax: null, herrMax: null, lhzMin: null, lhzMax: null,
@@ -1010,7 +1015,9 @@ function computeFollowVerdict(emit, wire, fw, limits) {
       reason: `${ok ? 'PASS' : 'FAIL'}: hz=${emit.emitHz} (want ${V.emitHzLo}-${V.emitHzHi}), dtP95=${emit.emitDtP95}ms (<=${V.emitDtP95Ms}), dtMax=${emit.emitDtMaxSession}ms (<=${V.emitDtMaxMs})` });
   }
 
-  {
+  if (!emit.applicable || emit.emitted === 0) {
+    checks.push({ check: 'wire', pass: null, reason: 'n/a: no resampler emits this session' });
+  } else {
     const ok = (wire.resampler.writeFail || 0) === 0 && (wire.resampler.transportSkip || 0) === 0;
     checks.push({ check: 'wire', pass: ok,
       reason: `${ok ? 'PASS' : 'FAIL'}: writeFail=${wire.resampler.writeFail}, transportSkip=${wire.resampler.transportSkip}` });
@@ -1018,7 +1025,7 @@ function computeFollowVerdict(emit, wire, fw, limits) {
 
   pushCounterCheck(checks, 'kinematics', hasTele, fw.counterResetDetected,
     (fw.counters.ikFailDelta || 0) === 0 && (fw.counters.fkFailDelta || 0) === 0 && (fw.counters.coordLimitDelta || 0) === 0,
-    `ikFail +${fw.counters.ikFailDelta}, fkFail +${fw.counters.fkFailDelta}, coordLimit +${fw.counters.coordLimitDelta}`);
+    `ikFail +${fw.counters.ikFailDelta ?? 0}, fkFail +${fw.counters.fkFailDelta ?? 0}, coordLimit +${fw.counters.coordLimitDelta ?? 0}`);
 
   {
     const lhzNom = fw.lhzNominal;
@@ -1026,12 +1033,12 @@ function computeFollowVerdict(emit, wire, fw, limits) {
     const md = fw.counters.missedDelta;
     const clean = (md == null || md <= V.missedMax) && (fw.ctrlMaxUs == null || fw.ctrlMaxUs < budget);
     pushCounterCheck(checks, 'control', hasTele, fw.counterResetDetected, clean,
-      `missed +${md} (<=${V.missedMax}), ctrlMaxUs=${fw.ctrlMaxUs} (budget ${budget}us)`);
+      `missed +${md ?? 0} (<=${V.missedMax}), ctrlMaxUs=${fw.ctrlMaxUs} (budget ${budget}us)`);
   }
 
   pushCounterCheck(checks, 'bus', hasTele, fw.counterResetDetected,
     (fw.counters.rxDropDelta || 0) === 0 && (fw.counters.txFailDelta || 0) === 0,
-    `rxDrop +${fw.counters.rxDropDelta}, txFail +${fw.counters.txFailDelta}`);
+    `rxDrop +${fw.counters.rxDropDelta ?? 0}, txFail +${fw.counters.txFailDelta ?? 0}`);
 
   if (!hasTele || fw.lhzNominal == null) {
     checks.push({ check: 'looprate', pass: null, reason: 'n/a: no loop-rate telemetry' });
@@ -1049,7 +1056,11 @@ function computeFollowVerdict(emit, wire, fw, limits) {
     advisory.push('firmware counter reset detected mid-session (reboot?); affected checks downgraded to warn');
   }
 
-  const pass = !checks.some((c) => c.pass === false);
+  // tri-state: any FAIL -> false; else any real PASS -> true; else null (inconclusive,
+  // e.g. status-triggered session with no telemetry and no resampler emits).
+  const anyFalse = checks.some((c) => c.pass === false);
+  const anyTrue = checks.some((c) => c.pass === true);
+  const pass = anyFalse ? false : (anyTrue ? true : null);
   return { pass, checks, advisory };
 }
 
@@ -1063,13 +1074,12 @@ function buildFollowReport(now = Date.now(), status = null, trigger = null, dura
   if (!acc) return lastFollowReport || { status: 'none', verdict: null, message: 'no follow session data' };
   const durS = durationMs > 0 ? durationMs / 1000 : 0;
   const emitted = manualPf.emitted - acc.emittedAtStart;
-  const summary = manualPfSummary(now);
   const emit = {
     applicable: emitted > 0,
     mode: MANUAL_PF_MODE,
     emitted,
     emitHz: durS > 0 ? round(emitted / durS, 2) : null,
-    emitDtP95: summary.emitDtP95,
+    emitDtP95: round(percentile(acc.emitDt, 95), 2),   // session-scoped (independent of rolling window)
     emitDtMaxSession: round(manualPf.emitDtMaxSession, 2),
   };
   const wire = {
