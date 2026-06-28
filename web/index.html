@@ -683,6 +683,11 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         </div>
       </div>
       <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
+      <label class="param-row" style="grid-template-columns:64px minmax(0,1fr) 48px;margin-top:8px" title="跟隨緊度（單旋鈕，越大跟越緊）：一鈕統管 vmax／加速時間／jerk／趨近增益 K。大＝撲得快、收尾緊；小＝柔順、遲緩。">
+        <span>跟隨緊度</span>
+        <input type="range" id="follow-tight" min="0" max="100" value="50" step="1">
+        <output id="follow-tight-v">50%</output>
+      </label>
     </div>
 
     <!-- 2. 擾動控制（單一強度 + 隨機標準模態；擾動數學走 DisturbModes SoT）-->
@@ -721,7 +726,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
       <div class="dev-label" style="margin-bottom:6px">Runtime rate (Hz)</div>
       <div style="display:grid;grid-template-columns:86px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
-        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="50" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Loop</span><input type="number" id="rate-loop-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
       <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 50Hz · Loop 100Hz</div>
@@ -1479,7 +1484,7 @@ document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfi
 // Browser 只提交最新人機輸入；server 只做 latest-wins 轉送，
 // ESP32 以固定 control tick 產生 acceleration/jerk limited PF reference。
 let followActive = false;
-const PF_PUMP_MS = 33;              // min spacing between target posts; server owns the 100Hz emit clock
+const PF_PUMP_MS = 10;              // 100Hz post 上限（server resampler 擁 100Hz emit clock，此處只防爆量非節流手感）；舊 33ms=30Hz 是瀏覽器當時鐘時代遺毒
 const PF_POSE_EPS = 0.001;
 let _pfPending = null, _pfLast = 0, _pfTrailTimer = null, _pfLastSent = null;
 function _pfPoseDelta(a, b) {
@@ -1548,6 +1553,23 @@ function followReset() {
   if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
   updateFollowUI();
 }
+
+// 跟隨緊度單旋鈕 → FE <0..1>（一鈕統管 vmax/accelT/jerkT/趨近增益 K，越大跟越緊）。
+// input 即時更新標籤 + ~10Hz 節流送 FE（避免拖動洗指令/灌爆 ack）；change 補送最終值確保落定。
+(function initFollowTight() {
+  const el = document.getElementById('follow-tight');
+  const out = document.getElementById('follow-tight-v');
+  if (!el) return;
+  let lastSentMs = 0;
+  const sendFE = (pct) => window.sendCmd(`FE ${(pct / 100).toFixed(3)}`);
+  el.addEventListener('input', () => {
+    const pct = Number(el.value);
+    if (out) out.textContent = pct + '%';
+    const now = performance.now();
+    if (now - lastSentMs >= 100) { lastSentMs = now; sendFE(pct); }   // ~10Hz 節流
+  });
+  el.addEventListener('change', () => { lastSentMs = performance.now(); sendFE(Number(el.value)); });  // 釋放補最終值
+})();
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
@@ -1631,7 +1653,7 @@ function sessionBlocksCommand(cmd) {
   if (op === 'D' || op === 'S') return false;
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
-    'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
+    'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'FE', 'J', 'M',
     'L', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
     'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
   ].includes(op);
@@ -1997,8 +2019,8 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
-const AR_PERIOD_MIN_MS = 20;
-const AR_PERIOD_MAX_MS = 100;
+const AR_PERIOD_MIN_MS = 1;    // 鏡像韌體：50Hz 人為上限已移除，下限=1ms(1000Hz) SERVO42D timer 硬體底
+const AR_PERIOD_MAX_MS = 100;  // 10Hz 下限（=韌體 AR_PERIOD_MAX_MS）
 
 function rateHzToPeriodMs(hz, minMs = 1, maxMs = 100) {
   const v = Number(hz);
