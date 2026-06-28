@@ -166,9 +166,16 @@ const FOLLOW_STALE_MS = numberEnv('FOLLOW_STALE_MS', 3000);
 const FOLLOW_RESERVOIR_MAX = Math.max(100, Math.floor(numberEnv('FOLLOW_RESERVOIR_MAX', 2000)));
 const FOLLOW_SAT_FRAC = numberEnv('FOLLOW_SAT_FRAC', 0.95);
 const FOLLOW_VERDICT = {
-  emitHzLo: numberEnv('FOLLOW_VERDICT_EMIT_HZ_LO', 90),
-  emitHzHi: numberEnv('FOLLOW_VERDICT_EMIT_HZ_HI', 110),
-  emitDtP95Ms: numberEnv('FOLLOW_VERDICT_EMIT_DTP95_MS', 13),
+  // Emission band tracks PF_RESAMPLE_HZ so control rate + emit rate move as ONE
+  // coupled knob: raise the firmware control loop (runtime `L <ms>`) and set
+  // PF_RESAMPLE_HZ to match -> this pass window follows automatically. The CAN bus
+  // is not the binding constraint (150Hz F5+encoder = 47% of 500kbps per
+  // `node sysid/can_budget.js --sweep`); the real limit is per-tick ctrlMaxUs,
+  // which the report's `control` check measures empirically. Defaults reduce to the
+  // prior 100Hz tuning (90-110Hz, 13ms p95); explicit env overrides still win.
+  emitHzLo: numberEnv('FOLLOW_VERDICT_EMIT_HZ_LO', round(PF_RESAMPLE_HZ * 0.9, 1)),
+  emitHzHi: numberEnv('FOLLOW_VERDICT_EMIT_HZ_HI', round(PF_RESAMPLE_HZ * 1.1, 1)),
+  emitDtP95Ms: numberEnv('FOLLOW_VERDICT_EMIT_DTP95_MS', round(PF_RESAMPLE_MS * 1.3, 1)),
   emitDtMaxMs: numberEnv('FOLLOW_VERDICT_EMIT_DTMAX_MS', 50),
   missedMax: numberEnv('FOLLOW_VERDICT_MISSED_MAX', 5),
   ctrlBudgetUs: numberEnv('FOLLOW_VERDICT_CTRL_BUDGET_US', 0),   // 0 = auto (0.8 x loop period)
