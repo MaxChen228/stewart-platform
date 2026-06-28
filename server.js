@@ -153,8 +153,10 @@ const manualPf = {
   emitDtMaxSession: 0,
 };
 
-// Fixed-rate manual PF emission timer (server is the 100 Hz reference clock).
+// Manual PF emission scheduler (server is the fixed-rate reference clock).
+// Absolute-clock setTimeout chain, not setInterval: see manualPfResamplerStart.
 let manualPfTimer = null;
+let manualPfNextAt = 0;   // absolute wall-clock (ms) of the next scheduled emit slot
 
 // ===== Follow session report thresholds + state (Part B) =====
 // One report per FOLLOW session (fl 0->1 .. 1->0) with a PASS/FAIL verdict, so a
@@ -692,26 +694,69 @@ function manualPfSetLimits(cmd) {
 // fully decoupled from browser main-thread jitter. ESP32 followStep still owns
 // the 400 Hz jerk/accel/vel-limited reference; this only guarantees a steady
 // target-update cadence on the wire.
+// We drive a self-correcting setTimeout chain against an ABSOLUTE tick schedule
+// (manualPfNextAt += period) rather than setInterval. setInterval silently slips
+// under event-loop congestion (telemetry parse + WS broadcast share this loop)
+// and gives no hook to fold a fresh input into the cadence. Absolute-clock gives:
+//   - drift-free cadence: each tick aims at its ideal wall-clock slot, so a late
+//     callback is corrected on the next hop instead of accumulating.
+//   - spiral protection: a stall past >1 period drops the missed slots (resync to
+//     now+period) instead of firing a back-to-back catch-up burst onto the wire.
+//   - leading-edge fold-in: a fresh target whose slot is already due fires now via
+//     manualPfUpdateTarget, cutting up-to-one-period of input->wire latency.
+function manualPfArm() {
+  // (re)schedule next tick toward its absolute slot; clamp delay to [0, period].
+  if (!manualPf.target || activeSession) return;
+  const delay = Math.min(PF_RESAMPLE_MS, Math.max(0, manualPfNextAt - Date.now()));
+  manualPfTimer = setTimeout(manualPfTick, delay);
+}
+
 function manualPfResamplerStart() {
   if (manualPfTimer || activeSession) return;
   manualPf.lastEmitAt = 0;   // fresh emit run: first tick must not measure the cross-session idle gap
-  manualPfTimer = setInterval(manualPfEmitTick, PF_RESAMPLE_MS);
+  manualPfNextAt = Date.now();   // first slot is now (emit asap)
+  manualPfArm();
   followDiagWrite('manual_pf_resampler', { state: 'start', hz: PF_RESAMPLE_HZ });
 }
 
 function manualPfResamplerStop(reason = 'stopped') {
   if (!manualPfTimer) return;
-  clearInterval(manualPfTimer);
+  clearTimeout(manualPfTimer);
   manualPfTimer = null;
   followDiagWrite('manual_pf_resampler', { state: 'stop', reason });
 }
 
-// One emission tick. Inline transport write (NOT enqueuePfCommand): the mailbox
-// is a latest-wins coalescer for bursty browser input and its own ~10ms flush
-// clock would beat against this timer, corrupting both the steady cadence and
-// the emit accounting (mailbox flush is shared with session PF). Mirrors the
-// gate/transport checks of flushPfMailbox().
-function manualPfEmitTick() {
+// Advance the absolute schedule one slot, dropping missed slots on stall.
+function manualPfAdvance() {
+  manualPfNextAt += PF_RESAMPLE_MS;
+  const now = Date.now();
+  if (manualPfNextAt < now - PF_RESAMPLE_MS) {
+    manualPfNextAt = now + PF_RESAMPLE_MS;   // >1 period behind: resync, drop missed slots (no burst)
+  }
+}
+
+// One scheduled tick: emit, advance the absolute clock, re-arm. A throwing emit
+// must never escape to uncaughtException (killing the process) nor leave the chain
+// un-armed (silently freezing the stream) -- hence try/finally.
+function manualPfTick() {
+  manualPfTimer = null;
+  try {
+    manualPfEmit();
+  } catch (err) {
+    manualPf.lastReason = `emit error: ${err && err.message ? err.message : err}`;
+  } finally {
+    manualPfAdvance();
+    manualPfArm();
+  }
+}
+
+// One emission. Inline transport write (NOT enqueuePfCommand): the mailbox is a
+// latest-wins coalescer for bursty browser input and its own ~10ms flush clock
+// would beat against this scheduler, corrupting both the steady cadence and the
+// emit accounting (mailbox flush is shared with session PF). Mirrors the
+// gate/transport checks of flushPfMailbox(). Called from the scheduled tick and
+// from the leading-edge fold-in; never schedules -- the caller owns cadence.
+function manualPfEmit() {
   const target = manualPf.target;
   if (!Array.isArray(target) || target.length !== 6) return;
   const cmd = `PF ${target.map((x) => Number(x).toFixed(3)).join(' ')}`;
@@ -764,6 +809,15 @@ function manualPfUpdateTarget(cmd) {
     output: manualPf.output,
   });
   manualPfResamplerStart();
+  // Leading edge: if the steady slot is already due (input landed after its slot),
+  // fold this target in NOW instead of waiting up to one period. manualPfTick
+  // advances on the absolute clock, so the steady phase stays intact and no double
+  // emit occurs (the overdue slot is consumed, not added to).
+  if (manualPfTimer && Date.now() >= manualPfNextAt) {
+    clearTimeout(manualPfTimer);
+    manualPfTimer = null;
+    manualPfTick();
+  }
   return { ok: true, via: 'manual-pf-resample' };
 }
 
