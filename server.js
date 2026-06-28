@@ -156,6 +156,30 @@ const manualPf = {
 // Fixed-rate manual PF emission timer (server is the 100 Hz reference clock).
 let manualPfTimer = null;
 
+// ===== Follow session report thresholds + state (Part B) =====
+// One report per FOLLOW session (fl 0->1 .. 1->0) with a PASS/FAIL verdict, so a
+// run can be confirmed after the fact via curl /api/follow/report.
+const FOLLOW_SESSION_MIN_MS = numberEnv('FOLLOW_SESSION_MIN_MS', 500);
+const FOLLOW_STALE_MS = numberEnv('FOLLOW_STALE_MS', 3000);
+const FOLLOW_RESERVOIR_MAX = Math.max(100, Math.floor(numberEnv('FOLLOW_RESERVOIR_MAX', 2000)));
+const FOLLOW_SAT_FRAC = numberEnv('FOLLOW_SAT_FRAC', 0.95);
+const FOLLOW_VERDICT = {
+  emitHzLo: numberEnv('FOLLOW_VERDICT_EMIT_HZ_LO', 90),
+  emitHzHi: numberEnv('FOLLOW_VERDICT_EMIT_HZ_HI', 110),
+  emitDtP95Ms: numberEnv('FOLLOW_VERDICT_EMIT_DTP95_MS', 13),
+  emitDtMaxMs: numberEnv('FOLLOW_VERDICT_EMIT_DTMAX_MS', 50),
+  missedMax: numberEnv('FOLLOW_VERDICT_MISSED_MAX', 5),
+  ctrlBudgetUs: numberEnv('FOLLOW_VERDICT_CTRL_BUDGET_US', 0),   // 0 = auto (0.8 x loop period)
+  satPct: numberEnv('FOLLOW_VERDICT_SAT_PCT', 20),
+  lhzFloorFrac: numberEnv('FOLLOW_LHZ_FLOOR_FRAC', 0.9),
+};
+let lastFollowReport = null;
+let followReportSeq = 0;
+const followSession = {
+  active: false, seq: 0, startedAt: null, startedAtMs: 0, endedAt: null,
+  trigger: null, limits: null, vfChanges: [], acc: null,
+};
+
 // UI/session ownership gate. Manual pose controls and program sessions share the
 // same WebSocket transport, so the server owns the final arbitration. Workspace
 // execution is owned by the server-side executor; browser and CLI clients only
@@ -657,6 +681,9 @@ function manualPfSetLimits(cmd) {
   manualPf.vmaxT = Math.max(1, Math.min(500, vf.vmaxT));
   manualPf.vmaxR = Math.max(1, Math.min(360, vf.vmaxR));
   followDiagWrite('manual_pf_limits', { vmaxT: manualPf.vmaxT, vmaxR: manualPf.vmaxR });
+  if (followSession.active && followSession.vfChanges.length < 50) {
+    followSession.vfChanges.push({ at: new Date().toISOString(), vmaxT: manualPf.vmaxT, vmaxR: manualPf.vmaxR });
+  }
 }
 
 // ===== Manual FOLLOW 100 Hz resampler =====
@@ -823,6 +850,281 @@ function followDiagSummary(now = Date.now()) {
   };
 }
 
+// ===== Follow session report (Part B) =====
+// Streaming accumulator over one FOLLOW session. Independent of the rolling
+// followDiag.tele window (caps at 120s/5000 samples and evicts early samples on
+// long sessions). Hard metrics are O(1) exact; advisory percentiles use bounded
+// reservoirs so memory is independent of session length.
+function newFollowAcc() {
+  return {
+    errT: [], errR: [], errSeenT: 0, errSeenR: 0,
+    satCount: 0, frefSamples: 0, satAxis: [0, 0, 0, 0, 0, 0],
+    counters: {},
+    ctrlMaxUs: null, jitterUsMax: null, herrMax: null, lhzMin: null, lhzMax: null,
+    teleSamples: 0, counterResetDetected: false,
+    emittedAtStart: 0, writeFailAtStart: 0, transportSkipAtStart: 0,
+    mailbox: { received: 0, flushed: 0, coalesced: 0, dropped: 0, writeFail: 0, transportDrop: 0 },
+  };
+}
+
+function runMax(cur, v) {
+  return Number.isFinite(v) ? (cur == null ? v : Math.max(cur, v)) : cur;
+}
+
+function axisVmax(vmax, i) {
+  if (!Array.isArray(vmax)) return null;
+  if (vmax.length >= 6) return Number(vmax[i]);
+  if (vmax.length >= 2) return Number(i < 3 ? vmax[0] : vmax[1]);
+  return null;
+}
+
+// Monotonic firmware counter -> session delta, preserving accumulated delta across
+// a firmware reboot (counter resets toward 0) and flagging it.
+function accCounter(acc, key, val) {
+  if (!Number.isFinite(val)) return;
+  const c = acc.counters[key];
+  if (!c) { acc.counters[key] = { base: val, last: val }; return; }
+  if (val < c.last) { c.base = val - (c.last - c.base); acc.counterResetDetected = true; }
+  c.last = val;
+}
+
+function counterDelta(acc, key) {
+  const c = acc.counters[key];
+  return c ? c.last - c.base : null;
+}
+
+function reservoirAdd(arr, val, seen, cap) {
+  if (arr.length < cap) { arr.push(val); return; }
+  const j = Math.floor(Math.random() * seen);
+  if (j < cap) arr[j] = val;
+}
+
+function followSessionStart(now, sample, trigger) {
+  if (followSession.active) {
+    // stale session never finalized (transport loss) -> close before starting anew
+    if (now - followSession.startedAtMs > FOLLOW_SESSION_MIN_MS
+        && followDiag.lastTeleAt && now - followDiag.lastTeleAt > FOLLOW_STALE_MS) {
+      followSessionEnd(now, 'stale-restart');
+    } else {
+      return;
+    }
+  }
+  const acc = newFollowAcc();
+  acc.emittedAtStart = manualPf.emitted;
+  acc.writeFailAtStart = manualPf.writeFail;
+  acc.transportSkipAtStart = manualPf.transportSkip;
+  acc.mailbox = {
+    received: pfMailbox.received, flushed: pfMailbox.flushed, coalesced: pfMailbox.coalesced,
+    dropped: pfMailbox.dropped, writeFail: pfMailbox.writeFail, transportDrop: pfMailbox.transportDrop,
+  };
+  manualPf.emitDtMaxSession = 0;
+  const vmax = sample && sample.fref && Array.isArray(sample.fref.vmax) ? sample.fref.vmax : null;
+  const limits = (vmax && vmax.length >= 2)
+    ? { vmaxT: Number(vmax[0]), vmaxR: Number(vmax.length >= 6 ? vmax[3] : vmax[1]), source: 'fref' }
+    : { vmaxT: manualPf.vmaxT, vmaxR: manualPf.vmaxR, source: 'manualPf' };
+  followSession.active = true;
+  followSession.seq = ++followReportSeq;
+  followSession.startedAt = new Date(now).toISOString();
+  followSession.startedAtMs = now;
+  followSession.endedAt = null;
+  followSession.trigger = trigger;
+  followSession.limits = limits;
+  followSession.vfChanges = [];
+  followSession.acc = acc;
+  followDiagWrite('follow_session', { state: 'start', seq: followSession.seq, trigger, limits });
+}
+
+function followSessionAccumulate(now, sample) {
+  const acc = followSession.acc;
+  if (!acc || !sample) return;
+  acc.teleSamples++;
+  accCounter(acc, 'ikFail', sample.ikFail);
+  accCounter(acc, 'fkFail', sample.fkFail);
+  accCounter(acc, 'coordLimit', sample.coordLimit);
+  accCounter(acc, 'missed', sample.missed);
+  accCounter(acc, 'cmdDrop', sample.cmdDrop);
+  accCounter(acc, 'teleDrop', sample.teleDrop);
+  accCounter(acc, 'rxDrop', sample.rxDrop);
+  accCounter(acc, 'txFail', sample.txFail);
+  accCounter(acc, 'busOvr', sample.busOvr);
+  acc.ctrlMaxUs = runMax(acc.ctrlMaxUs, sample.ctrlMaxUs);
+  acc.jitterUsMax = runMax(acc.jitterUsMax, sample.jitterUs);
+  acc.herrMax = runMax(acc.herrMax, sample.herrMax);
+  if (Number.isFinite(sample.lhz)) {
+    acc.lhzMin = acc.lhzMin == null ? sample.lhz : Math.min(acc.lhzMin, sample.lhz);
+    acc.lhzMax = acc.lhzMax == null ? sample.lhz : Math.max(acc.lhzMax, sample.lhz);
+  }
+  const fr = sample.fref;
+  if (fr) {
+    if (Number.isFinite(fr.errT)) { acc.errSeenT++; reservoirAdd(acc.errT, fr.errT, acc.errSeenT, FOLLOW_RESERVOIR_MAX); }
+    if (Number.isFinite(fr.errR)) { acc.errSeenR++; reservoirAdd(acc.errR, fr.errR, acc.errSeenR, FOLLOW_RESERVOIR_MAX); }
+    if (Array.isArray(fr.vel) && Array.isArray(fr.vmax)) {
+      acc.frefSamples++;
+      let sat = false;
+      for (let i = 0; i < 6; i++) {
+        const v = Number(fr.vel[i]);
+        const lim = axisVmax(fr.vmax, i);
+        if (Number.isFinite(v) && Number.isFinite(lim) && lim > 0 && Math.abs(v) >= FOLLOW_SAT_FRAC * lim) {
+          acc.satAxis[i]++; sat = true;
+        }
+      }
+      if (sat) acc.satCount++;
+    }
+  }
+}
+
+function followSessionEnd(now, trigger) {
+  if (!followSession.active) return;
+  followSession.active = false;
+  followSession.endedAt = new Date(now).toISOString();
+  const durationMs = now - followSession.startedAtMs;
+  if (durationMs < FOLLOW_SESSION_MIN_MS) {
+    followDiagWrite('follow_session', { state: 'abort', seq: followSession.seq, durationMs, trigger });
+    return;
+  }
+  const report = buildFollowReport(now, 'complete', trigger, durationMs);
+  lastFollowReport = report;
+  followDiagWrite('follow_report', report);
+}
+
+function pushCounterCheck(checks, name, hasTele, reset, clean, detail) {
+  if (!hasTele) { checks.push({ check: name, pass: null, reason: `n/a: no telemetry - ${detail}` }); return; }
+  if (!clean) { checks.push({ check: name, pass: false, reason: `FAIL: ${detail}` }); return; }
+  if (reset) { checks.push({ check: name, pass: null, reason: `WARN(counter reset): ${detail}` }); return; }
+  checks.push({ check: name, pass: true, reason: `PASS: ${detail}` });
+}
+
+function computeFollowVerdict(emit, wire, fw, limits) {
+  const V = FOLLOW_VERDICT;
+  const checks = [];
+  const advisory = [];
+  const hasTele = fw.teleSamples > 0;
+
+  if (!emit.applicable || emit.emitted === 0) {
+    checks.push({ check: 'emission', pass: null, reason: 'n/a: session-PF follow (manual resampler did not emit)' });
+  } else {
+    const ok = emit.emitHz != null && emit.emitHz >= V.emitHzLo && emit.emitHz <= V.emitHzHi
+      && emit.emitDtP95 != null && emit.emitDtP95 <= V.emitDtP95Ms
+      && (emit.emitDtMaxSession == null || emit.emitDtMaxSession <= V.emitDtMaxMs);
+    checks.push({ check: 'emission', pass: ok,
+      reason: `${ok ? 'PASS' : 'FAIL'}: hz=${emit.emitHz} (want ${V.emitHzLo}-${V.emitHzHi}), dtP95=${emit.emitDtP95}ms (<=${V.emitDtP95Ms}), dtMax=${emit.emitDtMaxSession}ms (<=${V.emitDtMaxMs})` });
+  }
+
+  {
+    const ok = (wire.resampler.writeFail || 0) === 0 && (wire.resampler.transportSkip || 0) === 0;
+    checks.push({ check: 'wire', pass: ok,
+      reason: `${ok ? 'PASS' : 'FAIL'}: writeFail=${wire.resampler.writeFail}, transportSkip=${wire.resampler.transportSkip}` });
+  }
+
+  pushCounterCheck(checks, 'kinematics', hasTele, fw.counterResetDetected,
+    (fw.counters.ikFailDelta || 0) === 0 && (fw.counters.fkFailDelta || 0) === 0 && (fw.counters.coordLimitDelta || 0) === 0,
+    `ikFail +${fw.counters.ikFailDelta}, fkFail +${fw.counters.fkFailDelta}, coordLimit +${fw.counters.coordLimitDelta}`);
+
+  {
+    const lhzNom = fw.lhzNominal;
+    const budget = V.ctrlBudgetUs > 0 ? V.ctrlBudgetUs : (Number.isFinite(lhzNom) && lhzNom > 0 ? Math.round(0.8 * 1e6 / lhzNom) : 8000);
+    const md = fw.counters.missedDelta;
+    const clean = (md == null || md <= V.missedMax) && (fw.ctrlMaxUs == null || fw.ctrlMaxUs < budget);
+    pushCounterCheck(checks, 'control', hasTele, fw.counterResetDetected, clean,
+      `missed +${md} (<=${V.missedMax}), ctrlMaxUs=${fw.ctrlMaxUs} (budget ${budget}us)`);
+  }
+
+  pushCounterCheck(checks, 'bus', hasTele, fw.counterResetDetected,
+    (fw.counters.rxDropDelta || 0) === 0 && (fw.counters.txFailDelta || 0) === 0,
+    `rxDrop +${fw.counters.rxDropDelta}, txFail +${fw.counters.txFailDelta}`);
+
+  if (!hasTele || fw.lhzNominal == null) {
+    checks.push({ check: 'looprate', pass: null, reason: 'n/a: no loop-rate telemetry' });
+  } else {
+    const floor = V.lhzFloorFrac * fw.lhzNominal;
+    const ok = fw.lhzMin != null && fw.lhzMin >= floor;
+    checks.push({ check: 'looprate', pass: ok,
+      reason: `${ok ? 'PASS' : 'FAIL'}: lhzMin=${fw.lhzMin} (floor ${round(floor, 0)}, nominal ${fw.lhzNominal})` });
+  }
+
+  if (Number.isFinite(fw.saturation.pct) && fw.saturation.pct > V.satPct) {
+    advisory.push(`tracking velocity-limited ${fw.saturation.pct}% of session (>${V.satPct}%); consider raising VF (current vmaxT=${limits?.vmaxT ?? '?'} vmaxR=${limits?.vmaxR ?? '?'})`);
+  }
+  if (fw.counterResetDetected) {
+    advisory.push('firmware counter reset detected mid-session (reboot?); affected checks downgraded to warn');
+  }
+
+  const pass = !checks.some((c) => c.pass === false);
+  return { pass, checks, advisory };
+}
+
+function buildFollowReport(now = Date.now(), status = null, trigger = null, durationMs = null) {
+  if (!status) {
+    if (followSession.active) { status = 'in-progress'; trigger = followSession.trigger; durationMs = now - followSession.startedAtMs; }
+    else if (lastFollowReport) return lastFollowReport;
+    else return { status: 'none', verdict: null, message: 'no follow session since startup' };
+  }
+  const acc = followSession.acc;
+  if (!acc) return lastFollowReport || { status: 'none', verdict: null, message: 'no follow session data' };
+  const durS = durationMs > 0 ? durationMs / 1000 : 0;
+  const emitted = manualPf.emitted - acc.emittedAtStart;
+  const summary = manualPfSummary(now);
+  const emit = {
+    applicable: emitted > 0,
+    mode: MANUAL_PF_MODE,
+    emitted,
+    emitHz: durS > 0 ? round(emitted / durS, 2) : null,
+    emitDtP95: summary.emitDtP95,
+    emitDtMaxSession: round(manualPf.emitDtMaxSession, 2),
+  };
+  const wire = {
+    resampler: {
+      writeFail: manualPf.writeFail - acc.writeFailAtStart,
+      transportSkip: manualPf.transportSkip - acc.transportSkipAtStart,
+    },
+    mailbox: {
+      received: pfMailbox.received - acc.mailbox.received,
+      flushed: pfMailbox.flushed - acc.mailbox.flushed,
+      coalesced: pfMailbox.coalesced - acc.mailbox.coalesced,
+      dropped: pfMailbox.dropped - acc.mailbox.dropped,
+      writeFail: pfMailbox.writeFail - acc.mailbox.writeFail,
+      transportDrop: pfMailbox.transportDrop - acc.mailbox.transportDrop,
+    },
+  };
+  const firmware = {
+    errT: { p95: round(percentile(acc.errT, 95), 2), max: round(maxFinite(acc.errT), 2), n: acc.errSeenT },
+    errR: { p95: round(percentile(acc.errR, 95), 3), max: round(maxFinite(acc.errR), 3), n: acc.errSeenR },
+    saturation: {
+      pct: acc.frefSamples ? round(100 * acc.satCount / acc.frefSamples, 1) : null,
+      satCount: acc.satCount, n: acc.frefSamples,
+      perAxis: acc.frefSamples ? acc.satAxis.map((c) => round(100 * c / acc.frefSamples, 1)) : null,
+    },
+    counters: {
+      ikFailDelta: counterDelta(acc, 'ikFail'), fkFailDelta: counterDelta(acc, 'fkFail'),
+      coordLimitDelta: counterDelta(acc, 'coordLimit'), missedDelta: counterDelta(acc, 'missed'),
+      cmdDropDelta: counterDelta(acc, 'cmdDrop'), teleDropDelta: counterDelta(acc, 'teleDrop'),
+      rxDropDelta: counterDelta(acc, 'rxDrop'), txFailDelta: counterDelta(acc, 'txFail'),
+      busOvrDelta: counterDelta(acc, 'busOvr'),
+    },
+    ctrlMaxUs: acc.ctrlMaxUs, jitterUsMax: acc.jitterUsMax,
+    lhzMin: acc.lhzMin, lhzNominal: acc.lhzMax, herrMax: round(acc.herrMax, 3),
+    teleHz: durS > 0 ? round(acc.teleSamples / durS, 2) : null, teleSamples: acc.teleSamples,
+    counterResetDetected: acc.counterResetDetected,
+  };
+  const v = computeFollowVerdict(emit, wire, firmware, followSession.limits);
+  return {
+    status,
+    generatedAt: new Date(now).toISOString(),
+    session: {
+      seq: followSession.seq,
+      startedAt: followSession.startedAt,
+      endedAt: status === 'complete' ? followSession.endedAt : null,
+      durationMs: Math.round(durationMs || 0),
+      trigger,
+      limits: followSession.limits,
+      vfChanges: followSession.vfChanges.slice(-20),
+    },
+    emit, wire, firmware,
+    verdict: { pass: v.pass, checks: v.checks },
+    advisory: v.advisory,
+  };
+}
+
 function observeCommand(cmd, via = null, sessionToken = null) {
   const op = String(cmd || '').trim().split(/\s+/)[0]?.toUpperCase();
   if (!op) return;
@@ -863,11 +1165,14 @@ function observeIncoming(d) {
       vmaxR: d.r,
       raw: d,
     });
+    if (d.status === 'follow on') followSessionStart(now, null, 'status');
+    else if (d.status === 'follow off') followSessionEnd(now, 'status');
   }
   if (!isTelemetry) return;
 
   const fl = Number.isFinite(Number(d.fl)) ? Number(d.fl) : null;
   const profile = d.ctl?.profile || null;
+  const prevFl = followDiag.lastFl;
   if (fl !== followDiag.lastFl || profile !== followDiag.lastProfile) {
     followDiag.lastFl = fl;
     followDiag.lastProfile = profile;
@@ -875,6 +1180,8 @@ function observeIncoming(d) {
     pushWindow(followDiag.state, state, now);
     followDiagWrite('state', state);
   }
+  // FOLLOW exit must finalize even when the nearFollow gate below has lapsed.
+  if (fl !== 1 && prevFl === 1) followSessionEnd(now, 'fl');
 
   const nearFollow = fl === 1 || profile === 'follow' || (followDiag.lastPfAt && now - followDiag.lastPfAt < 5000);
   if (!nearFollow) return;
@@ -913,6 +1220,9 @@ function observeIncoming(d) {
   sample.fref = parseFollowReference(d.fref);
   if (!sample.fref) delete sample.fref;
   pushWindow(followDiag.tele, { at: now, dtMs, sample }, now);
+
+  if (fl === 1 && prevFl !== 1) followSessionStart(now, sample, 'fl');
+  if (followSession.active) followSessionAccumulate(now, sample);
 
   if (now - followDiagLastSummaryAt > 2000) {
     followDiagLastSummaryAt = now;
@@ -1472,6 +1782,11 @@ const requestHandler = (req, res) => {
   if (req.url === '/api/follow/diag') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(followDiagSummary(), null, 2));
+    return;
+  }
+  if (req.url.split('?')[0] === '/api/follow/report') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(buildFollowReport(), null, 2));
     return;
   }
   if (req.url.split('?')[0] === '/api/transport/reconnect') {

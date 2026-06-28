@@ -40,7 +40,7 @@ function round(v, d = 3) {
 }
 
 function load(file) {
-  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [], manualTargets: [], manualForwards: [], manualStops: [], manualLimits: [], parseErrors: [] };
+  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [], manualTargets: [], manualStops: [], manualLimits: [], reports: [], sessions: [], parseErrors: [] };
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     if (!line.trim()) continue;
     let rec;
@@ -52,7 +52,8 @@ function load(file) {
     else if (rec.type === 'status') out.statuses.push(rec);
     else if (rec.type === 'summary') out.summaries.push(rec);
     else if (rec.type === 'manual_pf_target') out.manualTargets.push(rec);
-    else if (rec.type === 'manual_pf_forward') out.manualForwards.push(rec);
+    else if (rec.type === 'follow_report') out.reports.push(rec);
+    else if (rec.type === 'follow_session') out.sessions.push(rec);
     else if (rec.type === 'manual_pf_stop') out.manualStops.push(rec);
     else if (rec.type === 'manual_pf_limits') out.manualLimits.push(rec);
     else if (rec.type === 'parse_error') out.parseErrors.push(rec);
@@ -154,10 +155,16 @@ function summarize(file) {
       first: firstSummary?.manual || null,
       last: lastSummary?.manual || null,
       targetEvents: d.manualTargets.length,
-      forwardEvents: d.manualForwards.length,
+      // emits are no longer logged per-event (100Hz resampler would flood JSONL);
+      // derive per-log emit count from the cumulative manual.emitted in 2s summaries.
+      emitEvents: round((lastSummary?.manual?.emitted ?? 0) - (firstSummary?.manual?.emitted ?? 0), 0),
       stopEvents: d.manualStops.map((x) => ({ t: x.t, reason: x.reason })),
       limits: d.manualLimits.map((x) => ({ t: x.t, vmaxT: x.vmaxT, vmaxR: x.vmaxR })),
     },
+    followReport: d.reports.length ? (() => {
+      const r = d.reports[d.reports.length - 1];
+      return { count: d.reports.length, status: r.status, durationMs: r.session?.durationMs, verdict: r.verdict, emit: r.emit, saturation: r.firmware?.saturation, advisory: r.advisory };
+    })() : { count: 0 },
     fref: {
       samples: fref.length,
       gen: fref.length ? fref[fref.length - 1].gen || null : null,
