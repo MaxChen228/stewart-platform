@@ -721,10 +721,10 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
       <div class="dev-label" style="margin-bottom:6px">Runtime rate (Hz)</div>
       <div style="display:grid;grid-template-columns:86px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
-        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="50" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Loop</span><input type="number" id="rate-loop-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
-      <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 100Hz · Loop 100Hz</div>
+      <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 50Hz · Loop 100Hz</div>
 
       <div class="dev-label" style="margin-bottom:6px">Runtime damping (OD)</div>
       <div style="display:grid;grid-template-columns:38px 1fr 38px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
@@ -1468,9 +1468,11 @@ window.poseSetRelease = function() {
 };
 document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfigSoon);
 
-// ===== 跟隨模式：FOLLOW 1/0 + PF 串流（速度受限濾波器在韌體；拖快不硬撲）=====
+// ===== 跟隨模式：FOLLOW 1/0 + PF target updates =====
+// Browser 只提交最新人機輸入；server 以固定頻率產生平滑 PF reference，
+// 韌體仍保留最後的速度受限保護。
 let followActive = false;
-const PF_PUMP_MS = 33;              // UI 只穩定提交最新目標；server/firmware 會再 coalesce + VF 限速
+const PF_PUMP_MS = 33;              // target-update throttle, not the physical control clock
 const PF_KEEPALIVE_MS = 1000;
 const PF_POSE_EPS = 0.001;
 let _pfPending = null, _pfLast = 0, _pfPumpTimer = null, _pfLastSent = null;
@@ -1505,7 +1507,7 @@ function _pfPump() {
   }
   _pfSchedule(PF_PUMP_MS);
 }
-function streamPF(pose) {        // 共用串流原語（Phase 3 動作引擎也走這條）
+function streamPF(pose) {        // submit latest target; server owns manual PF reference timing
   _pfPending = pose.slice();
   const dt = performance.now() - _pfLast;
   _pfSchedule(dt >= PF_PUMP_MS ? 0 : PF_PUMP_MS - dt);
@@ -1987,10 +1989,13 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
-function rateHzToPeriodMs(hz) {
+const AR_PERIOD_MIN_MS = 20;
+const AR_PERIOD_MAX_MS = 100;
+
+function rateHzToPeriodMs(hz, minMs = 1, maxMs = 100) {
   const v = Number(hz);
   if (!Number.isFinite(v) || v <= 0) return null;
-  return Math.min(100, Math.max(1, 1000 / v));
+  return Math.min(maxMs, Math.max(minMs, 1000 / v));
 }
 
 function periodMsToHz(ms) {
@@ -2105,7 +2110,7 @@ function syncRuntimeRates(d, fromAck = false) {
 window.updateAutoReturnRate = function() {
   const el = document.getElementById('rate-ar-hz');
   const hz = Number(el?.value);
-  const ms = rateHzToPeriodMs(el?.value);
+  const ms = rateHzToPeriodMs(el?.value, AR_PERIOD_MIN_MS, AR_PERIOD_MAX_MS);
   if (!ms) { logEv('AR Hz 無效', 'bad'); return; }
   rateRequestedHz.ar = hz;
   sendCmd(`AR ${fmtTrim(ms, 3)}`);

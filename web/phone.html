@@ -445,6 +445,8 @@ function flushPF() {
   pfPending = null;
 }
 
+// Phone submits the latest IMU target. The server converts manual targets into
+// a fixed-rate smooth PF reference; this local throttle only bounds browser IO.
 function streamPF(pose) {
   pfPending = pose.slice();
   const dt = performance.now() - pfLast;

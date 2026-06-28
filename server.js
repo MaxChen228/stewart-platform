@@ -72,6 +72,10 @@ const FOLLOW_DIAG_ENABLED = process.env.FOLLOW_DIAG !== '0';
 const FOLLOW_DIAG_WINDOW_MS = 120000;
 const FOLLOW_DIAG_MAX_SAMPLES = Math.max(300, Math.floor(numberEnv('FOLLOW_DIAG_MAX_SAMPLES', 5000)));
 const PF_MAILBOX_MIN_MS = Math.max(0, numberEnv('PF_MAILBOX_MIN_MS', 10));
+const MANUAL_PF_HZ = Math.max(5, Math.min(100, numberEnv('MANUAL_PF_HZ', 60)));
+const MANUAL_PF_INTERVAL_MS = 1000 / MANUAL_PF_HZ;
+const MANUAL_PF_KEEPALIVE_MS = Math.max(250, numberEnv('MANUAL_PF_KEEPALIVE_MS', 1000));
+const MANUAL_PF_EPS = Math.max(0.0001, numberEnv('MANUAL_PF_EPS', 0.001));
 let followDiagStream = null;
 let followDiagPath = null;
 let followDiagT0 = performance.now();
@@ -114,6 +118,26 @@ const pfMailbox = {
   lastVia: null,
   lastQueuedPose: null,
   lastFlushedPose: null,
+};
+
+// Manual FOLLOW is not allowed to use browser/input events as the physical
+// reference clock. Browser/phone PF messages are treated as "latest intent";
+// this server-side generator emits a smooth, fixed-rate PF stream toward that
+// intent. Workspace/session PF keeps its own deterministic path and bypasses it.
+const manualPf = {
+  target: null,
+  output: null,
+  timer: null,
+  lastTickAt: 0,
+  lastInputAt: 0,
+  lastEmitAt: 0,
+  targetUpdates: 0,
+  emitted: 0,
+  inputWindow: [],
+  emitWindow: [],
+  vmaxT: 60,
+  vmaxR: 45,
+  lastReason: null,
 };
 
 // UI/session ownership gate. Manual pose controls and program sessions share the
@@ -201,6 +225,7 @@ function sanitizeConditionMeta(condition) {
 
 function startSessionState({ label = 'program', phase = 'starting', program = null, condition = null } = {}) {
   if (activeSession) throw new Error('session already active');
+  manualPfStop('session starting');
   activeSession = {
     token: makeSessionToken(),
     owner: 'session',
@@ -316,6 +341,13 @@ function pfCommandCancelsMailbox(op) {
   return ['D', 'S', 'H', 'E', 'P', 'FOLLOW'].includes(op);
 }
 
+function commandStopsManualPf(cmd, op) {
+  if (['D', 'S', 'H', 'E', 'P'].includes(op)) return true;
+  if (op !== 'FOLLOW') return false;
+  const parts = String(cmd || '').trim().split(/\s+/);
+  return Number(parts[1]) === 0;
+}
+
 function pfMailboxSummary(now = Date.now()) {
   const pendingAgeMs = pfMailbox.pending ? now - pfMailbox.pending.enqueuedAt : null;
   return {
@@ -426,12 +458,17 @@ function sendCommand(cmd, sessionToken = null) {
     broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() }));
     return { ok: false, reason: gate.reason };
   }
-  if (highRate) return enqueuePfCommand(cmd, sessionToken);
+  if (highRate) {
+    if (sessionToken) return enqueuePfCommand(cmd, sessionToken);
+    return manualPfUpdateTarget(cmd);
+  }
 
   if (pfCommandCancelsMailbox(op)) clearPfMailbox(`cancelled by ${op}`);
   console.log(`[WS] cmd: ${cmd}`);
   const wr = transport.write(cmd);
   if (wr.ok) {
+    if (!sessionToken && commandStopsManualPf(cmd, op)) manualPfStop(`cancelled by ${op}`);
+    if (!sessionToken && op === 'VF') manualPfSetLimits(cmd);
     observeCommand(cmd, wr.kind, sessionToken);
     if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_sent', { cmd, via: wr.kind });
     recWrite('cmd', cmd);
@@ -508,6 +545,165 @@ function poseDelta(prev, next) {
   };
 }
 
+function fmtPose(pose) {
+  return pose.map((x) => Number(x).toFixed(3));
+}
+
+function parseVfCommand(cmd) {
+  const parts = String(cmd || '').trim().split(/\s+/);
+  if (parts[0]?.toUpperCase() !== 'VF') return null;
+  const vmaxT = Number(parts[1]);
+  const vmaxR = Number(parts[2]);
+  return Number.isFinite(vmaxT) && Number.isFinite(vmaxR) && vmaxT > 0 && vmaxR > 0
+    ? { vmaxT, vmaxR }
+    : null;
+}
+
+function clampStepPose(current, target, dtSec, vmaxT, vmaxR) {
+  const delta = target.map((x, i) => x - current[i]);
+  let scale = 1.0;
+  const capT = Math.max(0, vmaxT * dtSec);
+  const capR = Math.max(0, vmaxR * dtSec);
+  for (let i = 0; i < 3; i++) {
+    const a = Math.abs(delta[i]);
+    if (a > capT && capT > 0) scale = Math.min(scale, capT / a);
+  }
+  for (let i = 3; i < 6; i++) {
+    const a = Math.abs(delta[i]);
+    if (a > capR && capR > 0) scale = Math.min(scale, capR / a);
+  }
+  return current.map((x, i) => x + delta[i] * scale);
+}
+
+function poseClose(a, b, eps = MANUAL_PF_EPS) {
+  const d = poseDelta(a, b);
+  return !!d && d.maxT <= eps && d.maxR <= eps;
+}
+
+function manualPfSchedule(delayMs = 0) {
+  if (manualPf.timer || !manualPf.target) return;
+  manualPf.timer = setTimeout(manualPfTick, Math.max(0, Math.ceil(delayMs)));
+}
+
+function manualPfStop(reason = 'stopped') {
+  const wasActive = !!manualPf.target || !!manualPf.timer;
+  if (manualPf.timer) {
+    clearTimeout(manualPf.timer);
+    manualPf.timer = null;
+  }
+  manualPf.target = null;
+  manualPf.output = null;
+  manualPf.lastTickAt = 0;
+  manualPf.lastReason = reason;
+  if (wasActive) followDiagWrite('manual_pf_stop', { reason });
+}
+
+function manualPfSummary(now = Date.now()) {
+  const inputDt = [];
+  for (let i = 1; i < manualPf.inputWindow.length; i++) {
+    inputDt.push(manualPf.inputWindow[i].at - manualPf.inputWindow[i - 1].at);
+  }
+  const emitDt = [];
+  for (let i = 1; i < manualPf.emitWindow.length; i++) {
+    emitDt.push(manualPf.emitWindow[i].at - manualPf.emitWindow[i - 1].at);
+  }
+  const inputSpan = manualPf.inputWindow.length >= 2
+    ? (manualPf.inputWindow[manualPf.inputWindow.length - 1].at - manualPf.inputWindow[0].at) / 1000
+    : 0;
+  const emitSpan = manualPf.emitWindow.length >= 2
+    ? (manualPf.emitWindow[manualPf.emitWindow.length - 1].at - manualPf.emitWindow[0].at) / 1000
+    : 0;
+  return {
+    enabled: true,
+    hz: MANUAL_PF_HZ,
+    intervalMs: round(MANUAL_PF_INTERVAL_MS, 2),
+    active: !!manualPf.target,
+    targetUpdates: manualPf.targetUpdates,
+    emitted: manualPf.emitted,
+    inputHz: inputSpan > 0 ? round((manualPf.inputWindow.length - 1) / inputSpan, 2) : null,
+    emitHz: emitSpan > 0 ? round((manualPf.emitWindow.length - 1) / emitSpan, 2) : null,
+    inputDtP95: round(percentile(inputDt, 95), 2),
+    emitDtP95: round(percentile(emitDt, 95), 2),
+    msSinceInput: manualPf.lastInputAt ? now - manualPf.lastInputAt : null,
+    msSinceEmit: manualPf.lastEmitAt ? now - manualPf.lastEmitAt : null,
+    vmaxT: manualPf.vmaxT,
+    vmaxR: manualPf.vmaxR,
+    target: manualPf.target,
+    output: manualPf.output,
+    lastReason: manualPf.lastReason,
+  };
+}
+
+function manualPfSetLimits(cmd) {
+  const vf = parseVfCommand(cmd);
+  if (!vf) return;
+  manualPf.vmaxT = Math.max(1, Math.min(500, vf.vmaxT));
+  manualPf.vmaxR = Math.max(1, Math.min(360, vf.vmaxR));
+  followDiagWrite('manual_pf_limits', { vmaxT: manualPf.vmaxT, vmaxR: manualPf.vmaxR });
+}
+
+function manualPfUpdateTarget(cmd) {
+  const pose = parsePoseCommand(cmd, 'PF');
+  if (!pose) {
+    markPfMailboxDrop('invalid manual PF target', 'invalid');
+    return { ok: false, reason: 'invalid PF pose' };
+  }
+  const now = Date.now();
+  manualPf.target = pose;
+  if (!manualPf.output) manualPf.output = pose.slice();
+  manualPf.lastInputAt = now;
+  manualPf.targetUpdates++;
+  manualPf.lastReason = null;
+  pushWindow(manualPf.inputWindow, { at: now, pose }, now);
+  followDiagWrite('manual_pf_target', {
+    pose,
+    targetUpdates: manualPf.targetUpdates,
+    output: manualPf.output,
+  });
+  if (manualPf.timer) {
+    clearTimeout(manualPf.timer);
+    manualPf.timer = null;
+  }
+  manualPfSchedule(0);
+  return { ok: true, via: 'manual-pf-target' };
+}
+
+function manualPfTick() {
+  manualPf.timer = null;
+  if (!manualPf.target) return;
+  if (activeSession) {
+    manualPfStop('session active');
+    return;
+  }
+
+  const now = Date.now();
+  const dtMs = manualPf.lastTickAt ? now - manualPf.lastTickAt : MANUAL_PF_INTERVAL_MS;
+  manualPf.lastTickAt = now;
+  const dtSec = Math.max(0.001, Math.min(0.05, dtMs / 1000));
+  const prev = manualPf.output || manualPf.target.slice();
+  const next = clampStepPose(prev, manualPf.target, dtSec, manualPf.vmaxT, manualPf.vmaxR);
+  const moved = !poseClose(prev, next);
+  manualPf.output = next;
+
+  const keepaliveDue = !manualPf.lastEmitAt || (now - manualPf.lastEmitAt) >= MANUAL_PF_KEEPALIVE_MS;
+  if ((moved || keepaliveDue) && currentTransport.state === 'connected') {
+    const outCmd = `PF ${fmtPose(next).join(' ')}`;
+    const result = enqueuePfCommand(outCmd, null);
+    if (result.ok) {
+      manualPf.emitted++;
+      manualPf.lastEmitAt = now;
+      pushWindow(manualPf.emitWindow, { at: now, pose: next.slice() }, now);
+    }
+  }
+
+  const atTarget = poseClose(manualPf.output, manualPf.target);
+  const sinceEmit = manualPf.lastEmitAt ? now - manualPf.lastEmitAt : 0;
+  const delay = atTarget
+    ? Math.max(50, MANUAL_PF_KEEPALIVE_MS - sinceEmit)
+    : MANUAL_PF_INTERVAL_MS;
+  manualPfSchedule(delay);
+}
+
 function followDiagWrite(type, data = {}) {
   if (!FOLLOW_DIAG_ENABLED) return;
   try {
@@ -524,6 +720,7 @@ function followDiagWrite(type, data = {}) {
           windowMs: FOLLOW_DIAG_WINDOW_MS,
           maxSamples: FOLLOW_DIAG_MAX_SAMPLES,
           pfMailboxMinMs: PF_MAILBOX_MIN_MS,
+          manualPfHz: MANUAL_PF_HZ,
         },
       }) + '\n');
       console.log(`[FollowDiag] writing ${followDiagPath}`);
@@ -578,6 +775,7 @@ function followDiagSummary(now = Date.now()) {
       dtP95: round(percentile(teleDt, 95), 2),
       dtMax: round(maxFinite(teleDt), 2),
     },
+    manual: manualPfSummary(now),
     mailbox: pfMailboxSummary(now),
     latest: recentTele ? recentTele.sample : null,
     warnings: followDiag.warnings.slice(-12),
@@ -677,7 +875,7 @@ function observeIncoming(d) {
     followDiagLastSummaryAt = now;
     const s = followDiagSummary(now);
     followDiagWrite('summary', s);
-    console.log(`[FollowDiag] fl=${s.state.fl} profile=${s.state.profile} pf=${s.pf.hz ?? '-'}Hz pfDt95=${s.pf.dtP95 ?? '-'}ms mb=${s.mailbox.flushed}/${s.mailbox.received} coal=${s.mailbox.coalesced} drop=${s.mailbox.dropped} tele=${s.tele.hz ?? '-'}Hz teleDt95=${s.tele.dtP95 ?? '-'}ms herr=${round(sample.herrMax, 2) ?? '-'} ok=${sample.ok ?? '-'} ef=${sample.ef ?? '-'} rxDrop=${sample.rxDrop ?? '-'} jitter=${sample.jitterUs ?? '-'}us`);
+    console.log(`[FollowDiag] fl=${s.state.fl} profile=${s.state.profile} pf=${s.pf.hz ?? '-'}Hz pfDt95=${s.pf.dtP95 ?? '-'}ms manualIn=${s.manual.inputHz ?? '-'}Hz manualOut=${s.manual.emitHz ?? '-'}Hz mb=${s.mailbox.flushed}/${s.mailbox.received} coal=${s.mailbox.coalesced} drop=${s.mailbox.dropped} tele=${s.tele.hz ?? '-'}Hz teleDt95=${s.tele.dtP95 ?? '-'}ms herr=${round(sample.herrMax, 2) ?? '-'} ok=${sample.ok ?? '-'} ef=${sample.ef ?? '-'} rxDrop=${sample.rxDrop ?? '-'} jitter=${sample.jitterUs ?? '-'}us`);
   }
 }
 

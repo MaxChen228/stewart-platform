@@ -39,7 +39,7 @@ function round(v, d = 3) {
 }
 
 function load(file) {
-  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [] };
+  const out = { meta: null, cmds: [], tele: [], states: [], statuses: [], summaries: [], manualTargets: [], manualStops: [], manualLimits: [] };
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     if (!line.trim()) continue;
     let rec;
@@ -50,6 +50,9 @@ function load(file) {
     else if (rec.type === 'state') out.states.push(rec);
     else if (rec.type === 'status') out.statuses.push(rec);
     else if (rec.type === 'summary') out.summaries.push(rec);
+    else if (rec.type === 'manual_pf_target') out.manualTargets.push(rec);
+    else if (rec.type === 'manual_pf_stop') out.manualStops.push(rec);
+    else if (rec.type === 'manual_pf_limits') out.manualLimits.push(rec);
   }
   return out;
 }
@@ -116,6 +119,13 @@ function summarize(file) {
     mailbox: {
       first: firstSummary?.mailbox || null,
       last: lastSummary?.mailbox || null,
+    },
+    manual: {
+      first: firstSummary?.manual || null,
+      last: lastSummary?.manual || null,
+      targetEvents: d.manualTargets.length,
+      stopEvents: d.manualStops.map((x) => ({ t: x.t, reason: x.reason })),
+      limits: d.manualLimits.map((x) => ({ t: x.t, vmaxT: x.vmaxT, vmaxR: x.vmaxR })),
     },
     followState: {
       states: d.states.map((x) => ({ t: x.t, fl: x.fl, profile: x.profile, pos: x.pos, mode: x.mode })),
