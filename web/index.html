@@ -726,7 +726,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
       <div class="dev-label" style="margin-bottom:6px">Runtime rate (Hz)</div>
       <div style="display:grid;grid-template-columns:86px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
-        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="100" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Loop</span><input type="number" id="rate-loop-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
       <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 50Hz · Loop 100Hz</div>
@@ -2019,7 +2019,7 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
-const AR_PERIOD_MIN_MS = 10;   // 鏡像韌體：下限 10ms=100Hz（匯流排物理底；<10ms 時 6×0x35+F5 撐爆 500kbps、餓死 F5）
+const AR_PERIOD_MIN_MS = 1;    // 鏡像韌體：下限 1ms=1000Hz（SERVO42D timer 硬體底）。⚠️ AR>~100Hz 會與 F5 搶 500kbps 匯流排→控制變鈍，進階自負
 const AR_PERIOD_MAX_MS = 100;  // 10Hz 下限（=韌體 AR_PERIOD_MAX_MS）
 
 function rateHzToPeriodMs(hz, minMs = 1, maxMs = 100) {
