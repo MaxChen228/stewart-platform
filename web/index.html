@@ -1470,20 +1470,45 @@ document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfi
 
 // ===== 跟隨模式：FOLLOW 1/0 + PF 串流（速度受限濾波器在韌體；拖快不硬撲）=====
 let followActive = false;
-const PF_THROTTLE_MS = 30;          // PF 串流節流（coalesce 到最新）
-let _pfPending = null, _pfLast = 0, _pfTrailTimer = null;
-function _pfFlush() {
-  _pfTrailTimer = null;
-  if (_pfPending == null || !followActive) { _pfPending = null; return; }
+const PF_PUMP_MS = 33;              // UI 只穩定提交最新目標；server/firmware 會再 coalesce + VF 限速
+const PF_KEEPALIVE_MS = 1000;
+const PF_POSE_EPS = 0.001;
+let _pfPending = null, _pfLast = 0, _pfPumpTimer = null, _pfLastSent = null;
+function _pfPoseFromSliders() {
+  const o = poseReadOffset();
+  return [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
+}
+function _pfPoseDelta(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Infinity;
+  let m = 0;
+  for (let i = 0; i < 6; i++) m = Math.max(m, Math.abs(Number(a[i]) - Number(b[i])));
+  return m;
+}
+function _pfSchedule(delay = PF_PUMP_MS) {
+  if (_pfPumpTimer || !followActive || sessionState.active) return;
+  _pfPumpTimer = setTimeout(_pfPump, Math.max(0, delay));
+}
+function _pfSend(pose) {
   _pfLast = performance.now();
-  window.sendCmd(`PF ${_pfPending.map(x=>x.toFixed(3)).join(' ')}`);
+  _pfLastSent = pose.slice();
+  window.sendCmd(`PF ${pose.map(x=>x.toFixed(3)).join(' ')}`);
+}
+function _pfPump() {
+  _pfPumpTimer = null;
+  if (!followActive || sessionState.active || !wsConnected) { _pfPending = null; return; }
+  const target = _pfPending || _pfPoseFromSliders();
   _pfPending = null;
+  const now = performance.now();
+  if (Array.isArray(target) && target.length === 6 && target.every(Number.isFinite) && window.Kin.ik(target).valid) {
+    const changed = _pfPoseDelta(_pfLastSent, target) > PF_POSE_EPS;
+    if (changed || !_pfLast || now - _pfLast > PF_KEEPALIVE_MS) _pfSend(target);
+  }
+  _pfSchedule(PF_PUMP_MS);
 }
 function streamPF(pose) {        // 共用串流原語（Phase 3 動作引擎也走這條）
   _pfPending = pose.slice();
   const dt = performance.now() - _pfLast;
-  if (dt >= PF_THROTTLE_MS) _pfFlush();
-  else if (!_pfTrailTimer) _pfTrailTimer = setTimeout(_pfFlush, PF_THROTTLE_MS - dt);
+  _pfSchedule(dt >= PF_PUMP_MS ? 0 : PF_PUMP_MS - dt);
 }
 function updateFollowUI() {
   const b = document.getElementById('follow-toggle');
@@ -1505,9 +1530,18 @@ function onFollowOn(pose) {
   }
   poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
   followActive = true;
+  _pfLast = 0;
+  _pfLastSent = null;
+  updateFollowUI();
+  streamPF(ghostTarget || pose);
+}
+function followReset() {
+  followActive = false;
+  _pfPending = null;
+  _pfLastSent = null;
+  if (_pfPumpTimer) { clearTimeout(_pfPumpTimer); _pfPumpTimer = null; }
   updateFollowUI();
 }
-function followReset() { followActive = false; _pfPending = null; if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; } updateFollowUI(); }
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {

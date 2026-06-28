@@ -59,6 +59,63 @@ let recCount = 0;
 let recT0 = 0;
 let recOwner = null;
 
+function numberEnv(name, fallback) {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) ? v : fallback;
+}
+
+// Always-on follow diagnostics. This is intentionally separate from the formal
+// recorder: it is low-volume, survives "just restart server and try it", and
+// keeps enough host-side timing to diagnose jerky FOLLOW/PF behavior.
+const FOLLOW_DIAG_DIR = path.join(REC_DIR, 'follow-diagnostics');
+const FOLLOW_DIAG_ENABLED = process.env.FOLLOW_DIAG !== '0';
+const FOLLOW_DIAG_WINDOW_MS = 120000;
+const FOLLOW_DIAG_MAX_SAMPLES = Math.max(300, Math.floor(numberEnv('FOLLOW_DIAG_MAX_SAMPLES', 5000)));
+const PF_MAILBOX_MIN_MS = Math.max(0, numberEnv('PF_MAILBOX_MIN_MS', 10));
+let followDiagStream = null;
+let followDiagPath = null;
+let followDiagT0 = performance.now();
+let followDiagLastSummaryAt = 0;
+let followDiagSeq = 0;
+const followDiag = {
+  startedAt: new Date().toISOString(),
+  lastOp: null,
+  lastPfAt: 0,
+  lastPfPose: null,
+  lastTeleAt: 0,
+  lastFl: null,
+  lastProfile: null,
+  pf: [],
+  tele: [],
+  state: [],
+  warnings: [],
+};
+
+// PF is a high-rate setpoint stream, not a chatty command. Treat it as a
+// latest-wins mailbox so producers cannot build a backlog in Node, WebSocket
+// clients, recorder, or the ESP32 transport. The firmware still owns the real
+// motion clock and velocity limits; this only bounds host-side delivery noise.
+const pfMailbox = {
+  pending: null,
+  timer: null,
+  timerKind: null,
+  received: 0,
+  flushed: 0,
+  coalesced: 0,
+  dropped: 0,
+  writeFail: 0,
+  gateDrop: 0,
+  invalidDrop: 0,
+  transportDrop: 0,
+  lastEnqueueAt: 0,
+  lastFlushAt: 0,
+  lastDropAt: 0,
+  lastError: null,
+  lastVia: null,
+  lastQueuedPose: null,
+  lastFlushedPose: null,
+};
+
 // UI/session ownership gate. Manual pose controls and program sessions share the
 // same WebSocket transport, so the server owns the final arbitration. Workspace
 // execution is owned by the server-side executor; browser and CLI clients only
@@ -179,6 +236,7 @@ function setSessionPhase(token, phase) {
 
 function finishSessionState(token, { abort = false, reason = null } = {}) {
   requireSessionToken(token);
+  clearPfMailbox(abort ? 'session aborted' : 'session finished');
   const endedSession = publicSessionState();
   activeSession = null;
   pushSessionEvent(abort ? 'session_abort' : 'session_finish', {
@@ -193,8 +251,12 @@ function publicRecState() {
   return { recording: !!recStream, path: recPath, lines: recCount, owner: publicRecOwner() };
 }
 
+function commandOp(cmd) {
+  return String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+}
+
 function movementCommand(cmd) {
-  const op = String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+  const op = commandOp(cmd);
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
     'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'J', 'M',
@@ -205,25 +267,172 @@ function movementCommand(cmd) {
 
 function commandAllowed(cmd, token) {
   if (!activeSession) return { ok: true };
-  const op = String(cmd || '').trim().split(/\s+/)[0].toUpperCase();
+  const op = commandOp(cmd);
   if (token && token === activeSession.token) return { ok: true };
   if (op === 'D' || op === 'S') return { ok: true, emergency: true };
   if (!movementCommand(cmd)) return { ok: true };
   return { ok: false, reason: `session active: ${activeSession.label || activeSession.owner}` };
 }
 
+function markPfMailboxDrop(reason, kind = 'drop') {
+  pfMailbox.dropped++;
+  pfMailbox.lastDropAt = Date.now();
+  pfMailbox.lastError = reason || kind;
+  if (kind === 'write') pfMailbox.writeFail++;
+  else if (kind === 'gate') pfMailbox.gateDrop++;
+  else if (kind === 'invalid') pfMailbox.invalidDrop++;
+  else if (kind === 'transport') pfMailbox.transportDrop++;
+}
+
+function clearPfMailboxTimer() {
+  if (!pfMailbox.timer) return;
+  if (pfMailbox.timerKind === 'immediate') clearImmediate(pfMailbox.timer);
+  else clearTimeout(pfMailbox.timer);
+  pfMailbox.timer = null;
+  pfMailbox.timerKind = null;
+}
+
+function clearPfMailbox(reason = 'cleared') {
+  clearPfMailboxTimer();
+  if (pfMailbox.pending) {
+    pfMailbox.pending = null;
+    markPfMailboxDrop(reason, 'drop');
+  }
+}
+
+function schedulePfMailboxFlush(delayMs = 0) {
+  if (pfMailbox.timer) return;
+  const delay = Math.max(0, Math.ceil(Number(delayMs) || 0));
+  if (delay > 0) {
+    pfMailbox.timerKind = 'timeout';
+    pfMailbox.timer = setTimeout(flushPfMailbox, delay);
+  } else {
+    pfMailbox.timerKind = 'immediate';
+    pfMailbox.timer = setImmediate(flushPfMailbox);
+  }
+}
+
+function pfCommandCancelsMailbox(op) {
+  return ['D', 'S', 'H', 'E', 'P', 'FOLLOW'].includes(op);
+}
+
+function pfMailboxSummary(now = Date.now()) {
+  const pendingAgeMs = pfMailbox.pending ? now - pfMailbox.pending.enqueuedAt : null;
+  return {
+    minMs: PF_MAILBOX_MIN_MS,
+    pending: !!pfMailbox.pending,
+    pendingAgeMs,
+    received: pfMailbox.received,
+    flushed: pfMailbox.flushed,
+    coalesced: pfMailbox.coalesced,
+    dropped: pfMailbox.dropped,
+    writeFail: pfMailbox.writeFail,
+    gateDrop: pfMailbox.gateDrop,
+    invalidDrop: pfMailbox.invalidDrop,
+    transportDrop: pfMailbox.transportDrop,
+    lastVia: pfMailbox.lastVia,
+    lastError: pfMailbox.lastError,
+    msSinceEnqueue: pfMailbox.lastEnqueueAt ? now - pfMailbox.lastEnqueueAt : null,
+    msSinceFlush: pfMailbox.lastFlushAt ? now - pfMailbox.lastFlushAt : null,
+    lastQueuedPose: pfMailbox.lastQueuedPose,
+    lastFlushedPose: pfMailbox.lastFlushedPose,
+  };
+}
+
+function enqueuePfCommand(cmd, sessionToken = null) {
+  const pose = parsePoseCommand(cmd, 'PF');
+  if (!pose) {
+    markPfMailboxDrop('invalid PF pose', 'invalid');
+    return { ok: false, reason: 'invalid PF pose' };
+  }
+  if (currentTransport.state !== 'connected') {
+    const reason = `transport ${currentTransport.state || 'unknown'}`;
+    markPfMailboxDrop(reason, 'transport');
+    return { ok: false, reason };
+  }
+
+  const now = Date.now();
+  pfMailbox.received++;
+  if (pfMailbox.pending) pfMailbox.coalesced++;
+  pfMailbox.pending = {
+    cmd,
+    pose,
+    sessionToken,
+    enqueuedAt: now,
+    seq: pfMailbox.received,
+  };
+  pfMailbox.lastEnqueueAt = now;
+  pfMailbox.lastQueuedPose = pose;
+  observeCommand(cmd, 'pf-mailbox', sessionToken);
+
+  const sinceFlush = pfMailbox.lastFlushAt ? now - pfMailbox.lastFlushAt : PF_MAILBOX_MIN_MS;
+  schedulePfMailboxFlush(Math.max(0, PF_MAILBOX_MIN_MS - sinceFlush));
+  return { ok: true, via: 'pf-mailbox' };
+}
+
+function flushPfMailbox() {
+  pfMailbox.timer = null;
+  pfMailbox.timerKind = null;
+  const item = pfMailbox.pending;
+  if (!item) return;
+
+  const now = Date.now();
+  const sinceFlush = pfMailbox.lastFlushAt ? now - pfMailbox.lastFlushAt : PF_MAILBOX_MIN_MS;
+  if (sinceFlush < PF_MAILBOX_MIN_MS) {
+    schedulePfMailboxFlush(PF_MAILBOX_MIN_MS - sinceFlush);
+    return;
+  }
+
+  const gate = commandAllowed(item.cmd, item.sessionToken);
+  if (!gate.ok) {
+    pfMailbox.pending = null;
+    markPfMailboxDrop(gate.reason, 'gate');
+    return;
+  }
+  if (currentTransport.state !== 'connected') {
+    pfMailbox.pending = null;
+    markPfMailboxDrop(`transport ${currentTransport.state || 'unknown'}`, 'transport');
+    return;
+  }
+
+  pfMailbox.pending = null;
+  const wr = transport.write(item.cmd);
+  if (wr.ok) {
+    pfMailbox.flushed++;
+    pfMailbox.lastFlushAt = Date.now();
+    pfMailbox.lastVia = wr.kind;
+    pfMailbox.lastError = null;
+    pfMailbox.lastFlushedPose = item.pose;
+    recWrite('cmd', item.cmd);
+    return;
+  }
+
+  markPfMailboxDrop(wr.reason, 'write');
+  recWrite('drop', { cmd: item.cmd, reason: wr.reason, transport: currentTransport, highRate: true });
+}
+
 function sendCommand(cmd, sessionToken = null) {
+  const op = commandOp(cmd);
+  const highRate = op === 'PF';
   const gate = commandAllowed(cmd, sessionToken);
   if (!gate.ok) {
+    if (highRate) {
+      markPfMailboxDrop(gate.reason, 'gate');
+      return { ok: false, reason: gate.reason };
+    }
     console.warn(`[WS] blocked cmd (${gate.reason}): ${cmd}`);
     pushSessionEvent('command_blocked', { cmd, reason: gate.reason, transport: currentTransport });
     recWrite('drop', { cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() });
     broadcast(JSON.stringify({ evt: 'cmd_dropped', c: cmd, reason: gate.reason, transport: currentTransport, session: publicSessionState() }));
     return { ok: false, reason: gate.reason };
   }
+  if (highRate) return enqueuePfCommand(cmd, sessionToken);
+
+  if (pfCommandCancelsMailbox(op)) clearPfMailbox(`cancelled by ${op}`);
   console.log(`[WS] cmd: ${cmd}`);
   const wr = transport.write(cmd);
   if (wr.ok) {
+    observeCommand(cmd, wr.kind, sessionToken);
     if (activeSession && sessionToken === activeSession.token) pushSessionEvent('command_sent', { cmd, via: wr.kind });
     recWrite('cmd', cmd);
     broadcast(JSON.stringify({ evt: 'cmd', c: cmd, via: wr.kind }));
@@ -251,6 +460,225 @@ function recWrite(dir, payload) {
 function recEvent(type, payload = {}) {
   if (!recStream) return;
   recWrite('event', { type, ...payload });
+}
+
+function percentile(values, p) {
+  const a = values.filter(Number.isFinite).sort((x, y) => x - y);
+  if (!a.length) return null;
+  const idx = (a.length - 1) * (p / 100);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  if (lo === hi) return a[lo];
+  return a[lo] + (a[hi] - a[lo]) * (idx - lo);
+}
+
+function avg(values) {
+  const a = values.filter(Number.isFinite);
+  return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+}
+
+function round(v, d = 3) {
+  return Number.isFinite(v) ? Number(v.toFixed(d)) : null;
+}
+
+function maxFinite(values) {
+  const a = values.filter(Number.isFinite);
+  return a.length ? Math.max(...a) : null;
+}
+
+function pushWindow(arr, item, now = Date.now()) {
+  arr.push(item);
+  while (arr.length && now - arr[0].at > FOLLOW_DIAG_WINDOW_MS) arr.shift();
+  while (arr.length > FOLLOW_DIAG_MAX_SAMPLES) arr.shift();
+}
+
+function parsePoseCommand(cmd, op) {
+  const parts = String(cmd || '').trim().split(/\s+/);
+  if (parts[0]?.toUpperCase() !== op) return null;
+  const pose = parts.slice(1, 7).map(Number);
+  return pose.length === 6 && pose.every(Number.isFinite) ? pose : null;
+}
+
+function poseDelta(prev, next) {
+  if (!Array.isArray(prev) || !Array.isArray(next)) return null;
+  const d = next.map((x, i) => x - prev[i]);
+  return {
+    maxT: Math.max(Math.abs(d[0]), Math.abs(d[1]), Math.abs(d[2])),
+    maxR: Math.max(Math.abs(d[3]), Math.abs(d[4]), Math.abs(d[5])),
+    d,
+  };
+}
+
+function followDiagWrite(type, data = {}) {
+  if (!FOLLOW_DIAG_ENABLED) return;
+  try {
+    if (!followDiagStream) {
+      fs.mkdirSync(FOLLOW_DIAG_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      followDiagPath = path.join(FOLLOW_DIAG_DIR, `follow_${stamp}.jsonl`);
+      followDiagStream = fs.createWriteStream(followDiagPath, { flags: 'a' });
+      followDiagT0 = performance.now();
+      followDiagStream.write(JSON.stringify({
+        meta: {
+          kind: 'follow-diagnostics',
+          wallClock: new Date().toISOString(),
+          windowMs: FOLLOW_DIAG_WINDOW_MS,
+          maxSamples: FOLLOW_DIAG_MAX_SAMPLES,
+          pfMailboxMinMs: PF_MAILBOX_MIN_MS,
+        },
+      }) + '\n');
+      console.log(`[FollowDiag] writing ${followDiagPath}`);
+    }
+    followDiagStream.write(JSON.stringify({
+      seq: ++followDiagSeq,
+      t: round(performance.now() - followDiagT0, 3),
+      wall: new Date().toISOString(),
+      type,
+      ...data,
+    }) + '\n');
+  } catch (err) {
+    if (!followDiag.warnings.some((w) => w.type === 'diag_write_failed')) {
+      followDiag.warnings.push({ type: 'diag_write_failed', error: err.message, at: Date.now() });
+      console.warn(`[FollowDiag] write failed: ${err.message}`);
+    }
+  }
+}
+
+function followDiagSummary(now = Date.now()) {
+  const pf = followDiag.pf;
+  const tele = followDiag.tele;
+  const pfDt = pf.map((x) => x.dtMs).filter(Number.isFinite);
+  const teleDt = tele.map((x) => x.dtMs).filter(Number.isFinite);
+  const recentTele = tele[tele.length - 1] || null;
+  const durationPf = pf.length >= 2 ? (pf[pf.length - 1].at - pf[0].at) / 1000 : 0;
+  const durationTele = tele.length >= 2 ? (tele[tele.length - 1].at - tele[0].at) / 1000 : 0;
+  return {
+    enabled: FOLLOW_DIAG_ENABLED,
+    path: followDiagPath,
+    windowMs: FOLLOW_DIAG_WINDOW_MS,
+    ageMs: recentTele ? now - recentTele.at : null,
+    state: {
+      fl: followDiag.lastFl,
+      profile: followDiag.lastProfile,
+      lastOp: followDiag.lastOp,
+      msSincePf: followDiag.lastPfAt ? now - followDiag.lastPfAt : null,
+    },
+    pf: {
+      count: pf.length,
+      hz: durationPf > 0 ? round((pf.length - 1) / durationPf, 2) : null,
+      dtAvg: round(avg(pfDt), 2),
+      dtP95: round(percentile(pfDt, 95), 2),
+      dtMax: round(maxFinite(pfDt), 2),
+      stepTMax: round(maxFinite(pf.map((x) => x.stepT)), 3),
+      stepRMax: round(maxFinite(pf.map((x) => x.stepR)), 3),
+    },
+    tele: {
+      count: tele.length,
+      hz: durationTele > 0 ? round((tele.length - 1) / durationTele, 2) : null,
+      dtAvg: round(avg(teleDt), 2),
+      dtP95: round(percentile(teleDt, 95), 2),
+      dtMax: round(maxFinite(teleDt), 2),
+    },
+    mailbox: pfMailboxSummary(now),
+    latest: recentTele ? recentTele.sample : null,
+    warnings: followDiag.warnings.slice(-12),
+  };
+}
+
+function observeCommand(cmd, via = null, sessionToken = null) {
+  const op = String(cmd || '').trim().split(/\s+/)[0]?.toUpperCase();
+  if (!op) return;
+  const now = Date.now();
+  if (['FOLLOW', 'PF', 'VF', 'P', 'H', 'D', 'S', 'E'].includes(op)) {
+    followDiag.lastOp = op;
+    const entry = { op, cmd, via, session: !!sessionToken };
+    if (op === 'PF') {
+      const pose = parsePoseCommand(cmd, 'PF');
+      const dtMs = followDiag.lastPfAt ? now - followDiag.lastPfAt : null;
+      const delta = poseDelta(followDiag.lastPfPose, pose);
+      followDiag.lastPfAt = now;
+      followDiag.lastPfPose = pose || followDiag.lastPfPose;
+      pushWindow(followDiag.pf, {
+        at: now,
+        dtMs,
+        stepT: delta ? delta.maxT : null,
+        stepR: delta ? delta.maxR : null,
+      }, now);
+      entry.pose = pose;
+      entry.dtMs = dtMs;
+      entry.step = delta;
+    }
+    if (op !== 'PF') followDiagWrite('cmd', entry);
+  }
+}
+
+function observeIncoming(d) {
+  const now = Date.now();
+  const isTelemetry = d && Array.isArray(d.a);
+  const isFollowRelatedStatus = d && (d.status === 'follow on' || d.status === 'follow off' || d.status === 'follow vmax');
+  if (isFollowRelatedStatus) {
+    followDiagWrite('status', {
+      status: d.status,
+      pose: d.pose || null,
+      fk: d.fk,
+      vmaxT: d.t,
+      vmaxR: d.r,
+      raw: d,
+    });
+  }
+  if (!isTelemetry) return;
+
+  const fl = Number.isFinite(Number(d.fl)) ? Number(d.fl) : null;
+  const profile = d.ctl?.profile || null;
+  if (fl !== followDiag.lastFl || profile !== followDiag.lastProfile) {
+    followDiag.lastFl = fl;
+    followDiag.lastProfile = profile;
+    const state = { at: now, fl, profile, pos: d.pos, mode: d.ctl?.mode || null };
+    pushWindow(followDiag.state, state, now);
+    followDiagWrite('state', state);
+  }
+
+  const nearFollow = fl === 1 || profile === 'follow' || (followDiag.lastPfAt && now - followDiag.lastPfAt < 5000);
+  if (!nearFollow) return;
+
+  const dtMs = followDiag.lastTeleAt ? now - followDiag.lastTeleAt : null;
+  followDiag.lastTeleAt = now;
+  const sample = {
+    fl,
+    profile,
+    pos: d.pos,
+    ok: d.ok,
+    lhz: d.lhz,
+    fwDt: d.dt,
+    hmax: d.hmax,
+    herrMax: Array.isArray(d.herr) ? maxFinite(d.herr.map((x) => Math.abs(Number(x)))) : null,
+    coordMax: d.ctl?.coordMax,
+    ikFail: d.ctl?.ikFail,
+    fkFail: d.ctl?.fkFail,
+    coordLimit: d.ctl?.coordLimit,
+    ef: d.can?.ef ?? d.ef,
+    tx: d.can?.tx ?? d.tx,
+    rxDrop: d.can?.rxDrop,
+    txFail: d.can?.txFail,
+    busOvr: d.bus?.ovr,
+    f5us: d.bus?.f5us,
+    maxDrain: d.bus?.mxd,
+    ctrlUs: d.sched?.ctrl_us,
+    ctrlMaxUs: d.sched?.ctrl_max_us,
+    jitterUs: d.sched?.jitter_us,
+    missed: d.sched?.missed,
+    cmdDrop: d.sched?.cmd_drop,
+    teleDrop: d.sched?.tele_drop,
+    ar: d.ar,
+    arAgeMax: Array.isArray(d.arAge) ? maxFinite(d.arAge.map(Number)) : null,
+  };
+  pushWindow(followDiag.tele, { at: now, dtMs, sample }, now);
+
+  if (now - followDiagLastSummaryAt > 2000) {
+    followDiagLastSummaryAt = now;
+    const s = followDiagSummary(now);
+    followDiagWrite('summary', s);
+    console.log(`[FollowDiag] fl=${s.state.fl} profile=${s.state.profile} pf=${s.pf.hz ?? '-'}Hz pfDt95=${s.pf.dtP95 ?? '-'}ms mb=${s.mailbox.flushed}/${s.mailbox.received} coal=${s.mailbox.coalesced} drop=${s.mailbox.dropped} tele=${s.tele.hz ?? '-'}Hz teleDt95=${s.tele.dtP95 ?? '-'}ms herr=${round(sample.herrMax, 2) ?? '-'} ok=${sample.ok ?? '-'} ef=${sample.ef ?? '-'} rxDrop=${sample.rxDrop ?? '-'} jitter=${sample.jitterUs ?? '-'}us`);
+  }
 }
 
 function recStart(name, owner = null) {
@@ -773,6 +1201,11 @@ const requestHandler = (req, res) => {
     }));
     return;
   }
+  if (req.url === '/api/follow/diag') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(followDiagSummary(), null, 2));
+    return;
+  }
   if (req.url.split('?')[0] === '/api/transport/reconnect') {
     transport.forceReconnect('api');
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1199,7 +1632,7 @@ const wsServers = [];
 let clientCount = 0;
 
 // 對等廣播匯流排：所有 client（monitor 頁、腳本）共用同一條送出路徑。
-// telemetry（序列埠回覆）與指令 echo 都走這裡 → 任何來源的操作對所有人可見。
+// telemetry（序列埠回覆）與低頻指令 echo 走這裡；PF 這種資料面串流不廣播，避免拖慢 UI。
 function broadcast(line) {
   for (const wss of wsServers) {
     for (const client of wss.clients) if (client.readyState === 1) client.send(line);
@@ -1268,6 +1701,7 @@ function onLine(line) {
       lastTelemetry = line;
       lastTelemetryAt = Date.now();
     }
+    observeIncoming(d);
   } catch {}
   recWrite('in', line);
   broadcast(line);
@@ -1545,7 +1979,11 @@ function createTransportManager({ onLine, onState }) {
 let currentTransport = { kind: null, state: 'init', detail: '' };
 const transport = createTransportManager({
   onLine,
-  onState: (st) => { currentTransport = st; broadcast(JSON.stringify({ evt: 'transport', ...st })); },
+  onState: (st) => {
+    currentTransport = st;
+    if (st.state !== 'connected') clearPfMailbox(`transport ${st.state}`);
+    broadcast(JSON.stringify({ evt: 'transport', ...st }));
+  },
 });
 
 function localHttpsSanList() {
