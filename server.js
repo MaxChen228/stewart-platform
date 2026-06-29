@@ -355,7 +355,7 @@ function movementCommand(cmd) {
   const op = commandOp(cmd);
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
-    'U', 'W', 'K', 'KS', 'KRESET', 'V', 'VF', 'FE', 'J', 'M',
+    'U', 'W', 'K', 'KS', 'KRESET', 'KI', 'KIC', 'KIS', 'KIRESET', 'V', 'VF', 'FE', 'J', 'M',
     'L', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
     'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
   ].includes(op);
