@@ -1271,6 +1271,12 @@ function currentTuningState() {
       kd: inputNumber('m-kd', 0),
       kv: inputNumber('m-kv', 0),
     },
+    holdi: {
+      ki: inputNumber('m-ki-hold', 0),
+      clamp: inputNumber('m-iclamp', 3),
+      deadband: inputNumber('m-idead', 0.15),
+      settle: inputNumber('m-isettle', 8),
+    },
   };
 }
 function applyTuningUiState(tuning = {}) {
@@ -1288,6 +1294,11 @@ function applyTuningUiState(tuning = {}) {
   clampInputValue(document.getElementById('m-ki'), Number(pid.ki));
   clampInputValue(document.getElementById('m-kd'), Number(pid.kd));
   clampInputValue(document.getElementById('m-kv'), Number(pid.kv));
+  const holdi = tuning.holdi || {};
+  clampInputValue(document.getElementById('m-ki-hold'), Number(holdi.ki));
+  clampInputValue(document.getElementById('m-iclamp'), Number(holdi.clamp));
+  clampInputValue(document.getElementById('m-idead'), Number(holdi.deadband));
+  clampInputValue(document.getElementById('m-isettle'), Number(holdi.settle));
 }
 function currentUiState() {
   const existing = platformConfig?.uiState || {};
@@ -2553,6 +2564,46 @@ scope.on('telemetry', d => {
     el.value = d.pid[i];                                            // 純顯示陳舊 → 反寫韌體真值
   });
   const s=$o('pid-sot'); if(s && !anyDirty){ s.textContent=d.pids ? '✓ 已永久保存' : '○ 暫時值'; s.style.color=d.pids ? 'var(--contra)' : 'var(--sub)'; pidSynced=true; }
+});
+
+// HOLD 積分欄位反寫（SoT：telemetry hki/hig 為真相源）。Ki 全軸單欄 + 護欄三欄拆兩套守衛。
+// hi/hki/hig/hisaved 僅在 HOLD 幀出現 → Array.isArray 守衛，非 HOLD 幀整段略過、不動輸入。
+let holdiSynced=false;
+let kiHoldDirty=false;
+const HOLDI_GUARD=['m-iclamp','m-idead','m-isettle'];   // 對齊 d.hig[0..2]
+const holdiDirty=[false,false,false];
+function markHoldiDirty(){ const s=$o('holdi-sot'); if(s){ s.textContent='✎ 未套用'; s.style.color='var(--dual)'; } }
+{ const kel=$o('m-ki-hold'); if(kel) kel.addEventListener('input',()=>{ kiHoldDirty=true; markHoldiDirty(); }); }
+HOLDI_GUARD.forEach((id,i)=>{ const el=$o(id); if(el) el.addEventListener('input',()=>{ holdiDirty[i]=true; markHoldiDirty(); }); });
+scope.on('telemetry', d => {
+  if (!Array.isArray(d.hki) || !Array.isArray(d.hig)) return;   // 僅 HOLD 幀帶這些欄位
+  let anyDirty=false;
+  const allEqual = d.hki.every(v => v === d.hki[0]);
+  // Ki 全軸單欄：僅全軸相等時用單格反映；不等時不覆寫(避免誤導)，分歧改顯於讀數行
+  const kel=$o('m-ki-hold');
+  if (kel) {
+    if (kiHoldDirty) {
+      if (allEqual && +kel.value === d.hki[0]) kiHoldDirty=false;   // 韌體追上 → 清 dirty
+      else anyDirty=true;                                           // 未套用編輯 → 別覆寫
+    } else if (document.activeElement !== kel && allEqual) {
+      kel.value = d.hki[0];                                         // 純顯示陳舊 → 反寫真值
+    }
+  }
+  // 護欄三欄：index 對齊迴圈（仿 vFOC）
+  HOLDI_GUARD.forEach((id,i) => {
+    const el=$o(id); if (!el) return;
+    if (+el.value === d.hig[i]) { holdiDirty[i]=false; return; }
+    if (holdiDirty[i]) { anyDirty=true; return; }
+    if (document.activeElement===el) return;
+    el.value = d.hig[i];
+  });
+  const s=$o('holdi-sot'); if(s && !anyDirty){ s.textContent=d.hisaved ? '✓ 已永久保存' : '○ 暫時值'; s.style.color=d.hisaved ? 'var(--contra)' : 'var(--sub)'; holdiSynced=true; }
+  // 即時積分輸出讀數 hi[6]（+ Ki per-axis 分歧提示）
+  const r=$o('holdi-readout');
+  if (r && Array.isArray(d.hi)) {
+    const div = allEqual ? '' : ` · ⚠Ki分歧[${d.hki.map(v=>v.toFixed(0)).join(',')}]`;
+    r.textContent = `∫corr [${d.hi.map(v=>v.toFixed(2)).join(', ')}]${div}`;
+  }
 });
 
 // FFT + σ（選定軸，herr 優先 fallback a）
