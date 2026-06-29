@@ -297,6 +297,9 @@ function sanitizeConditionMeta(condition) {
 function startSessionState({ label = 'program', phase = 'starting', program = null, condition = null } = {}) {
   if (activeSession) throw new Error('session already active');
   manualPfStop('session starting');
+  // session 接管平台 → 退出 manual owner 世界（手機/電腦模式）。只清狀態 + 廣播，不發 FOLLOW
+  // （session executor 自管 FOLLOW/PF）。否則 session 結束後 controlOwner 殘留 → 三端 desync。
+  if (controlOwner) { controlOwner = null; broadcast(JSON.stringify({ evt: 'mode', owner: null })); }
   activeSession = {
     token: makeSessionToken(),
     owner: 'session',
@@ -826,9 +829,16 @@ function manualPfEmit() {
   manualPf.lastReason = null;
   pushWindow(manualPf.emitWindow, { at: now, pose: target.slice() }, now);
   try { const k = ik(target); if (k && k.valid) latPush(latCmd, k.angles.map(Number), now); } catch {}
+  // 廣播 live follow target（節流 ~25Hz）→ dashboard 綠 ghost 追蹤實際來源（手機陀螺儀／滑桿皆然），
+  // 紅維持板子實際（遙測）。對齊「綠=意圖、紅=實際」跟隨心智模型。
+  if (now - lastFollowTgtBcast >= 40) {
+    lastFollowTgtBcast = now;
+    broadcast(JSON.stringify({ evt: 'followtgt', pose: target }));
+  }
   observeCommand(cmd, 'manual-resample', null);   // feeds followDiag.pf + lastPfAt (nearFollow gate)
   recWrite('cmd', cmd);
 }
+let lastFollowTgtBcast = 0;
 
 // ===== 端到端跟隨延遲估計（角度空間互相關）=====
 // dashboard 即時顯示「指令→實際」felt-lag（含濾波器+馬達響應，~200-350ms）。真算非模型：
@@ -2551,6 +2561,27 @@ function broadcast(line) {
   }
 }
 
+// ===== 控制權仲裁：電腦跟隨模式 / 手機陀螺儀模式 = 兩個互斥的獨立世界 =====
+// owner ∈ null | 'desktop' | 'phone'。一次只有一個世界能驅動平台：
+//   進模式 → 韌體 FOLLOW 1（用 FK 當前當濾波起點，不跳）；退 → FOLLOW 0（凍結當前姿態死咬）。
+//   切換時先 FOLLOW 0 清掉舊 owner 殘留的 manualPf 串流，再 FOLLOW 1 進新世界。
+// 隔離點在 PF：非 owner 送的 PF（資料面驅動）在 ws message 一律靜默 drop → 滑桿與陀螺儀永不打架。
+let controlOwner = null;
+function setControlMode(arg) {
+  const a = String(arg || '').toLowerCase();   // normalize：前端送 'DESKTOP'/'PHONE'/'OFF' 任意大小寫都接
+  const owner = (a === 'desktop' || a === 'phone') ? a : null;
+  // session 進行中：MODE 的 FOLLOW 會被 commandAllowed 的 movementCommand gate 丟（無 token），
+  // 但 owner 仍被改 → 三端 desync。直接拒絕：回報當前真實 owner（此時應為 null，session 已接管）。
+  if (activeSession) { broadcast(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
+  if (controlOwner !== owner) {
+    controlOwner = owner;
+    sendCommand('FOLLOW 0');            // 清舊 owner 串流 + 韌體凍結
+    if (owner) sendCommand('FOLLOW 1'); // 進新世界
+    console.log(`[MODE] controlOwner -> ${owner || 'off'}`);
+  }
+  broadcast(JSON.stringify({ evt: 'mode', owner: controlOwner }));
+}
+
 function handleWsConnection(ws, req) {
   // 安全：拒絕跨站瀏覽器連線（惡意網頁經 DNS rebinding / CSWSH 可直送指令驅動實體馬達）。
   // 放行本機 + RFC1918 私網來源（保住站機台旁用手機/平板從 LAN IP 控制）；
@@ -2569,6 +2600,7 @@ function handleWsConnection(ws, req) {
   if (lastTelemetry) ws.send(lastTelemetry);
   ws.send(JSON.stringify({ evt: 'transport', ...currentTransport }));
   ws.send(JSON.stringify({ evt: 'session', ...publicSessionState() }));
+  ws.send(JSON.stringify({ evt: 'mode', owner: controlOwner }));
 
   ws.on('message', (msg) => {
     const raw = msg.toString().trim();
@@ -2577,17 +2609,25 @@ function handleWsConnection(ws, req) {
     if (raw.startsWith('{')) {
       try {
         const d = JSON.parse(raw);
+        // role 宣告（dashboard='desktop' / 手機='phone'）→ 記在 ws，供 PF owner 仲裁 + 斷線 failsafe
+        if (typeof d.role === 'string') { ws._role = d.role === 'phone' ? 'phone' : 'desktop'; ws.send(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
         if (typeof d.cmd === 'string') cmd = d.cmd.trim();
         if (typeof d.sessionToken === 'string') sessionToken = d.sessionToken;
       } catch {}
     }
     if (!cmd) return;
+    const op = cmd.split(/\s+/)[0].toUpperCase();
+    if (op === 'MODE') { setControlMode(cmd.split(/\s+/)[1]); return; }
+    // owner 仲裁：PF 是兩世界的驅動資料面。有 owner 時，非 owner client 送的 PF 一律靜默 drop。
+    // 未宣告 role（ws._role=undefined）視同非 owner → 也擋（堵「先送 PF 再宣告」的隔離開口）。
+    if (op === 'PF' && controlOwner && ws._role !== controlOwner) return;
     sendCommand(cmd, sessionToken);
   });
 
   ws.on('close', () => {
     clientCount--;
     console.log(`[WS] client disconnected (${clientCount})`);
+    if (ws._role && ws._role === controlOwner) setControlMode(null);  // owner client（手機或電腦）掉線 → 退出該模式（failsafe，平台凍結不亂動）
     if (clientCount <= 0) manualPfStop('all clients disconnected');
   });
 }

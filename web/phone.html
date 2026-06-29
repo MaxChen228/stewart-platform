@@ -53,81 +53,133 @@ button:active{transform:translateY(1px);}
   </div>
 
   <button id="cal-btn">校正（歸零當前姿態）</button>
+  <div class="log" id="raw" style="font-size:10px;opacity:.65">β —  γ —  α —  scr —</div>
   <div class="log" id="log">點「校正」授權陀螺儀並歸零</div>
 </main>
 
 <script src="/sysid/kin.js"></script>
 <script>
-// 極簡手機陀螺儀來源：讀 IMU → 映射成 roll/pitch 偏移 → 串 PF 進統一跟隨管線。
-// FOLLOW on/off 由 dashboard 控；手機觀測遙測 fl 自動開始/停止串流。映射參數 hardcode。
+// 手機陀螺儀 = 獨立的「手機模式」來源（與電腦滑桿互斥，server owner 仲裁）。讀 IMU → 相對姿態旋轉
+// 矩陣 → 平台 rpy 增量 → 串 PF。驅動 on/off 由 server evt:'mode'(owner==='phone') 權威控制。
 const Kin = window.Kin, NEUTRAL_Z = Kin.NEUTRAL_Z;
 const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
 const byId = (id)=>document.getElementById(id);
 const fmt = (v)=>Number.isFinite(v)?v.toFixed(1):'--';
-const wrapDeg = (d)=>{let v=Number(d)||0;while(v>180)v-=360;while(v<-180)v+=360;return v;};
 
-// 固定映射（取代原滑桿）：手機傾 phoneFull° → 平台傾 maxTilt°，deadband 死區，tau 一階平滑。
-const MAP = { maxTilt:8, phoneFull:35, yawMax:10, tau:0.18, deadband:0.2, axisYaw:false };
+// 映射：手機相對校正姿態的傾斜/轉動 → 平台 rpy 增量（線性增益，無人為 cap）。
+// 邊界 = 實際工作空間：算出的 pose 不可達就維持上一可達點（IK valid 守，等同滑桿 reach-band）。
+// headingDeg：旋轉傾斜向量讓「手機頭 = M1,2(@210°)」；實測現況手機頭→M3,4(@90°) → 需 +120°。
+// tiltGain/yawGain = 平台度 / 手機度。yaw 工作空間大（滑桿±70）→ gain 大、不再被死 cap 在 10。
+const MAP = { tiltGain:0.5, yawGain:1.4, headingDeg:120, deadband:0.4, rollSign:1, pitchSign:1, yawSign:1 };
 
-let ws=null, wsConnected=false, followActive=false, sessionActive=false;
+// One-Euro 自適應濾波（取代固定 tau=0.18 一階低通）：cutoff 隨角速度自適應——靜止時低 cutoff
+// 殺感測噪音(尤其 yaw 磁力計，實測 intentJit 2.5×roll/pitch)、快動時高 cutoff 低 lag。破解
+// 「固定低通單一 cutoff 不可兩全（跟不緊 vs 抖）」的根本兩難。砍掉原 180ms 群延遲。
+// predict：用濾波後角速度 × 地平線預測下游 lag(網路+resampler+serial+韌體followStep+馬達 ~330ms)，
+// 主動抵消感知延遲（VR 頭顯式預測）。地平線越大感知越即時，但反向甩會過衝 → 取保守值。
+// 每軸獨立參數（離線噪音掃描定）：roll/pitch 低噪 → beta 大、反應快（lag 180→17ms，rest 0.015°≈舊
+// 固定低通）；yaw 磁力計高噪 → beta 小、保守（白噪會抬導數→抬 cutoff→漏噪，是 1€ 對高噪訊號的本質
+// 弱點，故壓 beta/dcut；lag 180→33ms，rest 0.10°）。
+const OEF = {
+  cfg: [ {mincut:0.6, beta:0.5,  dcut:0.4},    // roll
+         {mincut:0.6, beta:0.5,  dcut:0.4},    // pitch
+         {mincut:0.4, beta:0.10, dcut:0.3} ],  // yaw
+  predict: 0.08,    // 角速度預測地平線(s)：抵消下游 ~330ms pipeline lag 的一部分（VR 頭顯式）
+  clamp: 4.0,       // 預測項上限(°)：急反向 dxHat 暫態不 lurch（離線反向過衝 <4°）
+};
+const oef = [0,1,2].map(()=>({ xPrev:0, dxPrev:0, started:false }));
+function oefAlpha(cutoff, dt){ const r=2*Math.PI*cutoff*dt; return r/(r+1); }
+function oneEuro(i, x, dt){
+  const s=oef[i], c=OEF.cfg[i];
+  if(!s.started){ s.xPrev=x; s.dxPrev=0; s.started=true; return {x, dx:0}; }
+  const dx=(x-s.xPrev)/dt;
+  const dxHat=s.dxPrev + oefAlpha(c.dcut, dt)*(dx-s.dxPrev);        // 平滑導數（dcut 壓低高頻噪驅動）
+  const cutoff=c.mincut + c.beta*Math.abs(dxHat);                  // 自適應 cutoff
+  const xHat=s.xPrev + oefAlpha(cutoff, dt)*(x-s.xPrev);
+  s.xPrev=xHat; s.dxPrev=dxHat;
+  return { x:xHat, dx:dxHat };
+}
+
+let ws=null, wsConnected=false, followActive=false, sessionActive=false, phoneOwner=null;
 let homePose=[0,0,NEUTRAL_Z+28,0,0,0], basePose=homePose.slice(), cmdPose=basePose.slice();
-let sensorOn=false, sensorRaw=null, sensorBase=null, filtRpy=[0,0,0], cmdRpy=[0,0,0];
+let sensorOn=false, curR=null, baseR=null, cmdRpy=[0,0,0];
+let rawDeg={alpha:null,beta:null,gamma:null,screen:0};
 let lastSensorAt=0, pfPending=null, pfLast=0, pfTimer=null;
 
 function setLog(t,tone=''){const e=byId('log');e.textContent=t;e.className=`log ${tone}`;}
 function setPills(){
   byId('ws-pill').textContent = wsConnected?'連線 OK':'連線 ··';
   byId('ws-pill').className = `pill ${wsConnected?'ok':'bad'}`;
-  byId('follow-pill').textContent = followActive?'跟隨中':'待機';
-  byId('follow-pill').className = `pill ${followActive?'ok':''}`;
+  let txt='待機 · 等電腦啟用', cls='';
+  if(phoneOwner==='phone'){ txt='手機模式 · 驅動中'; cls='ok'; }
+  else if(phoneOwner==='desktop'){ txt='電腦控制中'; cls='bad'; }
+  byId('follow-pill').textContent = txt;
+  byId('follow-pill').className = `pill ${cls}`;
 }
 function sendCmd(c){ if(ws&&ws.readyState===WebSocket.OPEN){ws.send(c);return true;} return false; }
 
-function screenAdjusted(beta,gamma){
-  const a=Number(screen.orientation?.angle ?? window.orientation ?? 0);
-  if(a===90) return {roll:beta,pitch:-gamma};
-  if(a===-90||a===270) return {roll:-beta,pitch:gamma};
-  if(Math.abs(a)===180) return {roll:-gamma,pitch:-beta};
-  return {roll:gamma,pitch:beta};
+// 陀螺儀解析＝相對姿態旋轉矩陣法（治本）。直接拿 raw β/γ 當 pitch/roll 只在手機近水平時近似，
+// 且 β≈90（直立握持）落在 Euler gimbal 奇異 → roll/pitch 耦合亂跳。改：把 α/β/γ 建成完整旋轉矩陣
+// R（device frame），校正存 baseR，每幀算相對旋轉 baseRᵀ·curR 再萃取小角 Euler → 無 gimbal、與
+// 握持基線無關、三軸解耦。yaw 仍靠 alpha；alpha=null（部分裝置）→ yaw 恆 0（誠實，不假裝有值）。
+const D2R=Math.PI/180, R2D=180/Math.PI;
+function orientMatrix(aDeg,bDeg,gDeg){
+  const z=(aDeg||0)*D2R, x=(bDeg||0)*D2R, y=(gDeg||0)*D2R;
+  const cz=Math.cos(z),sz=Math.sin(z),cx=Math.cos(x),sx=Math.sin(x),cy=Math.cos(y),sy=Math.sin(y);
+  return [                                   // R = Rz(α)·Rx(β)·Ry(γ)（W3C deviceorientation, intrinsic Z-X'-Y''）
+    [cz*cy - sz*sx*sy, -cx*sz, cz*sy + cy*sz*sx],
+    [cy*sz + cz*sx*sy,  cz*cx, sz*sy - cz*cy*sx],
+    [-cx*sy,            sx,    cx*cy           ],
+  ];
 }
-function orientationRaw(e){
-  const beta=Number(e.beta), gamma=Number(e.gamma);
-  if(!Number.isFinite(beta)||!Number.isFinite(gamma)) return null;
-  const t=screenAdjusted(beta,gamma);
-  return {roll:t.roll,pitch:t.pitch,yaw:Number.isFinite(Number(e.alpha))?Number(e.alpha):0};
+function relEuler(base,cur){                  // base^T·cur → [roll(x),pitch(y),yaw(z)] 度（小角解耦）
+  const C=[[0,0,0],[0,0,0],[0,0,0]];
+  for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=base[k][i]*cur[k][j];C[i][j]=s;}
+  return [
+    Math.atan2(C[2][1],C[2][2])*R2D,
+    Math.atan2(-C[2][0],Math.hypot(C[2][1],C[2][2]))*R2D,
+    Math.atan2(C[1][0],C[0][0])*R2D,
+  ];
 }
-function shaped(v,maxOut){
-  const db=MAP.deadband, a=Math.abs(v);
-  if(a<=db) return 0;
-  const live=Math.max(1,MAP.phoneFull)-db;
-  return clamp(Math.sign(v)*((a-db)/live)*maxOut,-maxOut,maxOut);
+function shaped(v,gain){            // 線性增益 + deadband，不 cap（邊界交給 computePose 的 IK 守界）
+  const a=Math.abs(v);
+  if(a<=MAP.deadband) return 0;
+  return Math.sign(v)*(a-MAP.deadband)*gain;
 }
 function targetRpy(){
-  if(!sensorRaw||!sensorBase) return [0,0,0];
-  return [
-    shaped(sensorRaw.roll-sensorBase.roll, MAP.maxTilt),
-    shaped(sensorRaw.pitch-sensorBase.pitch, MAP.maxTilt),
-    MAP.axisYaw ? shaped(wrapDeg(sensorRaw.yaw-sensorBase.yaw), MAP.yawMax) : 0,
-  ];
+  if(!curR||!baseR) return [0,0,0];
+  const e=relEuler(baseR,curR);
+  const r=MAP.rollSign  * shaped(e[0], MAP.tiltGain);
+  const p=MAP.pitchSign * shaped(e[1], MAP.tiltGain);
+  const y=MAP.yawSign   * shaped(e[2], MAP.yawGain);
+  const h=MAP.headingDeg*D2R, ch=Math.cos(h), sh=Math.sin(h);   // 旋轉傾斜向量對齊「手機頭→M1,2」；yaw 不受方位旋轉影響
+  return [r*ch - p*sh, r*sh + p*ch, y];
 }
 function computePose(force=false){
   const now=performance.now();
-  const dt=lastSensorAt?Math.max(0.001,(now-lastSensorAt)/1000):0.016; lastSensorAt=now;
-  const tgt=targetRpy(), tau=Math.max(0.02,MAP.tau), a=force?1:clamp(dt/(tau+dt),0,1);
-  for(let i=0;i<3;i++) filtRpy[i]+=(tgt[i]-filtRpy[i])*a;
-  cmdRpy=filtRpy.slice();
-  cmdPose=basePose.slice(); cmdPose[3]+=cmdRpy[0]; cmdPose[4]+=cmdRpy[1]; cmdPose[5]+=cmdRpy[2];
+  const dt=lastSensorAt?clamp((now-lastSensorAt)/1000,0.001,0.1):0.016; lastSensorAt=now;
+  const tgt=targetRpy();
+  for(let i=0;i<3;i++){
+    if(force) oef[i].started=false;                       // 校正/強制 → 重置濾波器狀態
+    const r=oneEuro(i, tgt[i], force?0.016:dt);
+    let p=force?0:r.dx*OEF.predict; p=clamp(p,-OEF.clamp,OEF.clamp);
+    cmdRpy[i] = r.x + p;                                   // 1€ 平滑 + clamp 角速度預測抵消下游 lag
+  }
+  const cand=basePose.slice(); cand[3]+=cmdRpy[0]; cand[4]+=cmdRpy[1]; cand[5]+=cmdRpy[2];
+  if(Kin.ik(cand).valid||force) cmdPose=cand;   // 工作空間守界：不可達則維持上一可達 cmdPose
   render();
   return Kin.ik(cmdPose).valid;
 }
 function render(){
   const valid=Kin.ik(cmdPose).valid;
   byId('dot').classList.toggle('bad',!valid);
-  const x=clamp(cmdRpy[0]/MAP.maxTilt,-1,1)*40, y=clamp(cmdRpy[1]/MAP.maxTilt,-1,1)*40;
+  const DISP=18;   // dot 視覺尺度（°）；顯示數字＝平台實際 rpy
+  const x=clamp(cmdPose[3]/DISP,-1,1)*40, y=clamp(cmdPose[4]/DISP,-1,1)*40;
   byId('dot').style.transform=`translate(calc(-50% + ${x}%),calc(-50% + ${y}%))`;
-  byId('v-roll').textContent=fmt(cmdRpy[0]);
-  byId('v-pitch').textContent=fmt(cmdRpy[1]);
-  byId('v-yaw').textContent=fmt(cmdRpy[2]);
+  byId('v-roll').textContent=fmt(cmdPose[3]);
+  byId('v-pitch').textContent=fmt(cmdPose[4]);
+  byId('v-yaw').textContent=fmt(cmdPose[5]);
+  byId('raw').textContent=`β ${fmt(rawDeg.beta)}  γ ${fmt(rawDeg.gamma)}  α ${rawDeg.alpha==null?'—（無羅盤→無yaw）':fmt(rawDeg.alpha)}  scr ${rawDeg.screen}`;
 }
 function flushPF(){
   pfTimer=null;
@@ -142,8 +194,11 @@ function streamPF(pose){
   if(dt>=33) flushPF(); else if(!pfTimer) pfTimer=setTimeout(flushPF,33-dt);
 }
 function onOrientation(e){
-  const raw=orientationRaw(e); if(!raw) return;
-  sensorRaw=raw; if(!sensorBase) sensorBase={...sensorRaw};
+  const a=Number(e.alpha), b=Number(e.beta), g=Number(e.gamma);
+  if(!Number.isFinite(b)||!Number.isFinite(g)) return;
+  rawDeg={alpha:Number.isFinite(a)?a:null, beta:b, gamma:g, screen:Number(screen.orientation?.angle ?? window.orientation ?? 0)};
+  curR=orientMatrix(rawDeg.alpha||0,b,g);
+  if(!baseR) baseR=curR.map(r=>r.slice());
   const ok=computePose(false);
   if(followActive && ok && !sessionActive) streamPF(cmdPose);
 }
@@ -162,33 +217,32 @@ async function enableSensor(){
 async function calibrate(){
   if(!sensorOn){ const ok=await enableSensor(); if(!ok) return; }
   // 等一筆樣本
-  if(!sensorRaw){ await new Promise(r=>{const s=performance.now();(function tick(){ sensorRaw||performance.now()-s>1200?r():setTimeout(tick,40);})();}); }
-  if(!sensorRaw){ setLog('還沒有姿態資料；輕微移動手機再校正','warn'); return; }
-  sensorBase={...sensorRaw}; filtRpy=[0,0,0]; cmdRpy=[0,0,0];
+  if(!curR){ await new Promise(r=>{const s=performance.now();(function tick(){ curR||performance.now()-s>1200?r():setTimeout(tick,40);})();}); }
+  if(!curR){ setLog('還沒有姿態資料；輕微移動手機再校正','warn'); return; }
+  basePose = homePose.slice();   // 校正＝回 home 基準：當前手機姿態 = 平台 home 水平，傾斜從此疊加
+  baseR = curR.map(r=>r.slice()); oef.forEach(s=>s.started=false); cmdRpy=[0,0,0];
   computePose(true);
-  setLog(followActive?'已歸零 · 跟隨中':'已歸零 · 等 dashboard 啟動跟隨','good');
+  setLog(followActive?'已歸零 · 平台回 home，傾斜手機驅動':'已歸零 · 在電腦按「📱 手機模式」啟用','good');
 }
-function onFollowOn(pose){
-  if(Array.isArray(pose)&&pose.length===6&&pose.every(Number.isFinite)) basePose=pose.map(Number);
-  followActive=true; if(sensorOn) calibrate(); setPills();
+// server evt:'mode' 權威：owner==='phone' 才驅動。進手機模式自動歸零（平台回 home，當前手機姿態當零點）。
+function applyMode(owner){
+  phoneOwner=owner;
+  const was=followActive;
+  followActive=(owner==='phone');
+  if(followActive && !was){ if(sensorOn) calibrate(); else setLog('手機模式已開 · 點「校正」授權陀螺儀','good'); }
+  setPills();
 }
 function connectWS(){
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}`);
-  ws.onopen=()=>{ wsConnected=true; setPills(); setLog('已連線','good'); };
+  ws.onopen=()=>{ wsConnected=true; sendCmd(JSON.stringify({role:'phone'})); setPills(); setLog('已連線 · 在電腦按「📱 手機模式」啟用','good'); };
   ws.onmessage=(e)=>{
     let d; try{ d=JSON.parse(e.data); }catch{ return; }
-    if(d.evt==='session'){ sessionActive=!!d.active; if(sessionActive) followActive=false; setPills(); return; }
-    if(d.fl!==undefined) followActive=!!d.fl;
-    if(Array.isArray(d.a)&&d.a.length===6&&!followActive){
-      const fk=Kin.solveFK(d.a.map(Number));
-      if(fk?.converged&&Array.isArray(fk.pose)) basePose=fk.pose.map(Number);
-    }
-    if(d.status==='follow on'&&Array.isArray(d.pose)) onFollowOn(d.pose);
-    if(d.status==='follow off') followActive=false;
-    setPills();
+    if(d.evt==='mode'){ applyMode(d.owner); return; }
+    if(d.evt==='session'){ sessionActive=!!d.active; setPills(); return; }
+    // basePose 恆 = homePose：校正＝平台回 home，傾斜從 home 疊加（不追韌體當前 pose，否則破壞回 home 語意）。
   };
-  ws.onclose=()=>{ wsConnected=false; followActive=false; setPills(); setLog('斷線，重連中…','warn'); setTimeout(connectWS,1000); };
+  ws.onclose=()=>{ wsConnected=false; followActive=false; phoneOwner=null; setPills(); setLog('斷線，重連中…','warn'); setTimeout(connectWS,1000); };
 }
 async function loadConfig(){
   try{

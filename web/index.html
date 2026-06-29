@@ -683,8 +683,8 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         </div>
       </div>
       <div style="display:flex;gap:6px;margin-top:6px">
-        <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="flex:1;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
-        <button class="chip" id="gyro-btn" onclick="openPhonePanel()" style="flex:0 0 auto;font-weight:600" title="用手機陀螺儀當跟隨來源：掃 QR 開手機頁，傾斜手機即時驅動平台（最直連、低延遲）">📱 陀螺儀</button>
+        <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="flex:1;font-weight:600" title="電腦模式：拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。手機模式啟用時鎖定。">🎯 跟隨模式 OFF</button>
+        <button class="chip" id="gyro-btn" onclick="toggleGyroMode()" style="flex:0 0 auto;font-weight:600" title="手機模式：用手機陀螺儀獨立驅動平台（與電腦滑桿互斥，兩個獨立世界）。掃 QR 開手機頁、傾斜手機即時驅動。">📱 手機模式</button>
       </div>
       <div id="follow-latency" style="margin-top:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#766f67;display:flex;gap:10px;justify-content:space-between" title="跟隨延遲（真實量測）：e2e=指令→實際 felt-lag（含濾波器+馬達，server 對指令角 vs 編碼器角互相關，需有動作才有值）；傳輸=板→server 遙測新鮮度（永遠可見的傳輸+感測地板）">
         <span>延遲 e2e <b id="lat-e2e" style="color:#27231f">—</b></span>
@@ -765,6 +765,23 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
         <button class="chip zbtn" onclick="resetMotorPID()" disabled title="清除保存值，回到韌體預設">預設</button>
       </div>
       <div id="tune-pid-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:6px 0 0 0;min-height:14px"></div>
+
+      <div class="dev-label" style="margin-top:12px;margin-bottom:6px">HOLD 積分 (KI) <span id="holdi-sot" style="color:var(--contra);font-size:9px;letter-spacing:0;margin-left:4px"></span></div>
+      <div style="display:grid;grid-template-columns:28px 1fr 28px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
+        <span title="積分增益(全軸, 0-200, 0=關)">Ki</span><input type="number" id="m-ki-hold" value="0" min="0" max="200" step="1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span title="積分輸出角度域硬上限 deg (anti-windup)">Clp</span><input type="number" id="m-iclamp" value="3" min="0" max="10" step="0.1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div style="display:grid;grid-template-columns:28px 1fr 28px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
+        <span title="誤差死區 deg, |err|<此值不積分">Dbd</span><input type="number" id="m-idead" value="0.15" min="0" max="5" step="0.05" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span title="安定速度閾值 deg/s, |vel|>此值不積分">Stl</span><input type="number" id="m-isettle" value="8" min="0.1" max="100" step="0.1" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px">
+        <button class="chip zbtn" onclick="updateHoldIntegral()" disabled>試套用</button>
+        <button class="chip zbtn" onclick="saveHoldIntegral()" disabled>保存</button>
+        <button class="chip zbtn" onclick="resetHoldIntegral()" disabled title="清除保存值，回到韌體預設(Ki=0)">預設</button>
+      </div>
+      <div id="tune-holdi-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:6px 0 0 0;min-height:14px"></div>
+      <div id="holdi-readout" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:2px 0 0 0;min-height:14px"></div>
     </div>
 
     <!-- 4. UTILITY (rare actions + raw diag) -->
@@ -1536,9 +1553,31 @@ function updateFollowUI() {
   b.style.color = followActive ? '#fff' : '';
 }
 window.toggleFollow = function() {
-  if (followActive) { window.sendCmd('FOLLOW 0'); followReset(); }   // followReset：清串流 + 停實跑動作 + UI
-  else { window.sendCmd('FOLLOW 1'); }   // followActive 待韌體 {"status":"follow on"} 回覆才設真
+  // 電腦模式 = 滑桿跟隨。改走 MODE（owner 仲裁）而非裸 FOLLOW：server 轉 FOLLOW 1/0 給韌體，
+  // 並把 controlOwner 設成 'desktop'（鎖掉手機模式）。followActive 仍待韌體 {status:"follow on"} 才設真。
+  if (controlMode === 'desktop') window.sendCmd('MODE off');
+  else window.sendCmd('MODE desktop');
 };
+// 手機模式 = 手機陀螺儀獨立驅動。與電腦模式互斥（server owner 仲裁）。開啟同時彈 QR 配對面板。
+window.toggleGyroMode = function() {
+  if (controlMode === 'phone') { window.sendCmd('MODE off'); }
+  else { window.sendCmd('MODE phone'); window.openPhonePanel(); }
+};
+// server 廣播 evt:'mode' 的權威狀態 → 落實兩個互斥世界的 UI 鎖定。
+let controlMode = null;   // null | 'desktop' | 'phone'
+function updateControlMode(owner) {
+  controlMode = (owner === 'desktop' || owner === 'phone') ? owner : null;
+  if (controlMode !== 'desktop' && followActive) followReset();   // 退出電腦模式 → 清本地串流
+  refreshCommandLocks();   // 互斥 disable（滑桿/兩鈕）統一在此套用
+  const gb = document.getElementById('gyro-btn');
+  if (gb) {
+    const phone = controlMode === 'phone';
+    gb.textContent = phone ? '📱 手機模式 ON' : '📱 手機模式';
+    gb.style.borderColor = phone ? '#27AE60' : '';
+    gb.style.background = phone ? 'rgba(39,174,96,.12)' : '';
+    gb.style.color = phone ? '#1d7a4a' : '';
+  }
+}
 // 韌體確認進跟隨 → 用回傳的絕對 pose 同步滑桿+ghost（不跳），再啟用串流
 function onFollowOn(pose) {
   const off = [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
@@ -1576,17 +1615,36 @@ function updateLatencyUi(d) {
   }
 }
 
+// ===== 跟隨來源（手機陀螺儀／其他 client）的 live 目標 → 綠色 ghost =====
+// server 廣播 evt:'followtgt'（25Hz）。followActive 時把綠 ghost 設成該目標（不串流、不回授），
+// 紅維持遙測實際。對齊「綠=意圖(手機現在陀螺儀姿態)、紅=板子實際」心智模型。
+// 若 dashboard 自己剛串過 PF（拖滑桿），_pfLast 新鮮 → 跳過，讓本地滑桿 ghost 為準。
+function onRemoteFollowTgt(pose) {
+  // 手機模式：電腦端純觀察，綠 ghost 鏡像手機即時陀螺儀目標（即使本地 followActive=false）。
+  // 電腦模式：本地剛拖滑桿（_pfLast 新鮮）則讓本地 ghost 為準，跳過遠端。
+  const watch = controlMode === 'phone' || followActive;
+  if (!watch || !Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
+  if (performance.now() - _pfLast < 250) return;
+  ghostTarget = pose.slice();
+  poseReachable = window.Kin.ik(ghostTarget).valid;
+  const hex = poseReachable ? 0x27AE60 : 0xC0392B;
+  ghostMat.color.setHex(hex);
+  ghostPlatMesh.material.color.setHex(hex);
+  updateGhost();
+}
+
 // ===== 手機陀螺儀配對面板（QR → phone.html）=====
-async function openPhonePanel() {
+// 主腳本是 <script type="module">：inline onclick 只看得到 window.* → 必須掛 window。
+window.openPhonePanel = async function() {
   let info = {};
   try { info = await (await fetch('/api/netinfo')).json(); } catch {}
   document.getElementById('phone-url').textContent = info.phoneUrl || '(server 未提供)';
   document.getElementById('phone-ca').style.display = info.mkcert ? '' : 'none';
   if (info.caUrl) document.getElementById('phone-ca-link').href = info.caUrl;
-  document.getElementById('phone-qr').src = '/api/qrcode?_=' + Date.now();
+  document.getElementById('phone-qr').src = '/api/qrcode';   // 不加 query：server 路由精確比對；no-store 已防快取
   document.getElementById('phone-modal').style.display = 'flex';
-}
-function closePhonePanel() { document.getElementById('phone-modal').style.display = 'none'; }
+};
+window.closePhonePanel = function() { document.getElementById('phone-modal').style.display = 'none'; };
 
 // 跟隨緊度單旋鈕 → FE <0..1>（一鈕統管 vmax/accelT/jerkT/趨近增益 K，越大跟越緊）。
 // input 即時更新標籤 + ~10Hz 節流送 FE（避免拖動洗指令/灌爆 ack）；change 補送最終值確保落定。
@@ -1696,6 +1754,12 @@ function sessionBlocksCommand(cmd) {
 function refreshCommandLocks() {
   const manualEnabled = wsConnected && !sessionState.active;
   document.querySelectorAll('.zbtn').forEach(b => b.disabled = !manualEnabled);
+  // 控制權互斥：手機模式 → 鎖跟隨鈕 + 6 軸滑桿（電腦端純觀察）；電腦模式 → 鎖手機鈕。
+  const fb = document.getElementById('follow-toggle');
+  const gb = document.getElementById('gyro-btn');
+  if (fb && controlMode === 'phone') fb.disabled = true;
+  if (gb) gb.disabled = !manualEnabled || controlMode === 'desktop';
+  for (const [id] of POSE_AXES) { const el = document.getElementById(id); if (el) el.disabled = (controlMode === 'phone'); }
   const poseStatus = document.getElementById('pose-ctl-status');
   if (poseStatus && sessionState.active) {
     poseStatus.textContent = 'session 執行中：即時控制鎖定';
@@ -1730,6 +1794,7 @@ function connectWS() {
 
   ws.onopen = () => {
     wsConnected = true;
+    ws.send(JSON.stringify({ role: 'desktop' }));   // 宣告身分 → server PF owner 仲裁認得電腦端
     document.getElementById('status').textContent = 'CONNECTED';
     document.getElementById('status').className = 'nav-status connected';
     refreshCommandLocks();
@@ -1757,6 +1822,8 @@ function connectWS() {
         return;
       }
       if (data.evt === 'latency') { updateLatencyUi(data); return; }
+      if (data.evt === 'mode') { updateControlMode(data.owner); return; }
+      if (data.evt === 'followtgt') { onRemoteFollowTgt(data.pose); return; }
 
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
@@ -1817,7 +1884,9 @@ function connectWS() {
       if (data.status) {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
-        if (data.status === 'follow on' && Array.isArray(data.pose)) onFollowOn(data.pose);
+        // follow-on 廣播給所有 client；只有「電腦擁有(或無 owner)」時才認，否則手機模式下 desktop 會
+        // 誤設 followActive + 改滑桿值（雖 PF 被 server gate 擋不洩漏驅動，仍是狀態謊言）。
+        if (data.status === 'follow on' && Array.isArray(data.pose) && controlMode !== 'phone') onFollowOn(data.pose);
         if (data.status === 'follow off') followReset();
         if (data.status === 'ar period' || data.status === 'auto-return ON' || data.status === 'loop period') {
           syncRuntimeRates(data, true);
@@ -1850,20 +1919,28 @@ function connectWS() {
           clampInputValue(document.getElementById('m-kd'), Number(data.kd));
           clampInputValue(document.getElementById('m-kv'), Number(data.kv));
         }
+        if (data.tune === 'holdi') {
+          if (Array.isArray(data.ki)) clampInputValue(document.getElementById('m-ki-hold'), Number(data.ki[0]));
+          clampInputValue(document.getElementById('m-iclamp'), Number(data.clamp));
+          clampInputValue(document.getElementById('m-idead'), Number(data.deadband));
+          clampInputValue(document.getElementById('m-isettle'), Number(data.settle));
+        }
         if ((data.okCnt || 0) === 6 || data.local) savePlatformConfigSoon();
         const targetMap = {
           current: { el: 'tune-current-status', label: `${data.mA}mA` },
           motion:  { el: 'tune-motion-status',  label: `spd=${data.speed} acc=${data.acc}` },
           pid:     { el: 'tune-pid-status',     label: `Kp=${data.kp} Ki=${data.ki} Kd=${data.kd} Kv=${data.kv}${data.saved ? ' · 已保存' : ''}${data.reset ? ' · 已回預設' : ''}` },
+          holdi:   { el: 'tune-holdi-status',   label: `Ki=${Array.isArray(data.ki) ? data.ki[0] : data.ki} clp=${data.clamp} dbd=${data.deadband} stl=${data.settle}${data.saved ? ' · 已保存' : ''}${data.reset ? ' · 已回預設' : ''}` },
         };
         const t = targetMap[data.tune];
         if (t) {
           const el = document.getElementById(t.el);
           const ok = data.ok || [];
           const okCnt = data.okCnt || 0;
+          const upper = (data.tune === 'holdi');   // ESP32 上層指令，無 per-motor CAN ack → 接受即成功
           const ts = new Date().toLocaleTimeString();
-          const marks = ok.map((v,i) => `<span style="color:${v?'var(--contra)':'var(--dev)'}">M${i+1}${v?'✓':'✗'}</span>`).join(' ');
-          const allOk = okCnt === 6;
+          const marks = upper ? '' : ok.map((v,i) => `<span style="color:${v?'var(--contra)':'var(--dev)'}">M${i+1}${v?'✓':'✗'}</span>`).join(' ');
+          const allOk = upper ? true : (okCnt === 6);
           const tag = data.local ? '(local)' : (allOk ? 'OK' : `FAIL ${6-okCnt}/6`);
           el.innerHTML = `<span style="color:${allOk?'var(--contra)':'var(--dev)'}">[${ts}] ${t.label} → ${tag}</span> ${marks}`;
           // 直接綁對應 Apply 按鈕，避免依賴 pendingBtn 順序
@@ -1944,6 +2021,7 @@ function btnForTune(t) {
   if (t === 'current') return document.querySelector('button[onclick="updateWorkingCurrent()"]');
   if (t === 'motion')  return document.querySelector('button[onclick="updateMotionParams()"]');
   if (t === 'pid')     return document.querySelector('button[onclick="updateMotorPID()"]');
+  if (t === 'holdi')   return document.querySelector('button[onclick="updateHoldIntegral()"]');
   return null;
 }
 
@@ -2219,6 +2297,30 @@ window.saveMotorPID = function() {
 
 window.resetMotorPID = function() {
   sendCmd('KRESET');
+};
+
+// HOLD 積分（KI 全軸 + KIC 護欄）。KIS 無參存韌體當前值 → 保存前先套用，避免存到舊值。
+window.updateHoldIntegral = function() {
+  const ki = document.getElementById('m-ki-hold').value;
+  const clp = document.getElementById('m-iclamp').value;
+  const dbd = document.getElementById('m-idead').value;
+  const stl = document.getElementById('m-isettle').value;
+  sendCmd(`KI ${ki}`);
+  sendCmd(`KIC ${clp} ${dbd} ${stl}`);
+};
+
+window.saveHoldIntegral = function() {
+  const ki = document.getElementById('m-ki-hold').value;
+  const clp = document.getElementById('m-iclamp').value;
+  const dbd = document.getElementById('m-idead').value;
+  const stl = document.getElementById('m-isettle').value;
+  sendCmd(`KI ${ki}`);
+  sendCmd(`KIC ${clp} ${dbd} ${stl}`);
+  sendCmd('KIS');
+};
+
+window.resetHoldIntegral = function() {
+  sendCmd('KIRESET');
 };
 
 window.updateWorkingCurrent = function() {
