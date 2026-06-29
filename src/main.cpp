@@ -187,14 +187,25 @@ bool holdDampInit = false;
 // 積分搬到 ESP32 上層、角度域、每腿各補；與 applyHoldOutputDamping 同域、互不爭速度閘。
 // 誤差 err = holdAngles - enc.angles（命令−實際）：droop（實際低於命令）→ err>0 → corr>0 → 命令加大 → enc 追上。
 // BOOT Ki=0 → 輸出恆 0 → 行為與純P 死咬完全相同（向後相容）。
-float holdKi[NUM_MOTORS] = {0};          // 每軸積分增益（0=關）
-float holdIClampDeg = 3.0f;              // 積分輸出角度域硬上限（anti-windup 最終安全閥）
-float holdIDeadbandDeg = 0.15f;          // 誤差死區：|err|<此值不積分（避免噪聲 windup）
-float holdISettleDps = 8.0f;            // 安定速度閾值：|vel|>此值不積分（避免運動/振盪峰 windup）
+constexpr float BOOT_HOLD_KI = 0.0f;             // BOOT 預設積分增益（0=關，向後相容）
+constexpr float BOOT_HOLD_CLAMP_DEG = 3.0f;      // 積分輸出角度域硬上限（anti-windup 最終安全閥）
+constexpr float BOOT_HOLD_DEADBAND_DEG = 0.15f;  // 誤差死區
+constexpr float BOOT_HOLD_SETTLE_DPS = 8.0f;     // 安定速度閾值
+float holdKi[NUM_MOTORS] = {0};          // 每軸積分增益（0=關）；單一真相源，K/UI 改它、telemetry 上報
+float holdIClampDeg = BOOT_HOLD_CLAMP_DEG;       // |vel|>此值不積分（避免運動/振盪峰 windup）
+float holdIDeadbandDeg = BOOT_HOLD_DEADBAND_DEG; // |err|<此值不積分（避免噪聲 windup）
+float holdISettleDps = BOOT_HOLD_SETTLE_DPS;
 ScalarIntegrator holdInt[NUM_MOTORS];
 float holdIntPrevAngle[NUM_MOTORS] = {0};
 float holdIntCorr[NUM_MOTORS] = {0};     // 遙測：每軸積分輸出（角度域）
 bool  holdIntInit = false;
+// 持久化（對齊 vFOC PID 模式）：saved 值 + dirty flag
+float savedHoldKi[NUM_MOTORS] = {0};
+float savedHoldClampDeg = BOOT_HOLD_CLAMP_DEG;
+float savedHoldDeadbandDeg = BOOT_HOLD_DEADBAND_DEG;
+float savedHoldSettleDps = BOOT_HOLD_SETTLE_DPS;
+bool  nvsHoldIntPresent = false;
+bool  holdIntCfgSaved = false;
 
 // 擾動注入器（U/W 指令）：對 F5 目標短暫加偏移持續 ms 後歸零。疊加在 F5 匯流口 → 全控制模式通用
 // （HOLD 保持中或運動中皆可注入）。U=單軸、W=六軸協同。
@@ -558,6 +569,88 @@ static void clearVFOCPidNVS() {
     prefs.remove("vfocPidV1");
     prefs.end();
     nvsPidPresent = false;
+}
+
+// ===== HOLD 積分組態持久化（對齊 vFOC PID 模式）=====
+constexpr uint32_t HOLD_INT_MAGIC = 0x484F4C49; // "HOLI"
+constexpr uint16_t HOLD_INT_VERSION = 1;
+constexpr float HOLD_KI_MAX = 200.0f;          // 每軸積分增益上限
+constexpr float HOLD_CLAMP_MAX = 10.0f;        // 積分輸出角度上限的上限
+constexpr float HOLD_DEADBAND_MAX = 5.0f;
+constexpr float HOLD_SETTLE_MIN = 0.1f, HOLD_SETTLE_MAX = 100.0f;
+
+struct HoldIntNVS {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t _pad;
+    float ki[NUM_MOTORS];
+    float clampDeg, deadbandDeg, settleDps;
+};
+
+static bool validHoldIntConfig(const HoldIntNVS& c) {
+    if (c.magic != HOLD_INT_MAGIC || c.version != HOLD_INT_VERSION) return false;
+    for (int i = 0; i < NUM_MOTORS; i++)
+        if (!isfinite(c.ki[i]) || c.ki[i] < 0.0f || c.ki[i] > HOLD_KI_MAX) return false;
+    return isfinite(c.clampDeg)    && c.clampDeg    >= 0.0f && c.clampDeg    <= HOLD_CLAMP_MAX &&
+           isfinite(c.deadbandDeg) && c.deadbandDeg >= 0.0f && c.deadbandDeg <= HOLD_DEADBAND_MAX &&
+           isfinite(c.settleDps)   && c.settleDps   >= HOLD_SETTLE_MIN && c.settleDps <= HOLD_SETTLE_MAX;
+}
+
+static bool currentHoldIntMatchesSaved() {
+    if (!nvsHoldIntPresent) return false;
+    for (int i = 0; i < NUM_MOTORS; i++) if (holdKi[i] != savedHoldKi[i]) return false;
+    return holdIClampDeg == savedHoldClampDeg &&
+           holdIDeadbandDeg == savedHoldDeadbandDeg &&
+           holdISettleDps == savedHoldSettleDps;
+}
+
+static bool loadHoldIntFromNVS() {
+    Preferences prefs;
+    HoldIntNVS c;
+    prefs.begin("stewart", true);
+    size_t len = prefs.getBytes("holdIntV1", &c, sizeof(c));
+    prefs.end();
+    if (len != sizeof(c) || !validHoldIntConfig(c)) return false;
+    for (int i = 0; i < NUM_MOTORS; i++) { holdKi[i] = c.ki[i]; savedHoldKi[i] = c.ki[i]; }
+    holdIClampDeg    = savedHoldClampDeg    = c.clampDeg;
+    holdIDeadbandDeg = savedHoldDeadbandDeg = c.deadbandDeg;
+    holdISettleDps   = savedHoldSettleDps   = c.settleDps;
+    nvsHoldIntPresent = true;
+    return true;
+}
+
+static bool saveHoldIntToNVS() {
+    HoldIntNVS c = {HOLD_INT_MAGIC, HOLD_INT_VERSION, 0, {0}, holdIClampDeg, holdIDeadbandDeg, holdISettleDps};
+    for (int i = 0; i < NUM_MOTORS; i++) c.ki[i] = holdKi[i];
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    size_t w = prefs.putBytes("holdIntV1", &c, sizeof(c));
+    prefs.end();
+    if (w != sizeof(c)) return false;
+    for (int i = 0; i < NUM_MOTORS; i++) savedHoldKi[i] = holdKi[i];
+    savedHoldClampDeg    = holdIClampDeg;
+    savedHoldDeadbandDeg = holdIDeadbandDeg;
+    savedHoldSettleDps   = holdISettleDps;
+    nvsHoldIntPresent = true;
+    return true;
+}
+
+static void clearHoldIntNVS() {
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    prefs.remove("holdIntV1");
+    prefs.end();
+    nvsHoldIntPresent = false;
+}
+
+// KI/KIC/KIS/KIRESET 共用 ack（單一輸出格式，避免重複）
+static void emitHoldIntAck(bool reset = false) {
+    Out.printf("{\"tune\":\"holdi\",\"saved\":%d,\"reset\":%d,"
+        "\"ki\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+        "\"clamp\":%.3f,\"deadband\":%.3f,\"settle\":%.3f}\n",
+        holdIntCfgSaved ? 1 : 0, reset ? 1 : 0,
+        holdKi[0],holdKi[1],holdKi[2],holdKi[3],holdKi[4],holdKi[5],
+        holdIClampDeg, holdIDeadbandDeg, holdISettleDps);
 }
 
 struct RuntimeTuningNVS {
@@ -1007,6 +1100,7 @@ void setup() {
     delay(50);
 
     loadRuntimeTuningFromNVS();
+    loadHoldIntFromNVS();            // HOLD 積分組態：有保存值則載入，否則維持 BOOT 預設（Ki=0）
     applyFollowTight(0.7f);          // 跟隨預設緊度 0.5→0.7：tau 0.275→0.205s，lag 顯著降而 step 過衝仍低（FE 可 runtime 再調）
     enc.init();
     pidSaved = loadVFOCPidFromNVS();
@@ -1459,6 +1553,60 @@ void dispatch(const String& cmd, bool fromNet = false) {
             "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d,\"ar_ok\":%d}\n",
             curKp, curKi, curKd, curKv,
             okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt, arOk);
+    } else if (cmd.startsWith("KIC ")) {
+        // HOLD 積分護欄 `KIC clampDeg deadbandDeg settleDps`。
+        float c, d, s;
+        if (sscanf(cmd.c_str(), "KIC %f %f %f", &c, &d, &s) == 3) {
+            if (!isfinite(c) || c < 0.0f || c > HOLD_CLAMP_MAX ||
+                !isfinite(d) || d < 0.0f || d > HOLD_DEADBAND_MAX ||
+                !isfinite(s) || s < HOLD_SETTLE_MIN || s > HOLD_SETTLE_MAX) {
+                Out.println("{\"error\":\"KIC clamp 0-10, deadband 0-5, settle 0.1-100\"}");
+                return;
+            }
+            holdIClampDeg = c; holdIDeadbandDeg = d; holdISettleDps = s;
+            holdIntCfgSaved = currentHoldIntMatchesSaved();
+            emitHoldIntAck();
+        } else {
+            Out.println("{\"error\":\"usage: KIC clampDeg deadbandDeg settleDps\"}");
+        }
+    } else if (cmd == "KIS") {
+        // 保存當前 HOLD 積分組態到 NVS。
+        holdIntCfgSaved = saveHoldIntToNVS();
+        emitHoldIntAck();
+    } else if (cmd == "KIRESET") {
+        // 清 NVS + 回 BOOT 預設（Ki=0 → 積分關閉）。
+        clearHoldIntNVS();
+        for (int i = 0; i < NUM_MOTORS; i++) { holdKi[i] = BOOT_HOLD_KI; holdInt[i].reset(); }
+        holdIClampDeg = BOOT_HOLD_CLAMP_DEG;
+        holdIDeadbandDeg = BOOT_HOLD_DEADBAND_DEG;
+        holdISettleDps = BOOT_HOLD_SETTLE_DPS;
+        holdIntCfgSaved = false;
+        emitHoldIntAck(true);
+    } else if (cmd.startsWith("KI ")) {
+        // HOLD 積分增益 `KI val`（全軸）或 `KI axis val`（單軸 0-5）。
+        // 設 ki<=0 時 reset 該軸積分態 → 關閉即清零，避免 ki 再開啟時帶入殘留 windup（修 review nit）。
+        float a, b;
+        int n = sscanf(cmd.c_str(), "KI %f %f", &a, &b);
+        if (n == 2) {
+            int axis = (int)a;
+            if (axis < 0 || axis >= NUM_MOTORS || !isfinite(b) || b < 0.0f || b > HOLD_KI_MAX) {
+                Out.println("{\"error\":\"KI axis 0-5, ki 0-200\"}");
+                return;
+            }
+            holdKi[axis] = b;
+            if (b <= 0.0f) holdInt[axis].reset();
+        } else if (n == 1) {
+            if (!isfinite(a) || a < 0.0f || a > HOLD_KI_MAX) {
+                Out.println("{\"error\":\"KI ki 0-200\"}");
+                return;
+            }
+            for (int i = 0; i < NUM_MOTORS; i++) { holdKi[i] = a; if (a <= 0.0f) holdInt[i].reset(); }
+        } else {
+            Out.println("{\"error\":\"usage: KI val | KI axis val\"}");
+            return;
+        }
+        holdIntCfgSaved = currentHoldIntMatchesSaved();
+        emitHoldIntAck();
     } else if (cmd.startsWith("K ")) {
         int kp, ki, kd, kv;
         if (sscanf(cmd.c_str(), "K %d %d %d %d", &kp, &ki, &kd, &kv) == 4) {

@@ -152,6 +152,10 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `K kp ki kd kv` | 暫時套用馬達內部 vFOC PID（0x96，範圍 0-1024；重開機/重燒錄後不保證保留） |
 | `KS [kp ki kd kv]` | 保存 vFOC PID 到 ESP32 NVS；帶參數時先套用再保存，不帶參數時保存目前韌體真值 |
 | `KRESET` | 清除 ESP32 NVS 內保存的 vFOC PID，套用韌體 BOOT 預設 |
+| `KI val` / `KI axis val` | 設 HOLD task-space 角度域積分增益（路線甲消重力 droop）：全軸或單軸(0-5)，範圍 0-200。設 0 清該軸積分態。僅 HOLD 純死咬靜止時作用 |
+| `KIC clampDeg deadbandDeg settleDps` | HOLD 積分護欄：輸出角度硬上限(0-10)/誤差死區(0-5)/安定速度閾值(0.1-100) |
+| `KIS` | 保存 HOLD 積分組態（Ki+護欄）到 ESP32 NVS |
+| `KIRESET` | 清除 NVS HOLD 積分組態，回 BOOT 預設（Ki=0 關閉） |
 | `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
 | `M mu` | 設定自適應追蹤震動懲罰係數 |
 | `T0`~`T5` | 單馬達方向測試（以 3 RPM 轉 0.5 秒，回報角度變化） |
