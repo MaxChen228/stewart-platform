@@ -2311,22 +2311,24 @@ window.resetMotorPID = function() {
 };
 
 // HOLD 積分（KI 全軸 + KIC 護欄）。KIS 無參存韌體當前值 → 保存前先套用，避免存到舊值。
+// 發送前 clamp 到韌體合法範圍（Ki 0-200 / clamp 0-10 / deadband 0-5 / settle 0.1-100）。
+// 消除越界 reject → 多指令(KI+KIC[+KIS])按鈕回饋誠實：按鈕 pending 綁首指令 KI、首 ACK 即轉綠，
+// 若 KIC 因越界被韌體拒(回 error 非 tune ack)其失敗會被吞、按鈕仍綠誤導；clamp 後消除此越界源。
+function holdiClamped() {
+  const cl = (id, lo, hi) => { const v = +document.getElementById(id).value; return Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : lo)); };
+  return { ki: cl('m-ki-hold', 0, 200), clp: cl('m-iclamp', 0, 10), dbd: cl('m-idead', 0, 5), stl: cl('m-isettle', 0.1, 100) };
+}
+
 window.updateHoldIntegral = function() {
-  const ki = document.getElementById('m-ki-hold').value;
-  const clp = document.getElementById('m-iclamp').value;
-  const dbd = document.getElementById('m-idead').value;
-  const stl = document.getElementById('m-isettle').value;
-  sendCmd(`KI ${ki}`);
-  sendCmd(`KIC ${clp} ${dbd} ${stl}`);
+  const v = holdiClamped();
+  sendCmd(`KI ${v.ki}`);
+  sendCmd(`KIC ${v.clp} ${v.dbd} ${v.stl}`);
 };
 
 window.saveHoldIntegral = function() {
-  const ki = document.getElementById('m-ki-hold').value;
-  const clp = document.getElementById('m-iclamp').value;
-  const dbd = document.getElementById('m-idead').value;
-  const stl = document.getElementById('m-isettle').value;
-  sendCmd(`KI ${ki}`);
-  sendCmd(`KIC ${clp} ${dbd} ${stl}`);
+  const v = holdiClamped();
+  sendCmd(`KI ${v.ki}`);
+  sendCmd(`KIC ${v.clp} ${v.dbd} ${v.stl}`);
   sendCmd('KIS');
 };
 
