@@ -183,6 +183,19 @@ float holdDampLastCorr[NUM_MOTORS] = {0};
 float holdDampCorrMaxWin = 0.0f;
 bool holdDampInit = false;
 
+// ===== HOLD joint-domain 積分（路線甲：消重力 droop）=====
+// 積分搬到 ESP32 上層、角度域、每腿各補；與 applyHoldOutputDamping 同域、互不爭速度閘。
+// 誤差 err = holdAngles - enc.angles（命令−實際）：droop（實際低於命令）→ err>0 → corr>0 → 命令加大 → enc 追上。
+// BOOT Ki=0 → 輸出恆 0 → 行為與純P 死咬完全相同（向後相容）。
+float holdKi[NUM_MOTORS] = {0};          // 每軸積分增益（0=關）
+float holdIClampDeg = 3.0f;              // 積分輸出角度域硬上限（anti-windup 最終安全閥）
+float holdIDeadbandDeg = 0.15f;          // 誤差死區：|err|<此值不積分（避免噪聲 windup）
+float holdISettleDps = 8.0f;            // 安定速度閾值：|vel|>此值不積分（避免運動/振盪峰 windup）
+ScalarIntegrator holdInt[NUM_MOTORS];
+float holdIntPrevAngle[NUM_MOTORS] = {0};
+float holdIntCorr[NUM_MOTORS] = {0};     // 遙測：每軸積分輸出（角度域）
+bool  holdIntInit = false;
+
 // 擾動注入器（U/W 指令）：對 F5 目標短暫加偏移持續 ms 後歸零。疊加在 F5 匯流口 → 全控制模式通用
 // （HOLD 保持中或運動中皆可注入）。U=單軸、W=六軸協同。
 float    bumpDeg[NUM_MOTORS] = {0};   // 六軸擾動偏移（enc 慣例度）
@@ -224,6 +237,15 @@ static void resetHoldDampingState() {
     holdDampInit = true;
 }
 
+static void resetHoldIntegral() {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        holdInt[i].reset();
+        holdIntPrevAngle[i] = enc.angles[i];   // seed prevAngle → 首個 vel 不是 spike
+        holdIntCorr[i] = 0.0f;
+    }
+    holdIntInit = true;
+}
+
 static void applyHoldOutputDamping(float targets[NUM_MOTORS], float dt) {
     if (holdDampGainSec <= 0.0f || holdDampMaxDeg <= 0.0f || dt <= 0.0f) {
         for (int i = 0; i < NUM_MOTORS; i++) holdDampLastCorr[i] = 0.0f;
@@ -245,6 +267,27 @@ static void applyHoldOutputDamping(float targets[NUM_MOTORS], float dt) {
         holdDampLastCorr[i] = corr;
         float ac = fabsf(corr);
         if (ac > holdDampCorrMaxWin) holdDampCorrMaxWin = ac;
+    }
+}
+
+// HOLD 積分外環：每腿在角度域慢速消 droop。必須在 motorTargets=holdAngles 之後、
+// applyHoldOutputDamping 之前呼叫（積分先疊命令，阻尼再看 enc 速度）。
+// active = 主閘（純死咬靜止 + 編碼器新鮮），由呼叫端用既有旗標組成；false 則凍結並輸出 0 修正。
+// 函式只管積分數學與次要閘（物理靜止 + 死區），gate 條件外部決定 → 不依賴 follow 全域宣告順序。
+static void applyHoldIntegral(float targets[NUM_MOTORS], float dt, bool active) {
+    if (dt <= 0.0f) return;
+    if (!holdIntInit) resetHoldIntegral();
+
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        float vel = (enc.angles[i] - holdIntPrevAngle[i]) / dt;
+        holdIntPrevAngle[i] = enc.angles[i];               // 每 cycle 更新，gate 關也更新避免 vel spike
+        float err = holdAngles[i] - enc.angles[i];          // 命令 − 實際；droop→err>0
+        bool gated = active
+                  && fabsf(vel) < holdISettleDps            // 物理靜止（次要閘）
+                  && fabsf(err) > holdIDeadbandDeg;          // 死區外才積分
+        float corr = holdInt[i].update(err, dt, holdKi[i], holdIClampDeg, gated);
+        holdIntCorr[i] = corr;
+        targets[i] += corr;
     }
 }
 
@@ -721,6 +764,7 @@ void posStop() {
     holdMode = false;
     followMode = false;
     holdDampInit = false;
+    holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
     servos.stopAllPosition(5);
 }
 
@@ -729,6 +773,7 @@ void posDisable() {
     holdMode = false;
     followMode = false;
     holdDampInit = false;
+    holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -739,6 +784,7 @@ static void otaSafetyStop() {
     holdMode = false;
     followMode = false;
     holdDampInit = false;
+    holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
     servos.stopAllPosition(5);
     delay(50);
     servos.disableAll();
@@ -773,6 +819,7 @@ static void enterHoldCurrent() {
     followMode = false;    // 失效保護凍結當前姿態，不殘留跟隨
     maxHoldErr = 0;
     resetHoldDampingState();
+    resetHoldIntegral();   // failsafe 凍結當前姿態 → 積分從零起，不帶入舊 windup
     holdMode = true;       // 切 HOLD 直送，脫離會發散的 PD/joint 外環
     // posEnabled 維持 true
 }
@@ -1177,6 +1224,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
 
         followMode = false;   // E 啟動 mode0/1 控制 → 清跟隨，避免 follow-HOLD 下殘留追 followTgt
         holdDampInit = false;
+        holdIntInit = false;  // 離開 HOLD → 凍結積分（mode0/1 不走 applyHoldIntegral）
         posEnabled = true;
         autoReturnWarnLatched = false;
         Out.printf("{\"status\":\"pos enabled\",\"mode\":%d,\"speed\":%d,\"acc\":%d,"
@@ -1225,6 +1273,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         autoReturnWarnLatched = false;
         maxHoldErr = 0;
         resetHoldDampingState();
+        resetHoldIntegral();   // 進 HOLD → 積分從零起，seed prevAngle 防首 cycle vel spike
         Out.printf("{\"status\":\"hold\",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
             "\"enOk\":[%d,%d,%d,%d,%d,%d],\"enCnt\":%d}\n",
             holdAngles[0],holdAngles[1],holdAngles[2],
@@ -1266,6 +1315,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
                     uint32_t ms = constrainedHoldMoveMs((float)requestedMs, holdStart, holdTarget);
                     holdMoveStart = millis();
                     holdMoveMs = ms;
+                    resetHoldIntegral();   // 新目標 → 舊 droop 積分作廢，軌跡完成後對新點重新消差
                     Out.printf("{\"status\":\"pose goto\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],\"ms\":%lu,\"reqMs\":%lu,\"profile\":\"minjerk\",\"maxVelDps\":%.1f,\"limitEnabled\":%d,\"limited\":%d}\n",
                         v[0],v[1],v[2],v[3],v[4],v[5],
                         (unsigned long)ms, (unsigned long)requestedMs,
@@ -1301,6 +1351,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
             }
         } else {
             followMode = false;        // holdAngles 凍結在當前 → 純死咬續持
+            resetHoldIntegral();        // 新死咬點（follow 終點）→ 積分從零起
             Out.println("{\"status\":\"follow off\"}");
         }
     } else if (cmd.startsWith("PF ")) {
@@ -1721,6 +1772,7 @@ static void controlTick() {
     int ok = 0;
     uint32_t canReadUs = 0;
     uint16_t arAgeMs[NUM_MOTORS] = {0};
+    bool encStale = false;   // 編碼器資料不新鮮 → HOLD 積分凍結（盲積分 = 隱形 windup）
     if (autoReturnMode) {
         // core0 canRxTask 連續排空；控制環只在同一把 CAN 鎖下取最新快照，避免 int64 tear。
         // auto-return 是冗餘串流，短暫缺一兩個 frame 屬正常；沿用 last-known-good，不把它當故障停機。
@@ -1744,6 +1796,7 @@ static void controlTick() {
         }
         bool anyWarn = false;
         for (int i = 0; i < NUM_MOTORS; i++) anyWarn = anyWarn || warnStale[i];
+        encStale = anyWarn;
         if (!anyWarn) autoReturnWarnLatched = false;
         if (posEnabled && anyWarn && !autoReturnWarnLatched) {
                 autoReturnWarnLatched = true;
@@ -1756,6 +1809,7 @@ static void controlTick() {
         ok = servos.readAllRawEncoders(raw);
         canReadUs = micros() - _canT0;   // 讀 6 顆編碼器的純 CAN 來回時間（頻寬指紋核心）
         busTxQ += NUM_MOTORS;            // 匯流排佔用：每次輪詢送 6 筆 0x35 查詢（各保證一筆回覆）
+        encStale = (ok < NUM_MOTORS);    // 任一顆讀失敗 → enc.angles 保持舊值 → 凍結積分
     }
     enc.updateAngles(raw);
 
@@ -1784,7 +1838,10 @@ static void controlTick() {
             }
             // 擾動疊加已移至 F5 共同匯流口（plant-input，全模式通用）→ 此處只設 HOLD 目標。
             for (int i = 0; i < NUM_MOTORS; i++) motorTargets[i] = holdAngles[i];
-            applyHoldOutputDamping(motorTargets, dt);
+            // 積分主閘：唯有「純死咬靜止 + 編碼器新鮮」才積分；運動/跟隨/stale 一律凍結。
+            bool intActive = !followMode && holdMoveMs == 0 && !encStale;
+            applyHoldIntegral(motorTargets, dt, intActive);   // 積分外環先疊命令（消 droop）
+            applyHoldOutputDamping(motorTargets, dt);          // 阻尼後處理（看 enc 速度）
             float maxAbs = 0;
             for (int i = 0; i < NUM_MOTORS; i++) {
                 float e = fabsf(enc.angles[i] - holdAngles[i]);

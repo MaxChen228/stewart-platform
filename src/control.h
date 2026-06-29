@@ -2,6 +2,28 @@
 #include "kinematics.h"
 #include "forward_kinematics.h"
 
+// 單軸純量積分器（gain-independent）。state 存 ∫err·dt（與增益無關），
+// 輸出時才乘 Ki 並做角度/pose 域硬 clamp + back-calculation anti-windup。
+// 設計理由：調 Ki 不改寫積分歷史、不產生 retune 跳變；clamp 是最終安全閥。
+// HOLD（角度域 6 份）與 mode 1 task-space（pose 域 6 份）共用此單一邏輯，零重複。
+struct ScalarIntegrator {
+    float accum = 0.0f;   // ∫err·dt
+
+    void reset() { accum = 0.0f; }
+
+    // gated：呼叫端判定的「可積分」條件（安定閘 / 死區 / stale 都在外面判）。
+    // ki<=0 視為積分關閉：不累積、不輸出、不碰 accum（向後相容：BOOT Ki=0 即 no-op）。
+    // 回傳本軸積分輸出 corr = clamp(ki*accum, ±clamp)；飽和時回拉 accum 防 windup。
+    float update(float err, float dt, float ki, float clamp, bool gated) {
+        if (ki <= 0.0f) return 0.0f;
+        if (gated && dt > 0.0f) accum += err * dt;
+        float out = ki * accum;
+        if (out > clamp)       { out = clamp;  accum = out / ki; }
+        else if (out < -clamp) { out = -clamp; accum = out / ki; }
+        return out;
+    }
+};
+
 struct TaskSpacePD {
     // 增益：[x, y, z, roll, pitch, yaw]
     // Kp = 每 cycle 修正的誤差比例（0~1）
