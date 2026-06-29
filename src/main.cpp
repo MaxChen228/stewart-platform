@@ -577,7 +577,8 @@ static void clearVFOCPidNVS() {
 // ===== HOLD 積分組態持久化（對齊 vFOC PID 模式）=====
 constexpr uint32_t HOLD_INT_MAGIC = 0x484F4C49; // "HOLI"
 constexpr uint16_t HOLD_INT_VERSION = 1;
-constexpr float HOLD_KI_MAX = 200.0f;          // 每軸積分增益上限
+constexpr float HOLD_KI_MAX = 200.0f;          // 每軸積分增益上限（HOLD 角度域）
+constexpr float MODE1_KI_MAX = 50.0f;          // mode1 task-space 積分增益上限（pose 域，量級不同於 HOLD）
 constexpr float HOLD_CLAMP_MAX = 10.0f;        // 積分輸出角度上限的上限
 constexpr float HOLD_DEADBAND_MAX = 5.0f;
 constexpr float HOLD_SETTLE_MIN = 0.1f, HOLD_SETTLE_MAX = 100.0f;
@@ -1517,18 +1518,23 @@ void dispatch(const String& cmd, bool fromNet = false) {
             // HTTP_UPDATE_OK 不返回（已 reboot）
         }
     } else if (cmd.startsWith("CM ")) {
-        // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
+        // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd ki] = task-space PD(+積分)
         // （前綴從 "C " 改為 "CM "：避開上方 0x8C 回覆模式 "C " 的撞名遮蔽）
-        float mode_f, kp = -1, kd = -1;
-        int n = sscanf(cmd.c_str(), "CM %f %f %f", &mode_f, &kp, &kd);
+        float mode_f, kp = -1, kd = -1, ki = -1;
+        int n = sscanf(cmd.c_str(), "CM %f %f %f %f", &mode_f, &kp, &kd, &ki);
         if (n >= 1) {
             controlMode = (int)mode_f;
             if (controlMode == 1 && n >= 2) {
                 for (int i = 0; i < 6; i++) tsController.Kp[i] = fmaxf(0.01f, fminf(1.0f, kp));
                 if (n >= 3) for (int i = 0; i < 6; i++) tsController.Kd[i] = fmaxf(0.0f, kd);
+                if (n >= 4) for (int i = 0; i < 6; i++) {
+                    float newKi = fmaxf(0.0f, fminf(MODE1_KI_MAX, ki));
+                    if (newKi != tsController.Ki[i]) tsController.integ[i].reset();  // 帶變更才清積分（防重入殘留）
+                    tsController.Ki[i] = newKi;
+                }
             }
-            Out.printf("{\"status\":\"control mode\",\"mode\":%d,\"kp\":%.3f,\"kd\":%.3f}\n",
-                controlMode, tsController.Kp[0], tsController.Kd[0]);
+            Out.printf("{\"status\":\"control mode\",\"mode\":%d,\"kp\":%.3f,\"kd\":%.3f,\"ki\":%.3f}\n",
+                controlMode, tsController.Kp[0], tsController.Kd[0], tsController.Ki[0]);
         }
     } else if (cmd == "KS" || cmd.startsWith("KS ")) {
         int kp, ki, kd, kv;

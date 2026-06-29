@@ -30,6 +30,12 @@ struct TaskSpacePD {
     // Kd = 阻尼係數（秒），Kd/dt 為速度懲罰比例
     float Kp[6] = {0.15f, 0.15f, 0.15f, 0.15f, 0.15f, 0.15f};
     float Kd[6] = {0.01f, 0.01f, 0.01f, 0.01f, 0.01f, 0.01f};
+    // mode1 pose 域積分（消 task-space 穩態誤差）。Ki 預設 0 = no-op（向後相容）。
+    // 與 HOLD 角度域共用 ScalarIntegrator；clamp 分位置(mm)/旋轉(deg)兩域，量級不同故不可共用單值。
+    float Ki[6] = {0, 0, 0, 0, 0, 0};
+    float iClampPos = 0.5f;   // 位置軸積分輸出上限 (mm)
+    float iClampRot = 2.0f;   // 旋轉軸積分輸出上限 (deg)
+    ScalarIntegrator integ[6];
 
     FKSolver fk;
     Pose prevPose;
@@ -47,6 +53,7 @@ struct TaskSpacePD {
         prevPose = currentPose;
         firstCycle = true;
         fkFailCount = 0;
+        for (int i = 0; i < 6; i++) integ[i].reset();   // 重入(E enable / fallback)清積分態
     }
 
     // 核心：從當前角度 + 目標姿態 → 輸出馬達目標角度
@@ -93,7 +100,9 @@ struct TaskSpacePD {
             currentPose.roll,  currentPose.pitch,  currentPose.yaw
         };
         for (int i = 0; i < 6; i++) {
-            cp[i] += Kp[i] * err[i] - Kd[i] * vel[i];
+            float iClamp = (i < 3) ? iClampPos : iClampRot;   // 位置(mm)/旋轉(deg)分域選 scalar
+            cp[i] += Kp[i] * err[i] - Kd[i] * vel[i]
+                   + integ[i].update(err[i], DT, Ki[i], iClamp, !firstCycle);  // gated=!firstCycle
         }
         controlPose = {cp[0], cp[1], cp[2], cp[3], cp[4], cp[5]};
 
