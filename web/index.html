@@ -682,7 +682,14 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
           <div class="live-motor-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
         </div>
       </div>
-      <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="width:100%;margin-top:6px;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="flex:1;font-weight:600" title="拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。">🎯 跟隨模式 OFF</button>
+        <button class="chip" id="gyro-btn" onclick="openPhonePanel()" style="flex:0 0 auto;font-weight:600" title="用手機陀螺儀當跟隨來源：掃 QR 開手機頁，傾斜手機即時驅動平台（最直連、低延遲）">📱 陀螺儀</button>
+      </div>
+      <div id="follow-latency" style="margin-top:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#766f67;display:flex;gap:10px;justify-content:space-between" title="跟隨延遲（真實量測）：e2e=指令→實際 felt-lag（含濾波器+馬達，server 對指令角 vs 編碼器角互相關，需有動作才有值）；傳輸=板→server 遙測新鮮度（永遠可見的傳輸+感測地板）">
+        <span>延遲 e2e <b id="lat-e2e" style="color:#27231f">—</b></span>
+        <span>傳輸 <b id="lat-tele" style="color:#27231f">—</b></span>
+      </div>
       <label class="param-row" style="grid-template-columns:64px minmax(0,1fr) 48px;margin-top:8px" title="跟隨緊度（單旋鈕，越大跟越緊）：一鈕統管 vmax／加速時間／jerk／趨近增益 K。大＝撲得快、收尾緊；小＝柔順、遲緩。">
         <span>跟隨緊度</span>
         <input type="range" id="follow-tight" min="0" max="100" value="50" step="1">
@@ -1554,6 +1561,33 @@ function followReset() {
   updateFollowUI();
 }
 
+// ===== 跟隨延遲即時顯示（server evt:'latency'，真實量測）=====
+// e2e = 指令→實際 felt-lag（互相關，需有動作）；tele = 板→server 遙測新鮮度（傳輸+感測地板，永遠可見）。
+function updateLatencyUi(d) {
+  const e2e = document.getElementById('lat-e2e');
+  const tele = document.getElementById('lat-tele');
+  if (e2e) {
+    if (d.e2e == null) { e2e.textContent = d.following ? '量測中…' : '—'; e2e.style.color = '#766f67'; }
+    else { e2e.textContent = Math.round(d.e2e) + ' ms'; e2e.style.color = d.e2e < 150 ? '#326f63' : d.e2e < 300 ? '#b2642c' : '#b73b36'; }
+  }
+  if (tele) {
+    tele.textContent = d.teleAge == null ? '—' : Math.round(d.teleAge) + ' ms';
+    tele.style.color = (d.teleAge != null && d.teleAge < 120) ? '#27231f' : '#b2642c';
+  }
+}
+
+// ===== 手機陀螺儀配對面板（QR → phone.html）=====
+async function openPhonePanel() {
+  let info = {};
+  try { info = await (await fetch('/api/netinfo')).json(); } catch {}
+  document.getElementById('phone-url').textContent = info.phoneUrl || '(server 未提供)';
+  document.getElementById('phone-ca').style.display = info.mkcert ? '' : 'none';
+  if (info.caUrl) document.getElementById('phone-ca-link').href = info.caUrl;
+  document.getElementById('phone-qr').src = '/api/qrcode?_=' + Date.now();
+  document.getElementById('phone-modal').style.display = 'flex';
+}
+function closePhonePanel() { document.getElementById('phone-modal').style.display = 'none'; }
+
 // 跟隨緊度單旋鈕 → FE <0..1>（一鈕統管 vmax/accelT/jerkT/趨近增益 K，越大跟越緊）。
 // input 即時更新標籤 + ~10Hz 節流送 FE（避免拖動洗指令/灌爆 ack）；change 補送最終值確保落定。
 (function initFollowTight() {
@@ -1722,6 +1756,7 @@ function connectWS() {
         btnResolve('fail');
         return;
       }
+      if (data.evt === 'latency') { updateLatencyUi(data); return; }
 
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
@@ -2516,5 +2551,17 @@ updateDisturbUi();
 
 connectWS();
 </script>
+
+<!-- 手機陀螺儀配對面板（QR 指向 phone.html；server 端生成 QR/cert）-->
+<div id="phone-modal" onclick="if(event.target===this)closePhonePanel()" style="display:none;position:fixed;inset:0;background:rgba(20,16,10,.45);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fffdf9;border:1px solid #ded7cd;border-radius:10px;padding:20px;max-width:340px;width:100%;text-align:center;font-family:ui-monospace,Menlo,monospace;box-shadow:0 8px 40px rgba(40,32,20,.25)">
+    <div style="font-weight:800;letter-spacing:.05em;margin-bottom:4px">📱 手機陀螺儀配對</div>
+    <div style="font-size:11px;color:#766f67;margin-bottom:12px;line-height:1.5">手機掃 QR 開啟 → 點「校正」→ 在此開 🎯 跟隨。傾斜手機即時驅動平台（LAN 直連、低延遲）。</div>
+    <img id="phone-qr" alt="QR" style="width:220px;height:220px;background:#fff;border:1px solid #ece6dd;border-radius:6px"/>
+    <div id="phone-url" style="font-size:11px;color:#27231f;margin-top:10px;word-break:break-all">—</div>
+    <div id="phone-ca" style="font-size:11px;margin-top:10px;color:#766f67;line-height:1.5">首次：先在手機<a id="phone-ca-link" href="/rootCA.pem" style="color:#3d6388">下載安裝 rootCA</a>（設定→一般→VPN與裝置管理裝描述檔→關於本機→憑證信任設定打開）→ 之後零警告</div>
+    <button class="chip" onclick="closePhonePanel()" style="margin-top:14px;font-weight:600;width:100%">關閉</button>
+  </div>
+</div>
 </body>
 </html>

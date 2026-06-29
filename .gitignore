@@ -11,3 +11,6 @@ sysid/config/https-*.pem
 
 # 自動偵測學到的 ESP32 WiFi IP（runtime cache，勿提交）
 .esp32-ip
+
+# build 時生成的韌體源碼身分（由 sysid/fw_hash.js 烤出，每次 build 重生）
+src/fw_identity.h

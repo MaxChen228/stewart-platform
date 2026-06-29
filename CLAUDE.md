@@ -72,7 +72,10 @@ Pair 3 (M5,M6) @ -30°
 
 ## CAN 指令
 
-完整 CAN 指令手冊：`docs/servo42d/00-index.md`（按指令碼查表 + 歧義消除 + 常見任務流程）
+完整 CAN 指令手冊（Obsidian 圖譜雙產品線整合）：
+- **總覽中樞**：`docs/servo-can-hub.md`（42D↔42ES 雙生章節對照 + 硬體/協議/指令差異矩陣 + 移植韌體影響）
+- **本機在用 SERVO42D/57D**：`docs/servo42d/00-index.md`（按指令碼查表 + 歧義消除 + 任務流程）
+- **Mega 升級候選 SERVO42ES/57ES**：`docs/servo42es/00-index.md`（源 V1.0.1 PDF `docs/servo42es/refs/`）。⚠️ 與 42D 位元組相容但**重映射多個碼**：心跳 `0x98→0x89`、位置到位門檻 `0x95→0x98`、脈衝分頻 `0x99→0x9F`、歸零參數改 `0x95/0x96/0x97`；**無 CAN PID（無 0x96/0x97 PID）→ `K/KS/KRESET` 失效，須 CANGAROO**；config 寫入須補 `0x60` SAVE 才落 NVS。
 
 本專案常用指令摘要：
 

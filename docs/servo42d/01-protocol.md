@@ -1,5 +1,7 @@
 # CAN Protocol Basics
 
+> 🗺️ [[servo-can-hub|CAN 文檔總覽]] · 🔀 42ES 對應 [[servo42es/01-protocol|CAN Protocol Basics]]
+
 ## Frame Structure
 
 Standard frame, max data field = 8 bytes.
@@ -36,6 +38,8 @@ Data is **big-endian**. CAN_ID 即為馬達地址（0x01~0x06）。
 | Angle error unit | 0~51200 = 0°~360° (142.22/degree) |
 | Coordinate values | Cumulative multi-turn encoder (16384/turn) |
 
+> 🔀 **vs 42ES：** encoder resolution is identical (both 16384 counts/rev = 0x4000). The [[servo42es/01-protocol|42ES]] manual additionally types its read frames explicitly (`0x30` = int32 carry + uint16 value, `0x31` = int48_t cumulative); the byte-level encoding matches.
+
 ## Absolute vs Relative Position
 
 - **Absolute**: Target from fixed origin (zero point). Same command to same position = no movement.
@@ -51,3 +55,5 @@ Motion commands may also return:
 - status=2: completed
 - status=3: endstop stopped
 - status=5: sync mode received
+
+> 🔀 **vs 42ES：** the status table (0 fail / 1 success / 2 completed / 3 endstop / 5 sync) is identical, but persistence differs. On SERVO42D, config/write commands persist per-command. On [[servo42es/01-protocol|42ES]] write-only parameters live only in RAM until you batch-commit them with a single **`0x60` (SAVE all)** — otherwise every config write is lost on power-down. Keep this in mind when porting config flows between the two manuals.

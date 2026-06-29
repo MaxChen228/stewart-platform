@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <stdarg.h>
+#include <esp_system.h>            // esp_reset_reason() / ESP.restart()：開機診斷 + wedge 自救
+#include <WiFi.h>                  // HTTP-pull OTA 用 WiFiClient
+#include <HTTPUpdate.h>            // HTTP-pull OTA：ESP32 outbound 抓 firmware（繞 host 防火牆）
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -10,6 +14,43 @@
 #include "forward_kinematics.h"
 #include "control.h"
 #include "net_transport.h"
+
+// 韌體源碼身分：build 時由 sysid/fw_hash.js 烤入 src/fw_identity.h（gitignored）。
+// 缺檔/未經 stamp 時退化為 "unknown" 仍可編譯。server.js /api/firmware 以此判「燒錄 vs 最新」。
+#if defined(__has_include)
+#  if __has_include("fw_identity.h")
+#    include "fw_identity.h"
+#  endif
+#endif
+#ifndef FW_SRC_HASH
+#  define FW_SRC_HASH "unknown"
+#endif
+#ifndef FW_GIT_REV
+#  define FW_GIT_REV "unknown"
+#endif
+#ifndef FW_DIRTY
+#  define FW_DIRTY 0
+#endif
+#ifndef FW_BUILD_EPOCH
+#  define FW_BUILD_EPOCH 0UL
+#endif
+
+// esp_reset_reason → 人類可讀字串（開機診斷 brownout/panic/watchdog 用）。
+static const char* resetReasonStr(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_EXT:       return "ext";
+        case ESP_RST_SW:        return "sw";
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:   return "int_wdt";
+        case ESP_RST_TASK_WDT:  return "task_wdt";
+        case ESP_RST_WDT:       return "wdt";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_SDIO:      return "sdio";
+        default:                return "unknown";
+    }
+}
 
 Servo42D servos;
 EncoderState enc;
@@ -25,9 +66,12 @@ int64_t latestRaw[NUM_MOTORS];
 uint32_t latestRawAtMs[NUM_MOTORS] = {0};
 volatile bool autoReturnMode = false;
 volatile bool canRxPaused = false;
-constexpr uint16_t AR_PERIOD_MIN_MS = 20;  // MCP2515/500K: 6x stream + F5 must stay below redline.
+constexpr uint16_t AR_PERIOD_MIN_MS = 1;   // SERVO42D 0x01 timer 整數 ms 硬體下限（=1000Hz）。人為上限應使用者要求移除。
+                                           // ⚠️ 匯流排權衡（使用者自負）：6×0x35 與 F5 共用 500kbps；AR<~10ms(>100Hz) 會與 F5 搶頻寬
+                                           // → 控制變鈍（非 brick、非亂動，馬達內環會保持位置）。boot 預設 arPeriodMs=20(50Hz) 仍安全，
+                                           // 只有明確設高值才持久化。AR>telemetry率(~20-33Hz) 無觀測實益，純供進階/原始編碼器擷取用途。
 constexpr uint16_t AR_PERIOD_MAX_MS = 100;
-uint16_t arPeriodMs = AR_PERIOD_MIN_MS;    // 馬達主動上報週期；SERVO42D 0x01 timer 固定是整數 ms
+uint16_t arPeriodMs = 20;                  // boot 預設 50Hz（不綁 MIN，否則開機即 1ms×6 灌爆 500kbps 匯流排）；馬達主動上報週期，整數 ms
 constexpr uint32_t AR_FRESH_MS = 120; // 啟動/重啟 auto-return 時用來判斷「近期收到過」的軟門檻
 constexpr uint32_t AR_WARN_MS = 1000; // 長時間沒新 frame 才警告；短缺包沿用 last-known-good，不停機
 bool autoReturnWarnLatched = false;
@@ -91,10 +135,13 @@ struct TelemetrySnapshot {
     int fkStreak;
     uint16_t pid[4];
     int pidSaved;
+    uint16_t savedPid[4];
+    int nvsPid;
     int followMode;
     uint8_t profile;
     float followCurPose[6], followTgtPose[6], followVelPose[6];
     float followVmax[2], followAmax[2], followJmax[2];
+    float followTight;
     TelemetryExtra extra;
     float hold[NUM_MOTORS], herr[NUM_MOTORS], hmax;
     float holdDampGain, holdDampMax, holdDampCorrMax;
@@ -210,23 +257,44 @@ float followCur[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 當前濾波後 pose（IK 
 float followTgt[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 串流進來的目標 pose（PF 設）
 float followVel[6] = {0, 0, 0, 0, 0, 0};            // pose reference velocity（mm/s 或 deg/s）
 float followAcc[6] = {0, 0, 0, 0, 0, 0};            // pose reference acceleration
-float followVmaxT  = 60.0f;    // 平移速度上限 mm/s（VF 可調）
-float followVmaxR  = 45.0f;    // 旋轉速度上限 deg/s（VF 可調）
-constexpr float FOLLOW_ACCEL_TIME_S = 0.16f;  // 約多久允許 reference 加速到 VF；越小越跟手。
-constexpr float FOLLOW_JERK_TIME_S  = 0.08f;  // 約多久允許 acceleration 拉到上限；抑制方向切換抽動。
+float followTight  = 0.5f;     // 跟隨「緊度」單參數 ∈[0,1]：越大跟越緊（FE 可調，runtime，不存 NVS）
+float followVmaxT  = 77.5f;    // 平移速度上限 mm/s（tight 派生；VF 可底層覆寫）
+float followVmaxR  = 57.5f;    // 旋轉速度上限 deg/s（tight 派生）
+float followAccelT = 0.1925f;  // 加速時間常數 s（tight 派生；越小起步越猛）= 0.7·τ
+float followJerkT  = 0.09625f; // jerk 時間常數 s（tight 派生；越小切向越敏捷）= 0.35·τ
+float followApproachK = 3.6364f; // first-order 趨近增益 1/s = 1/τ；v 上限隨剩餘誤差線性收斂 →「越近越慢」ease-out
 constexpr float FOLLOW_EPS_T = 0.003f;        // mm，到目標後 snap，避免微小尾巴造成 keep-alive 抖動。
 constexpr float FOLLOW_EPS_R = 0.002f;        // deg
+// ↑ 這些靜態 init = applyFollowTight(0.5) 之結果；但 setup() 開機會呼 applyFollowTight(0.7) 覆寫成預設緊度 0.7。
 
 static inline float followVmaxForAxis(int i) {
     return i < 3 ? followVmaxT : followVmaxR;
 }
 
 static inline float followAmaxForAxis(int i) {
-    return followVmaxForAxis(i) / FOLLOW_ACCEL_TIME_S;
+    return followVmaxForAxis(i) / followAccelT;
 }
 
 static inline float followJmaxForAxis(int i) {
-    return followAmaxForAxis(i) / FOLLOW_JERK_TIME_S;
+    return followAmaxForAxis(i) / followJerkT;
+}
+
+// 跟隨緊度單參數 tight∈[0,1] → 一鈕派生四個物理量（全部單調隨 tight，越大跟越緊）：
+//   τ       = 0.45→0.10 s   趨近時間常數（緊→短）
+//   vmaxT/R 線性插值          速度上限（緊→快）
+//   accelT  = 0.7·τ          加速時間（緊→短，起步更猛）
+//   jerkT   = 0.35·τ         jerk 時間（緊→短，切向更敏捷）
+//   K       = 1/τ            趨近增益（緊→大，收尾更緊、誤差容忍更小）
+// accelT 取 0.7·τ 保證 amax=vmax/accelT ≥ K·vmax（headroom 1/0.7≈1.43）→ ease-out 永不被 accel 限幅切掉。
+static void applyFollowTight(float tight) {
+    tight = constrain(tight, 0.0f, 1.0f);
+    followTight = tight;
+    const float tau = 0.45f - (0.45f - 0.10f) * tight;
+    followVmaxT = 35.0f + (120.0f - 35.0f) * tight;
+    followVmaxR = 25.0f + (90.0f  - 25.0f) * tight;
+    followAccelT = 0.7f  * tau;
+    followJerkT  = 0.35f * tau;
+    followApproachK = 1.0f / tau;
 }
 
 static void resetFollowDynamics(const float init[6]) {
@@ -262,8 +330,18 @@ static void followAxisCandidate(int i, float dt, float cand[6], float velNext[6]
 
     const float dir = err >= 0.0f ? 1.0f : -1.0f;
     const float vBrake = sqrtf(fmaxf(0.0f, 2.0f * amax * fabsf(err)));
-    const float vDesired = dir * fminf(vmax, vBrake);
-    const float aDesired = constrain((vDesired - v) / fmaxf(dt, 0.001f), -amax, amax);
+    // first-order 趨近項：速度上限隨剩餘誤差線性收斂（K·|err|）→ 接近目標自動放慢（ease-out 曲線感）；
+    // 遠離時 K·|err|≫vmax 被 vmax 蓋過 → 全速撲。三者取 min：vmax(撲速)/vBrake(不過衝)/K·err(柔順收尾)。
+    const float vApproach = followApproachK * fabsf(err);
+    const float vDesired = dir * fminf(fminf(vmax, vBrake), vApproach);
+    float aDesired = constrain((vDesired - v) / fmaxf(dt, 0.001f), -amax, amax);
+    // jerk-aware stop：煞車加速度上限 |a| ≤ √(2·jmax·|v|)，保證能在 v 歸零前把 a ramp 回 0。
+    // 否則 a 釘在 -amax、jerk 限制來不及收力，v 被推穿 0 → 反向過衝 ring（v 倒退、彈回）。
+    // 離線確定性模擬驗證（sysid/follow_sim.js §9）：中段 tight 過衝 ring -70~86%，rise/settle 零代價。
+    if (aDesired * v < 0.0f && fabsf(v) > 1e-6f) {
+        const float aStop = sqrtf(2.0f * jmax * fabsf(v));
+        if (fabsf(aDesired) > aStop) aDesired = (aDesired >= 0.0f ? aStop : -aStop);
+    }
     const float da = constrain(aDesired - a, -jmax * dt, jmax * dt);
     float nextA = constrain(a + da, -amax, amax);
     float nextV = constrain(v + nextA * dt, -vmax, vmax);
@@ -322,6 +400,11 @@ static void controlTask(void*) {
         while (waitUs > 0) {
             if (waitUs > 2000) {
                 vTaskDelay(pdMS_TO_TICKS((waitUs - 1000) / 1000));
+            } else if (waitUs > 1100) {
+                // 高控制率（小週期）下，剩餘閒置不足 2 tick 但仍 >1ms：強制讓出 1 tick，
+                // 否則一路 busy-wait(delayMicroseconds 不 yield) 會餓死同核低優先 loopTask
+                // （serial/net 指令吞吐）→ PF 在 UART RX 堆積成秒級 backlog。實測 400Hz wedge 根因。
+                vTaskDelay(1);
             } else {
                 delayMicroseconds(waitUs > 100 ? 100 : waitUs);
             }
@@ -351,7 +434,7 @@ static void startRealtimeTasks() {
 }
 
 void loop() {
-    netOtaHandle();
+    // OTA 已移至 core0 netTask 服務（避免被高優先 controlTask 餓死）；此處不再呼叫 netOtaHandle()。
     handleSerial();
 
     String netCmd;
@@ -665,6 +748,19 @@ static void requestOtaSafetyStop() {
     otaStopRequested = true;
 }
 
+// HTTP-pull OTA 下載進度（每 ~10% 印一次；otaPullProgressPct 於每次 OTA 前重置為 -1）。
+static volatile int otaPullProgressPct = -1;
+static void otaPullOnProgress(int cur, int total) {
+    int pct = total > 0 ? (int)((int64_t)cur * 100 / total) : 0;
+    if (pct >= otaPullProgressPct + 10 || pct >= 100) {
+        otaPullProgressPct = pct;
+        Out.printf("{\"ota\":\"http_progress\",\"pct\":%d}\n", pct);
+    }
+}
+
+// netTask wedge 自救逾時：netTask >此時間沒更新心跳（且非 OTA 中）→ 網路堆疊掛死 → ESP.restart()。
+constexpr uint32_t NET_WEDGE_REBOOT_MS = 8000;
+
 // ===== 失效保護（P4）=====
 // 只有「以 WiFi 為控制來源」時才 arm：TCP 下控制指令 →true，USB 下指令 →false。
 bool netIsControlSource = false;
@@ -726,8 +822,22 @@ static const char* profileName(const TelemetrySnapshot& s) {
     return "none";
 }
 
+static void teleAppend(char* dst, size_t cap, size_t& pos, const char* fmt, ...) {
+    if (!dst || cap == 0 || pos >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(dst + pos, cap - pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    size_t written = (size_t)n;
+    pos = written >= cap - pos ? cap - 1 : pos + written;
+}
+
 static void emitTelemetry(const TelemetrySnapshot& s) {
-    Out.printf("{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+    char line[NET_OUT_LINE_BYTES];
+    size_t pos = 0;
+    line[0] = '\0';
+    teleAppend(line, sizeof(line), pos, "{\"a\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                   "\"r\":[%lld,%lld,%lld,%lld,%lld,%lld],"
                   "\"ok\":%d,\"z\":%d,\"pos\":%d,\"cm\":%d,"
                   "\"ef\":%u,\"tx\":%u,\"rx\":%u,"
@@ -741,7 +851,8 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
                   "\"rxDrop\":%u,\"txFail\":%u,\"qDepth\":0,\"qMax\":0},"
                   "\"ctl\":{\"mode\":\"%s\",\"ikFail\":%u,\"fkFail\":%u,\"coordLimit\":%u,\"coordMax\":%d,"
                   "\"fkStreak\":%d,\"profile\":\"%s\"},"
-                  "\"pid\":[%u,%u,%u,%u],\"pids\":%d,\"fl\":%d,"
+                  "\"pid\":[%u,%u,%u,%u],\"pids\":%d,"
+                  "\"spid\":[%u,%u,%u,%u],\"pidn\":%d,\"fw\":\"%s\",\"fl\":%d,"
                   "\"sched\":{\"ctrl_us\":%u,\"ctrl_max_us\":%u,\"jitter_us\":%u,\"missed\":%u,"
                   "\"tele_drop\":%u,\"cmd_drop\":%u,\"snap_age_ms\":%u}",
         s.angles[0], s.angles[1], s.angles[2],
@@ -762,11 +873,12 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
         s.busOvr, 0,
         ctlModeName(s), s.ctlIkFail, s.ctlFkFail, s.ctlCoordLimit, s.ctlCoordMaxAbs,
         s.fkStreak, profileName(s),
-        s.pid[0], s.pid[1], s.pid[2], s.pid[3], s.pidSaved, s.followMode,
+        s.pid[0], s.pid[1], s.pid[2], s.pid[3], s.pidSaved,
+        s.savedPid[0], s.savedPid[1], s.savedPid[2], s.savedPid[3], s.nvsPid, FW_SRC_HASH, s.followMode,
         s.ctrlUs, s.ctrlMaxUs, s.jitterUs, s.missed, s.teleDrop, s.cmdDrop, s.snapAgeMs);
 
     if (s.extra == TELEM_EXTRA_HOLD) {
-        Out.printf(",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
+        teleAppend(line, sizeof(line), pos, ",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                       "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                       "\"hmax\":%.2f,"
                       "\"od\":[%.4f,%.2f,%.2f]",
@@ -776,7 +888,7 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
             s.hmax,
             s.holdDampGain, s.holdDampMax, s.holdDampCorrMax);
     } else if (s.extra == TELEM_EXTRA_TASK) {
-        Out.printf(",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
+        teleAppend(line, sizeof(line), pos, ",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
                       "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
                       "\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                       "\"fki\":%d",
@@ -786,7 +898,7 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
             s.motorTgt[3],s.motorTgt[4],s.motorTgt[5],
             s.fkIterations);
     } else if (s.extra == TELEM_EXTRA_JOINT) {
-        Out.printf(",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
+        teleAppend(line, sizeof(line), pos, ",\"tgt\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"
                       "\"g\":%.3f",
             s.motorTgt[0],s.motorTgt[1],s.motorTgt[2],
             s.motorTgt[3],s.motorTgt[4],s.motorTgt[5],
@@ -802,10 +914,11 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
             errR = fmaxf(errR, fabsf(s.followTgtPose[i] - s.followCurPose[i]));
             velR = fmaxf(velR, fabsf(s.followVelPose[i]));
         }
-        Out.printf(",\"fref\":{\"g\":1,\"e\":[%.2f,%.3f],\"v\":[%.2f,%.3f],\"lim\":[%.1f,%.1f]}",
-            errT, errR, velT, velR, s.followVmax[0], s.followVmax[1]);
+        teleAppend(line, sizeof(line), pos, ",\"fref\":{\"g\":1,\"e\":[%.2f,%.3f],\"v\":[%.2f,%.3f],\"lim\":[%.1f,%.1f],\"tight\":%.2f}",
+            errT, errR, velT, velR, s.followVmax[0], s.followVmax[1], s.followTight);
     }
-    Out.println("}");
+    teleAppend(line, sizeof(line), pos, "}");
+    Out.writeLine(line);
 }
 
 static void smoothPose(Pose& sm, const Pose& tgt, float dt) {
@@ -835,6 +948,7 @@ void startCanRxTask() {
 void setup() {
     Serial.setTxBufferSize(1024);   // 大 TX ring buffer：遙測整幀瞬入緩衝、UART ISR 背景排空 → 不卡控制 loop
     Serial.begin(460800);           // 460800：406B 幀 ≈9ms（≪30ms 週期，不飽和）；921600 此 CP2102 訊號完整性不穩→改用此
+    Serial.setTimeout(20);          // handleSerial 排空時，半行最壞只卡 20ms（預設 1000ms 太長）
     while (!Serial) delay(10);
     delay(200); // 給 FreeRTOS / SPI mutex 完全初始化的時間，避免 paramLock NULL
     netSetOtaStartCallback(requestOtaSafetyStop);
@@ -846,6 +960,7 @@ void setup() {
     delay(50);
 
     loadRuntimeTuningFromNVS();
+    applyFollowTight(0.7f);          // 跟隨預設緊度 0.5→0.7：tau 0.275→0.205s，lag 顯著降而 step 過衝仍低（FE 可 runtime 再調）
     enc.init();
     pidSaved = loadVFOCPidFromNVS();
 
@@ -901,6 +1016,14 @@ void setup() {
     netInit();
     startRealtimeTasks();
 
+    // 開機診斷：上報 reset 原因（brownout/panic/watchdog/poweron）+ heap，解「莫名其妙斷線」盲區。
+    // 走 Out → USB + TCP queue；server 於 (重)連線時收到此行即知上次為何重啟。
+    esp_reset_reason_t _rr = esp_reset_reason();
+    Out.printf("{\"boot\":{\"reset\":%d,\"reset_str\":\"%s\",\"heap\":%u,\"minheap\":%u,"
+               "\"fw\":\"%s\",\"rev\":\"%s\",\"dirty\":%d,\"built\":%lu}}\n",
+               (int)_rr, resetReasonStr(_rr),
+               (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+               FW_SRC_HASH, FW_GIT_REV, FW_DIRTY, (unsigned long)FW_BUILD_EPOCH);
     Out.println("{\"status\":\"ready\"}");
 }
 
@@ -1188,7 +1311,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         if (n >= 6 && followMode) { for (int i = 0; i < 6; i++) followTgt[i] = v[i]; }
     } else if (cmd.startsWith("VF ")) {
         // 跟隨速度上限 `VF vmaxT vmaxR`（mm/s, deg/s）：所有 host 動作的硬體安全閥。
-        // acceleration/jerk 上限由 VF 派生，保持單一安全旋鈕。
+        // accel/jerk 時間常數由 FE(tight) 設；VF 只覆寫 vmax（amax=vmax/accelT 隨之變）。
         float vt, vr;
         int n = sscanf(cmd.c_str(), "VF %f %f", &vt, &vr);
         if (n >= 2) {
@@ -1200,6 +1323,44 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 followVmaxT, followVmaxR,
                 followAmaxForAxis(0), followAmaxForAxis(3),
                 followJmaxForAxis(0), followJmaxForAxis(3));
+        }
+    } else if (cmd.startsWith("FE ")) {
+        // 跟隨緊度 `FE tight`（0..1）：單參數同時設 vmax/accelTime/jerkTime/趨近增益 K，越大跟越緊。
+        // 對應前端「跟隨緊度」滑桿；VF 仍可事後底層覆寫 vmax。
+        float tg;
+        int n = sscanf(cmd.c_str(), "FE %f", &tg);
+        if (n >= 1) {
+            applyFollowTight(tg);
+            Out.printf("{\"status\":\"follow tight\",\"tight\":%.3f,\"vt\":%.1f,\"vr\":%.1f,"
+                       "\"accelT\":%.4f,\"jerkT\":%.4f,\"K\":%.2f,"
+                       "\"at\":%.1f,\"ar\":%.1f,\"gen\":\"esp32_jerk_limited\"}\n",
+                followTight, followVmaxT, followVmaxR,
+                followAccelT, followJerkT, followApproachK,
+                followAmaxForAxis(0), followAmaxForAxis(3));
+        }
+    } else if (cmd == "OTA" || cmd.startsWith("OTA ")) {
+        // HTTP-pull OTA：ESP32 主動 outbound 抓 firmware（繞 host 防火牆，比 ArduinoOTA 回連可靠、可全自動）。
+        // 用法：OTA <url>（host 提供 http://<ip>:3000/firmware.bin）。下載在 controlTick(core1) 內阻塞 ~10s，
+        // 故先直接 otaSafetyStop() 禁能馬達（平台 flash 時 limp 屬預期，與 USB flash 同）。成功寫非作用分割區後自動 reboot（雙分割原子回退）。
+        String url = cmd.length() > 4 ? cmd.substring(4) : String("");
+        url.trim();
+        if (url.length() == 0) {
+            Out.println("{\"ota\":\"error\",\"reason\":\"usage: OTA http://host:port/firmware.bin\"}");
+        } else {
+            Out.printf("{\"ota\":\"http_pull\",\"url\":\"%s\"}\n", url.c_str());
+            otaSafetyStop();                   // 同步禁能馬達（在 controlTick 內，與 CAN 同核安全）
+            otaPullProgressPct = -1;
+            WiFiClient otaClient;
+            httpUpdate.rebootOnUpdate(true);
+            httpUpdate.onProgress(otaPullOnProgress);
+            t_httpUpdate_return r = httpUpdate.update(otaClient, url);
+            if (r == HTTP_UPDATE_FAILED) {
+                Out.printf("{\"ota\":\"http_failed\",\"code\":%d,\"err\":\"%s\"}\n",
+                           httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+            } else if (r == HTTP_UPDATE_NO_UPDATES) {
+                Out.println("{\"ota\":\"http_no_updates\"}");
+            }
+            // HTTP_UPDATE_OK 不返回（已 reboot）
         }
     } else if (cmd.startsWith("CM ")) {
         // 控制模式切換：CM 0 = joint-space, CM 1 [kp kd] = task-space PD
@@ -1494,14 +1655,28 @@ void dispatch(const String& cmd, bool fromNet = false) {
 
 // USB 指令來源：讀一行 → dispatch。語意同舊版 handleSerial。
 void handleSerial() {
-    if (!Serial.available()) return;
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (enqueueCommand(cmd, false)) netIsControlSource = false;    // USB 任何指令（含純查詢如 WIFI?）→ 解除 WiFi failsafe arm
+    // 每次排空所有待處理行（上限 16），避免 loopTask 被稀疏排程時 PF 突發在 UART RX 累積延遲。
+    // Serial.setTimeout(20)（setup）使半行最壞只卡 20ms 而非預設 1000ms。
+    for (int i = 0; i < 16 && Serial.available(); i++) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.length() == 0) continue;
+        if (enqueueCommand(cmd, false)) netIsControlSource = false;    // USB 任何指令（含純查詢如 WIFI?）→ 解除 WiFi failsafe arm
+    }
 }
 
 static void controlTick() {
     uint32_t ctrlStartUs = micros();
+
+    // netTask wedge 自救：netTask 每輪更新 netTaskHeartbeatMs；>NET_WEDGE_REBOOT_MS 沒更新（且非 OTA 中）
+    // = core0 網路堆疊掛死（觀察到：telemetry 凍結+TCP 不回應+不自我重連）→ 整機重啟。
+    // core1 always-running 故由此監看 core0；reset_reason 將顯示 sw。心跳=0 表 netTask 尚未起跑，不誤判。
+    if (netTaskHeartbeatMs != 0 && !netOtaBusy() &&
+        millis() - netTaskHeartbeatMs > NET_WEDGE_REBOOT_MS) {
+        Out.println("{\"fatal\":\"netTask wedge, reboot\"}");
+        delay(20);
+        ESP.restart();
+    }
 
     if (otaStopRequested) {
         otaSafetyStop();
@@ -1756,6 +1931,8 @@ static void controlTick() {
     snap.fkStreak = tsController.fkFailCount;
     snap.pid[0] = curKp; snap.pid[1] = curKi; snap.pid[2] = curKd; snap.pid[3] = curKv;
     snap.pidSaved = pidSaved ? 1 : 0;
+    snap.savedPid[0] = savedKp; snap.savedPid[1] = savedKi; snap.savedPid[2] = savedKd; snap.savedPid[3] = savedKv;
+    snap.nvsPid = nvsPidPresent ? 1 : 0;
     snap.followMode = followMode ? 1 : 0;
     snap.profile = followMode ? 1 : (holdMoveMs > 0 ? 2 : 0);
     for (int i = 0; i < 6; i++) {
@@ -1765,6 +1942,7 @@ static void controlTick() {
     }
     snap.followVmax[0] = followVmaxT;
     snap.followVmax[1] = followVmaxR;
+    snap.followTight = followTight;
     snap.followAmax[0] = followAmaxForAxis(0);
     snap.followAmax[1] = followAmaxForAxis(3);
     snap.followJmax[0] = followJmaxForAxis(0);

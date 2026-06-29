@@ -1,5 +1,7 @@
 # Protection Commands
 
+> 🗺️ [[servo-can-hub|CAN 文檔總覽]] · 🔀 42ES 對應 [[servo42es/09-protection|Protection Commands]]
+
 ## Two Protection Modes (Independent)
 
 1. **Overcurrent protection (0x88)**: Triggered when motor overcurrent detected. OLED shows "Wrong..."
@@ -13,12 +15,18 @@ Both can be enabled/disabled independently. When triggered: motor unlocks, shaft
 2. Send 0x3D command
 3. Physically loosen/turn motor shaft
 
+> 🔀 **vs 42ES：** [[servo42es/09-protection|42ES]] 手冊只列「送 3DH」與「鬆動軸」兩法，未列「按驅動板 Enter 按鈕」。
+
 ## 0x88 — Set Overcurrent Protection
 
 DLC=3: `[88, enable, CRC]`
 - 0x00=disable (**default**), 0x01=enable
 
+> 🔀 **vs 42ES：** [[servo42es/09-protection|42ES]] 的 `0x88` 為合併型堵轉/超差保護（DLC=5），且保護參數為 write-only — 寫入後須送 [[servo42es/06-bus-control|SAVE 0x60]] 才落 NVS，否則重開機回預設（42D 此處無顯式 SAVE 指令）。
+
 ## 0x9D — Set Position Out-of-Tolerance Protection
+
+> 🔀 **vs 42ES：** 42D 用兩個獨立碼分工 — `0x88` 只開關過流保護、`0x9D` 才設位置超差（DLC=7, time + errors 兩欄）。[[servo42es/09-protection|42ES]] 把堵轉/超差門檻合併進單一 `0x88`（DLC=5），手冊無 `0x9D`。
 
 DLC=7: `[9D, enable, time_hi, time_lo, errors_hi, errors_lo, CRC]`
 

@@ -1,13 +1,17 @@
 # Motion Commands
 
+> 🗺️ [[servo-can-hub|CAN 文檔總覽]] · 🔀 42ES 對應 [[servo42es/05-motion-commands|Motion Commands (42ES/57ES)]]
+
 All motion commands only valid in bus control mode (SR_OPEN/SR_CLOSE/SR_vFOC).
 
 **Prerequisites**: 發送運動指令前必須：
-1. 設定工作模式為 SR_* → `0x82` (見 [04-config-commands](04-config-commands.md))
-2. Enable 馬達 → `0xF3` (見 [06-bus-control](06-bus-control.md))
-3. 座標模式 (F4/F5/FE) 需先設零點 → `0x92` 或 `0x91` (見 [08-homing-zeroing](08-homing-zeroing.md))
+1. 設定工作模式為 SR_* → `0x82` (見 [[servo42d/04-config-commands|04-config-commands]])
+2. Enable 馬達 → `0xF3` (見 [[servo42d/06-bus-control|06-bus-control]])
+3. 座標模式 (F4/F5/FE) 需先設零點 → `0x92` 或 `0x91` (見 [[servo42d/08-homing-zeroing|08-homing-zeroing]])
 
-**Speed 與 subdivision 關係**: speed 值在 16/32/64 subdivision 下 = 實際 RPM。其他 subdivision: `actual_RPM = speed × 16 / subdivision`。見 [02-specs-and-modes](02-specs-and-modes.md)。
+> 🔀 **vs 42ES：** F6/FD/FE/F4/F5 frame、CRC、status 碼皆 byte-identical。但 42ES 多一層持久化規則 —— 工作模式 `0x82` 等 config 參數寫入後不持久化，須額外送 SAVE 指令 `0x60` 才在斷電後保留（見 [[servo42es/05-motion-commands|42ES]]）。42D 文檔組無此顯式存檔步驟。
+
+**Speed 與 subdivision 關係**: speed 值在 16/32/64 subdivision 下 = 實際 RPM。其他 subdivision: `actual_RPM = speed × 16 / subdivision`。見 [[servo42d/02-specs-and-modes|02-specs-and-modes]]。
 
 ## Speed Control Mode (0xF6)
 
@@ -113,3 +117,5 @@ DLC=3: `[FF, enable, CRC]`
 Must first send a speed command (0xF6), then enable auto-start. Motor will run on every power-on with saved parameters.
 
 Response: 0=fail, 1=start setting, 2=setup complete
+
+> 🔀 **vs 42ES：** 0xFF 的啟用碼**不同**。42D 用 enable byte（DLC=3：`[FF, 0xC8/0xCA, CRC]`，先發 F6 再 enable）；42ES 改把 dir/speed/acc 直接內嵌進 frame（DLC=5：`[FF, dir|speed_hi, speed_lo, acc, CRC]`，`speed=0` 停用、`speed≠0` 啟用），且設定後**必須 `0x60` SAVE** 才在斷電後生效。byte 佈局與語意皆不同，見 [[servo42es/05-motion-commands|42ES]]。

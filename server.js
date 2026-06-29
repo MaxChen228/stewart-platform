@@ -8,13 +8,17 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { NEUTRAL_Z, solveFK, resetFK } = require('./sysid/kin');
+const QRCode = require('qrcode');
+const { NEUTRAL_Z, solveFK, resetFK, ik } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
 const WorkspaceExecutor = require('./sysid/workspace_executor');
+const fwHash = require('./sysid/fw_hash');  // 韌體源碼身分（與 build 端同一演算法）
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
-const HTTPS_ENABLED = process.env.STEWART_HTTPS === '1' || process.env.HTTPS === '1';
+// HTTPS 恆開（手機 DeviceOrientation 需 secure context）；單一入口 `npm start` 同時 HTTP+HTTPS。
+// 僅 STEWART_NO_HTTPS=1 可關（例如無 openssl/mkcert 的精簡環境）。
+const HTTPS_ENABLED = process.env.STEWART_NO_HTTPS !== '1';
 const BAUD = 460800;
 // 綁定位址：預設 0.0.0.0（方便站在機台旁用手機/平板驅動平台）。
 // 這是會動的實體機械——若在不可信網段，設環境變數 LOOPBACK_ONLY=1 只綁本機。
@@ -43,6 +47,19 @@ const RELEASE_HOLD_MAX_MS = 180000;
 let lastTelemetry = null;
 let lastTelemetryAt = 0;
 let lastLine = null;
+
+// 板子回報的韌體身分。fw(srcHash) 每幀都帶 → 重連/server 重啟後仍能立即判 MATCH/STALE，
+// 不依賴抓到 boot 行；boot 行另帶 rev/dirty/built 供人看。see /api/firmware。
+const boardFirmware = { fw: null, rev: null, dirty: null, built: null, fromTeleAt: null, fromBootAt: null };
+function captureBoardFirmware(src, origin) {
+  const now = Date.now();
+  if (src.fw != null) boardFirmware.fw = String(src.fw);
+  if (src.rev != null) boardFirmware.rev = String(src.rev);
+  if (src.dirty != null) boardFirmware.dirty = Number(src.dirty) ? 1 : 0;
+  if (src.built != null) boardFirmware.built = Number(src.built);
+  if (origin === 'boot') boardFirmware.fromBootAt = now;
+  else boardFirmware.fromTeleAt = now;
+}
 let lastParseWarningAt = 0;
 const lineParseStats = {
   errors: 0,
@@ -808,9 +825,91 @@ function manualPfEmit() {
   manualPf.lastEmitAt = now;
   manualPf.lastReason = null;
   pushWindow(manualPf.emitWindow, { at: now, pose: target.slice() }, now);
+  try { const k = ik(target); if (k && k.valid) latPush(latCmd, k.angles.map(Number), now); } catch {}
   observeCommand(cmd, 'manual-resample', null);   // feeds followDiag.pf + lastPfAt (nearFollow gate)
   recWrite('cmd', cmd);
 }
+
+// ===== 端到端跟隨延遲估計（角度空間互相關）=====
+// dashboard 即時顯示「指令→實際」felt-lag（含濾波器+馬達響應，~200-350ms）。真算非模型：
+// 對最近視窗內動最多的馬達，做「指令角(IK of emitted PF) vs 實際角(encoder a[])」的時移互相關，
+// 取正規化相關性最高的時移 = 延遲。角度空間免 FK 收斂風險、a[] 即真實量測；gain 衰減被相關性正規化吸收。
+const LAT_WIN_MS = 3000, LAT_MAX_LAG_MS = 600, LAT_GRID_MS = 20;
+const latCmd = [];   // {t, ang:[6]}
+const latAct = [];   // {t, ang:[6]}
+let followLatency = { ms: null, motor: null, corr: null, at: 0 };
+
+function latPush(buf, ang, t) {
+  if (!Array.isArray(ang) || ang.length !== 6) return;
+  buf.push({ t, ang });
+  const cut = t - (LAT_WIN_MS + LAT_MAX_LAG_MS + 500);
+  while (buf.length && buf[0].t < cut) buf.shift();
+}
+function latInterp(buf, motor, t) {
+  if (buf.length < 2 || t < buf[0].t || t > buf[buf.length - 1].t) return null;
+  for (let i = 1; i < buf.length; i++) {
+    if (buf[i].t >= t) {
+      const a = buf[i - 1], b = buf[i];
+      const f = (t - a.t) / Math.max(1, b.t - a.t);
+      return a.ang[motor] + f * (b.ang[motor] - a.ang[motor]);
+    }
+  }
+  return null;
+}
+function pearson(a, b) {
+  const n = a.length; if (n < 2) return 0;
+  let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+  let saa = 0, sbb = 0, sab = 0;
+  for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; saa += da * da; sbb += db * db; sab += da * db; }
+  return saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : 0;
+}
+function estimateFollowLatency() {
+  const now = Date.now();
+  const t1 = Math.min(latCmd.length ? latCmd[latCmd.length - 1].t : 0, latAct.length ? latAct[latAct.length - 1].t : 0);
+  const none = (corr) => { followLatency = { ms: null, motor: null, corr: corr ?? null, at: now }; };
+  if (!t1 || latCmd.length < 12 || latAct.length < 8) return none();
+  const t0 = t1 - LAT_WIN_MS;
+  // 選動最多的馬達（指令角標準差最大）
+  let motor = -1, bestStd = 0;
+  for (let m = 0; m < 6; m++) {
+    const vals = latCmd.filter((s) => s.t >= t0).map((s) => s.ang[m]);
+    if (vals.length < 6) continue;
+    const mn = vals.reduce((x, y) => x + y, 0) / vals.length;
+    const sd = Math.sqrt(vals.reduce((x, y) => x + (y - mn) ** 2, 0) / vals.length);
+    if (sd > bestStd) { bestStd = sd; motor = m; }
+  }
+  if (motor < 0 || bestStd < 0.8) return none();   // 動太小 → 延遲無意義
+  const grid = [];
+  for (let t = t0 + LAT_MAX_LAG_MS; t <= t1; t += LAT_GRID_MS) grid.push(t);
+  let bestLag = null, bestCorr = -2;
+  for (let lag = 0; lag <= LAT_MAX_LAG_MS; lag += LAT_GRID_MS) {
+    const A = [], C = [];
+    for (const t of grid) {
+      const a = latInterp(latAct, motor, t), c = latInterp(latCmd, motor, t - lag);
+      if (a != null && c != null) { A.push(a); C.push(c); }
+    }
+    if (A.length < 8) continue;
+    const corr = pearson(A, C);
+    if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+  }
+  if (bestLag == null || bestCorr < 0.6) return none(round(bestCorr, 2));
+  followLatency = { ms: bestLag, motor, corr: round(bestCorr, 2), at: now };
+}
+
+// 每 300ms 重估並廣播給 dashboard：e2e=互相關 felt-lag（動才有值）；teleAge/inputAge=永遠可見的傳輸+感測地板。
+setInterval(() => {
+  estimateFollowLatency();
+  const now = Date.now();
+  broadcast(JSON.stringify({
+    evt: 'latency',
+    e2e: followLatency.ms,                 // ms，端到端 felt-lag（含濾波器+馬達），無動作時 null
+    motor: followLatency.motor,
+    corr: followLatency.corr,              // 相關性品質（<0.6 視為無效→null）
+    inputAge: manualPf.lastInputAt ? now - manualPf.lastInputAt : null,   // 手機→server 新鮮度
+    teleAge: lastTelemetryAt ? now - lastTelemetryAt : null,             // 板→server 新鮮度
+    following: !!manualPf.target,
+  }));
+}, 300);
 
 function manualPfUpdateTarget(cmd) {
   const pose = parsePoseCommand(cmd, 'PF');
@@ -1861,6 +1960,60 @@ async function startWorkspaceRun(incoming = {}) {
   return { state: publicWorkspaceRunState(), plan: { program: plan.program, condition: plan.condition, blocks: plan.blocks.length, description: plan.description } };
 }
 
+// 「燒錄韌體 vs 最新源碼」比對。tree = 工作區現在會編譯出的源碼身分（與 build 端同演算法）；
+// board = 板子每幀回報的 fw(srcHash)；bin = 磁碟上 .pio firmware.bin（下次 OTA/upload 會送的產物）。
+// verdict: match=燒錄源碼==tree / stale=不同(附 git 差異) / unknown=板子沒回報(舊韌體或離線)。
+function buildFirmwareReport() {
+  const tree = fwHash.computeIdentity();
+  const now = Date.now();
+
+  // 磁碟產物（pio run 的輸出）：sha256 前 12 + mtime；判它是否比源碼舊。
+  let bin = { present: false };
+  try {
+    const binPath = path.join(__dirname, '.pio', 'build', 'esp32', 'firmware.bin');
+    const st = fs.statSync(binPath);
+    const sha = require('crypto').createHash('sha256').update(fs.readFileSync(binPath)).digest('hex').slice(0, 12);
+    // 源碼最新 mtime：bin 比任何源碼舊 → 需重新 pio run 才會反映 tree。
+    let newestSrcMs = 0;
+    for (const rel of fwHash.srcHash().files) {
+      try { newestSrcMs = Math.max(newestSrcMs, fs.statSync(path.join(__dirname, rel)).mtimeMs); } catch {}
+    }
+    bin = { present: true, sha, builtAt: Math.round(st.mtimeMs), staleVsSource: st.mtimeMs < newestSrcMs };
+  } catch { bin = { present: false }; }
+
+  const board = { ...boardFirmware };
+  const boardSeen = board.fw != null;
+  let verdict, detail;
+  if (!boardSeen) {
+    verdict = 'unknown';
+    detail = '板子未回報 fw（舊韌體無此機制，或離線/凍結未送過遙測）';
+  } else if (board.fw === tree.srcHash) {
+    verdict = 'match';
+    detail = '燒錄韌體源碼 == 工作區（含未 commit 改動）';
+  } else {
+    verdict = 'stale';
+    // 差多少：板子 rev 已知且非 dirty-only 才能 git diff；否則只能標源碼 hash 不同。
+    let diff = null;
+    const boardRev = board.rev ? board.rev.replace(/\+dirty$/, '') : null;
+    if (boardRev && boardRev !== 'unknown' && boardRev !== 'nogit') {
+      try {
+        const stat = execFileSync('git', ['diff', '--stat', `${boardRev}..HEAD`, '--', 'src', 'platformio.ini'],
+          { cwd: __dirname, encoding: 'utf8' }).trim();
+        diff = stat || '(板子 rev..HEAD 無 committed 源碼差異 → 差異純在未 commit 改動)';
+      } catch (e) { diff = `git diff 失敗（板子 rev ${boardRev} 不在本地歷史？）: ${e.message}`; }
+    }
+    detail = '燒錄韌體源碼 != 工作區';
+    return {
+      verdict, detail, board, tree: pickTree(tree), bin, gitDiffStat: diff,
+      treeDirtyFiles: tree.dirtyFiles, checkedAt: now,
+    };
+  }
+  return { verdict, detail, board, tree: pickTree(tree), bin, treeDirtyFiles: tree.dirtyFiles, checkedAt: now };
+}
+function pickTree(t) {
+  return { srcHash: t.srcHash, gitRev: t.gitRev, dirty: t.dirty, fileCount: t.fileCount };
+}
+
 const requestHandler = (req, res) => {
   // REST: 最新資料
   if (req.url === '/api/latest') {
@@ -1886,6 +2039,11 @@ const requestHandler = (req, res) => {
   if (req.url.split('?')[0] === '/api/follow/report') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(buildFollowReport(), null, 2));
+    return;
+  }
+  if (req.url.split('?')[0] === '/api/firmware') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(buildFirmwareReport(), null, 2));
     return;
   }
   if (req.url.split('?')[0] === '/api/transport/reconnect') {
@@ -2314,6 +2472,46 @@ const requestHandler = (req, res) => {
     return;
   }
 
+  // 手機配對資訊：dashboard 的「📱 陀螺儀」鈕 fetch 此端點組 QR（指向 phone.html）。
+  if (req.url === '/api/netinfo') {
+    const lan = lanHost();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      lan,
+      httpsPort: HTTPS_PORT,
+      httpPort: HTTP_PORT,
+      httpsEnabled: HTTPS_ENABLED,
+      mkcert: !!mkcertCaRoot(),
+      phoneUrl: `https://${lan}:${HTTPS_PORT}/phone.html`,
+      caUrl: mkcertCaRoot() ? `http://${lan}:${HTTP_PORT}/rootCA.pem` : null,
+    }));
+    return;
+  }
+  // 手機配對 QR（指向 phone.html 的 HTTPS URL）；server 端生成 SVG，前端免重型 QR lib。
+  if (req.url === '/api/qrcode') {
+    const url = `https://${lanHost()}:${HTTPS_PORT}/phone.html`;
+    QRCode.toString(url, { type: 'svg', margin: 1, width: 220 }, (err, svg) => {
+      if (err) { res.writeHead(500); res.end('qr error'); return; }
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' });
+      res.end(svg);
+    });
+    return;
+  }
+  // mkcert 本機 CA：手機開 phone.html 前先下載安裝一次 → 之後零憑證警告。
+  if (req.url === '/rootCA.pem') {
+    const caRoot = mkcertCaRoot();
+    if (!caRoot) { res.writeHead(404); res.end('no mkcert CA'); return; }
+    fs.readFile(path.join(caRoot, 'rootCA.pem'), (err, data) => {
+      if (err) { res.writeHead(404); res.end('not found'); return; }
+      res.writeHead(200, {
+        'Content-Type': 'application/x-x509-ca-cert',
+        'Content-Disposition': 'attachment; filename="stewart-rootCA.pem"',
+      });
+      res.end(data);
+    });
+    return;
+  }
+
   // 靜態檔案（去查詢字串；目錄/結尾 → index.html）
   let urlPath = req.url.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
@@ -2418,9 +2616,12 @@ function onLine(line) {
     recWrite('in', line);
     return;
   }
+  if (d && d.boot) captureBoardFirmware(d.boot, 'boot');
   if (d && Array.isArray(d.a)) {
     lastTelemetry = line;
     lastTelemetryAt = Date.now();
+    if (d.a.length === 6) latPush(latAct, d.a.map(Number), lastTelemetryAt);
+    if (d.fw != null) captureBoardFirmware({ fw: d.fw }, 'telemetry');
   }
   observeIncoming(d);
   recWrite('in', line);
@@ -2768,6 +2969,14 @@ function localHttpsSans() {
   return localHttpsSanList().join(',');
 }
 
+// 手機配對用的「最像 LAN」的 IPv4（優先私網段，退而求其次第一個，再退 localhost）。
+function lanHost() {
+  const ips = localHttpsSanList()
+    .filter((s) => s.startsWith('IP:') && s !== 'IP:127.0.0.1')
+    .map((s) => s.slice(3));
+  return ips.find((ip) => /^(192\.168|10\.|172\.(1[6-9]|2\d|3[01]))\./.test(ip)) || ips[0] || 'localhost';
+}
+
 function certHasCurrentSans() {
   if (!fs.existsSync(HTTPS_CERT_PATH)) return false;
   try {
@@ -2781,18 +2990,37 @@ function certHasCurrentSans() {
   }
 }
 
+// mkcert 本機 CA 根目錄（裝過 mkcert -install 才有 rootCA.pem）；否則回 null 退化到 openssl 自簽。
+let mkcertCaRootCache;
+function mkcertCaRoot() {
+  if (mkcertCaRootCache !== undefined) return mkcertCaRootCache;
+  try {
+    const root = execFileSync('mkcert', ['-CAROOT'], { encoding: 'utf8' }).trim();
+    mkcertCaRootCache = root && fs.existsSync(path.join(root, 'rootCA.pem')) ? root : null;
+  } catch { mkcertCaRootCache = null; }
+  return mkcertCaRootCache;
+}
+
 function loadHttpsCredentials() {
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
     if (!fs.existsSync(HTTPS_KEY_PATH) || !certHasCurrentSans()) {
-      execFileSync('openssl', [
-        'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
-        '-days', '3650',
-        '-keyout', HTTPS_KEY_PATH,
-        '-out', HTTPS_CERT_PATH,
-        '-subj', '/CN=stewart-platform.local',
-        '-addext', `subjectAltName=${localHttpsSans()}`,
-      ], { stdio: 'ignore' });
+      const caRoot = mkcertCaRoot();
+      if (caRoot) {
+        // mkcert leaf cert：手機裝一次 rootCA.pem（/rootCA.pem）後 → 之後零警告，取代自簽逐次「繼續」。
+        const names = localHttpsSanList().map((s) => s.replace(/^(DNS:|IP:)/, ''));
+        execFileSync('mkcert', ['-cert-file', HTTPS_CERT_PATH, '-key-file', HTTPS_KEY_PATH, ...names], { stdio: 'ignore' });
+      } else {
+        // 退化：openssl 自簽（無 mkcert 時，手機每次點「繼續」）。
+        execFileSync('openssl', [
+          'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+          '-days', '3650',
+          '-keyout', HTTPS_KEY_PATH,
+          '-out', HTTPS_CERT_PATH,
+          '-subj', '/CN=stewart-platform.local',
+          '-addext', `subjectAltName=${localHttpsSans()}`,
+        ], { stdio: 'ignore' });
+      }
     }
     return {
       key: fs.readFileSync(HTTPS_KEY_PATH),
@@ -2800,7 +3028,7 @@ function loadHttpsCredentials() {
     };
   } catch (err) {
     console.warn(`[Server] HTTPS disabled: ${err.message}`);
-    console.warn('[Server] Install openssl or provide HTTPS_KEY/HTTPS_CERT to use phone IMU sensors.');
+    console.warn('[Server] Install mkcert/openssl or provide HTTPS_KEY/HTTPS_CERT to use phone IMU sensors.');
     return null;
   }
 }

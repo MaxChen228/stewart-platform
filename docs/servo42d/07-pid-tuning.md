@@ -1,4 +1,7 @@
 # PID Parameter Tuning
+> 🗺️ [[servo-can-hub|CAN 文檔總覽]] · 🔀 42ES 對應 [[servo42es/07-pid-tuning|42ES PID 調校]]
+
+> 🔀 **vs 42ES：** 42ES **無 CAN 設 PID 指令**（無 0x96/0x97 等效），三環 FOC 參數不可經 CAN 調；本頁 0x96/0x97 機制為 42D 專屬。
 
 **Warning: MKS motors have factory-tuned PID. Adjust with extreme caution to avoid motor damage.**
 

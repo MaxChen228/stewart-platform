@@ -1,5 +1,11 @@
 # Homing & Zero-Point Setting
 
+> 🗺️ [[servo-can-hub|CAN 文檔總覽]] · 🔀 42ES 對應 [[servo42es/08-homing-zeroing|Homing & Zero-Point Setting (42ES/57ES)]]
+
+> 🔀 **vs 42ES：** 42D 把模式/方向/速度/EndLimit/hm_mode 全擠進單一 **`0x90`**，力矩/偏移走 `0x94`，無獨立的觸發法/逾時命令。42ES 把歸零拆成 **五個獨立命令碼**（`0x95`/`0x96`/`0x97`/`0x92`/`0x91`），故 42D 的 `0x90`/`0x94` 在 42ES 不存在。詳見 [[servo42es/08-homing-zeroing|42ES]]。
+
+> 🔀 **vs 42ES SAVE：** 42D 歸零參數寫即生效/即存。42ES 必須下 `0x60` SAVE 才落 NVS（不存則斷電丟失）——見 [[servo42es/08-homing-zeroing|42ES]]。
+
 ## Four Homing Methods
 
 1. **Direct zero point (0x92)**: Sets current position as zero. Low precision.

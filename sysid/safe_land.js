@@ -25,10 +25,9 @@ Options:
   --landing POSE      Relative support landing pose (default 0,0,10,0,0,0)
 
 Sequence:
-  H
-  P <server home pose> <home-ms>
-  P <landing pose> <land-ms>
-  D
+  P <server home pose> <home-ms>   # to home
+  P <landing pose> <land-ms>       # to release pose
+  D                                # power off (release motors)
 `);
 }
 
@@ -116,10 +115,9 @@ async function buildPlan(opts) {
   const home = await loadHomePose(opts);
   const landing = await loadLandingPose(opts);
   return [
-    { cmd: 'H', wait: 600, note: 'hold current pose' },
-    { cmd: `P ${poseLine(home)} ${opts.homeMs}`, wait: opts.homeMs + 400, note: 'return to configured home' },
-    { cmd: `P ${poseLine(landing)} ${opts.landMs}`, wait: opts.landMs + 500, note: 'move to support landing pose' },
-    { cmd: 'D', wait: 300, note: 'release onto support' },
+    { cmd: `P ${poseLine(home)} ${opts.homeMs}`, wait: opts.homeMs + 400, note: 'to home' },
+    { cmd: `P ${poseLine(landing)} ${opts.landMs}`, wait: opts.landMs + 500, note: 'to release pose' },
+    { cmd: 'D', wait: 300, note: 'power off (release motors)' },
   ];
 }
 
