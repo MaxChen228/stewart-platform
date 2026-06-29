@@ -145,6 +145,9 @@ struct TelemetrySnapshot {
     TelemetryExtra extra;
     float hold[NUM_MOTORS], herr[NUM_MOTORS], hmax;
     float holdDampGain, holdDampMax, holdDampCorrMax;
+    float holdIntC[NUM_MOTORS], holdKiSnap[NUM_MOTORS];   // 積分輸出（角度域）+ 當前增益
+    float holdIClamp, holdIDead, holdISettle;             // 護欄快照（供前端反映真值）
+    int holdIntSaved;                                     // dirty flag（已存=1）
     float fkPose[6], poseErr[6], motorTgt[NUM_MOTORS];
     int fkIterations;
     float jointGain;
@@ -1021,12 +1024,18 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
         teleAppend(line, sizeof(line), pos, ",\"hold\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                       "\"herr\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],"
                       "\"hmax\":%.2f,"
-                      "\"od\":[%.4f,%.2f,%.2f]",
+                      "\"od\":[%.4f,%.2f,%.2f],"
+                      "\"hi\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                      "\"hki\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f],"
+                      "\"hig\":[%.3f,%.3f,%.3f],\"hisaved\":%d",
             s.hold[0],s.hold[1],s.hold[2],
             s.hold[3],s.hold[4],s.hold[5],
             s.herr[0],s.herr[1],s.herr[2],s.herr[3],s.herr[4],s.herr[5],
             s.hmax,
-            s.holdDampGain, s.holdDampMax, s.holdDampCorrMax);
+            s.holdDampGain, s.holdDampMax, s.holdDampCorrMax,
+            s.holdIntC[0],s.holdIntC[1],s.holdIntC[2],s.holdIntC[3],s.holdIntC[4],s.holdIntC[5],
+            s.holdKiSnap[0],s.holdKiSnap[1],s.holdKiSnap[2],s.holdKiSnap[3],s.holdKiSnap[4],s.holdKiSnap[5],
+            s.holdIClamp, s.holdIDead, s.holdISettle, s.holdIntSaved);
     } else if (s.extra == TELEM_EXTRA_TASK) {
         teleAppend(line, sizeof(line), pos, ",\"fk\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
                       "\"err\":[%.1f,%.1f,%.1f,%.2f,%.2f,%.2f],"
@@ -2170,6 +2179,14 @@ static void controlTick() {
         snap.holdDampGain = holdDampGainSec;
         snap.holdDampMax = holdDampMaxDeg;
         snap.holdDampCorrMax = holdDampCorrMaxWin;
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            snap.holdIntC[i] = holdIntCorr[i];
+            snap.holdKiSnap[i] = holdKi[i];
+        }
+        snap.holdIClamp = holdIClampDeg;
+        snap.holdIDead = holdIDeadbandDeg;
+        snap.holdISettle = holdISettleDps;
+        snap.holdIntSaved = holdIntCfgSaved ? 1 : 0;
     } else if (posEnabled && controlMode == 1) {
         const Pose& fk = tsController.currentPose;
         const Pose& er = tsController.poseError;
