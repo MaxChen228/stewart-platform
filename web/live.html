@@ -86,6 +86,7 @@
   <span class="grp"><span class="lbl">來源</span>
     <span class="seg">
       <button id="src-desktop" class="seg-btn" title="拖滑桿即時驅動（desktop owner）">🎯 拖滑桿</button>
+      <button id="src-phone" class="seg-btn" title="手機陀螺儀驅動（phone owner，掃 QR 開手機頁）">📱 手機</button>
       <button id="src-sim" class="seg-btn active" title="合成手機運動 generator（sim owner，不開 phone-capture）">🤖 模擬</button>
     </span>
   </span>
@@ -97,8 +98,10 @@
     <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
     <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
   </span>
-  <!-- 拖滑桿來源控制 -->
-  <span id="ctl-desktop" class="grp" style="display:none; gap:14px">
+  <!-- 手機來源提示 -->
+  <span id="ctl-phone" class="grp lbl" style="display:none">掃左側 QR → 手機點「校正」→ 按「串接板子」交棒 → 傾斜手機即時驅動</span>
+  <!-- 跟隨來源（拖滑桿 / 手機）共用：緊度 + 延遲 -->
+  <span id="ctl-follow" class="grp" style="display:none; gap:14px">
     <label class="grp" title="跟隨緊度（單旋鈕，越大跟越緊）：統管 vmax/加速/jerk/趨近增益"><span class="lbl">跟隨緊度</span><input id="tight" type="range" min="0" max="100" value="50"><b id="tightv" class="mono" style="color:var(--contra);min-width:36px;display:inline-block">50%</b></label>
     <span class="lbl" title="延遲（真實量測）：e2e=指令→實際 felt-lag；傳輸=板→server 遙測新鮮度">延遲 e2e <b id="lat-e2e" style="color:var(--ink)">—</b> · 傳輸 <b id="lat-tele" style="color:var(--ink)">—</b></span>
   </span>
@@ -125,6 +128,12 @@
       <div class="hd">拖滑桿驅動 · 相對 home</div>
       <div id="sl-rows" class="sl-rows"></div>
       <button id="sl-center" class="chip" style="width:100%; margin-top:9px; font-size:11px">↺ 回中位</button>
+    </div>
+    <div class="float" id="phonepanel" style="display:none; top:12px; left:12px; width:236px; text-align:center">
+      <div class="hd">手機配對 · 掃 QR 開手機頁</div>
+      <img id="phone-qr" alt="QR" style="width:200px; height:200px; background:#fff; border:1px solid var(--borderL); border-radius:6px">
+      <div id="phone-url" class="mono" style="font-size:10px; color:var(--sub); margin-top:8px; word-break:break-all">—</div>
+      <div id="phone-ca" style="display:none; font-size:10px; color:var(--sub); margin-top:6px">首次需 <a id="phone-ca-link" href="#" style="color:var(--contra)">下載 mkcert CA</a> 信任憑證</div>
     </div>
   </div>
   <div class="pane" id="paneR">
@@ -334,7 +343,7 @@ const btn = document.getElementById('btn'), statEl = document.getElementById('st
 const speedEl = document.getElementById('speed'), speedvEl = document.getElementById('speedv'), driveBtn = document.getElementById('drive');
 const bdot = document.getElementById('bdot'), bstat = document.getElementById('bstat');
 let ws3 = null, ws3Timer = null;
-let currentSource = 'sim';   // 'sim' | 'desktop'（A3 加 'phone'）
+let currentSource = 'sim';   // 'sim'(SSE generator) | 'desktop'(拖滑桿) | 'phone'(陀螺儀)
 let driving = false;         // 板子正被本頁所選來源驅動
 let lastTele = null;         // 最近一幀完整遙測（pos/hold 給起飛狀態機）
 
@@ -355,6 +364,7 @@ function connect3000() {
     if (d.evt === 'transport') { setBoard(d.state === 'connected'); return; }
     if (d.evt === 'mode') { onModeBroadcast(d.owner); return; }
     if (d.evt === 'latency') { onLatency(d); return; }
+    if (d.evt === 'followtgt') { onFollowTgt(d.pose); return; }
     if (Array.isArray(d.a)) {
       lastTele = d;
       const fk = Kin.solveFK(d.a);
@@ -377,6 +387,20 @@ function onLatency(d) {
   const e2e = document.getElementById('lat-e2e'), tele = document.getElementById('lat-tele');
   if (e2e) { if (d.e2e == null) { e2e.textContent = d.following ? '量測中…' : '—'; e2e.style.color = 'var(--sub)'; } else { e2e.textContent = Math.round(d.e2e) + ' ms'; e2e.style.color = d.e2e < 150 ? '#326f63' : d.e2e < 300 ? '#b2642c' : '#b73b36'; } }
   if (tele) { tele.textContent = d.teleAge == null ? '—' : Math.round(d.teleAge) + ' ms'; tele.style.color = (d.teleAge != null && d.teleAge < 120) ? 'var(--ink)' : '#b2642c'; }
+}
+// 手機來源：server 廣播 evt:'followtgt'（手機即時陀螺儀目標，25Hz）→ 綠 ghost 鏡像手機意圖（本頁不串 PF，phone.html 自串）。
+function onFollowTgt(pose) {
+  if (currentSource !== 'phone' || !Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
+  ghostArrive(pose); pushWave(simWave, [pose[3], pose[4], pose[5]]); elSim.textContent = fmt3(pose);
+}
+// 手機配對面板（QR → phone.html；netinfo 給 URL/mkcert CA）。
+async function openPhonePanel() {
+  let info = {};
+  try { info = await (await fetch('/api/netinfo')).json(); } catch {}
+  document.getElementById('phone-url').textContent = info.phoneUrl || '(server 未提供)';
+  document.getElementById('phone-ca').style.display = info.mkcert ? '' : 'none';
+  if (info.caUrl) document.getElementById('phone-ca-link').href = info.caUrl;
+  document.getElementById('phone-qr').src = '/api/qrcode';
 }
 
 // ============ PF 串接（節流 ~100Hz；僅 driving 且本來源產生意圖時送）============
@@ -474,18 +498,19 @@ tightEl.addEventListener('input', () => { const pct = Number(tightEl.value); tig
 tightEl.addEventListener('change', () => { _feLast = performance.now(); sendFE(Number(tightEl.value)); });
 
 // ============ 來源切換（串接中鎖定）============
-function lockSourceUI(lock) { document.getElementById('src-sim').disabled = lock; document.getElementById('src-desktop').disabled = lock; }
+function lockSourceUI(lock) { for (const id of ['src-sim', 'src-desktop', 'src-phone']) document.getElementById(id).disabled = lock; }
 function showSourceControls() {
-  const sim = currentSource === 'sim', desk = currentSource === 'desktop';
+  const sim = currentSource === 'sim', desk = currentSource === 'desktop', phone = currentSource === 'phone';
   document.getElementById('ctl-sim').style.display = sim ? '' : 'none';
-  document.getElementById('ctl-desktop').style.display = desk ? '' : 'none';
+  document.getElementById('ctl-follow').style.display = (desk || phone) ? '' : 'none';   // 緊度+延遲 = 跟隨來源共用
+  document.getElementById('ctl-phone').style.display = phone ? '' : 'none';
   document.getElementById('legend').style.display = sim ? '' : 'none';
   document.getElementById('conv').style.display = sim ? '' : 'none';
   document.getElementById('sliders').style.display = desk ? '' : 'none';
+  document.getElementById('phonepanel').style.display = phone ? '' : 'none';
   accumPts.visible = sim && document.getElementById('ck-accum').checked;
   cloudPhone.visible = sim && document.getElementById('ck-phone').checked;
-  document.getElementById('src-sim').classList.toggle('active', sim);
-  document.getElementById('src-desktop').classList.toggle('active', desk);
+  for (const [id, on] of [['src-sim', sim], ['src-desktop', desk], ['src-phone', phone]]) document.getElementById(id).classList.toggle('active', on);
 }
 function setSource(src) {
   if (src === currentSource || driving) return;   // 串接中不可換來源（先按停）
@@ -496,9 +521,11 @@ function setSource(src) {
   showSourceControls();
   statEl.textContent = '待機';
   if (src === 'desktop') onSlider();               // 立即顯示滑桿 ghost
+  if (src === 'phone') openPhonePanel();           // 彈 QR 供掃碼配對
 }
 document.getElementById('src-sim').onclick = () => setSource('sim');
 document.getElementById('src-desktop').onclick = () => setSource('desktop');
+document.getElementById('src-phone').onclick = () => setSource('phone');
 
 // ============ 串接驅動：先起飛回 home（D/H/E 狀態機，與主控頁同邏輯），到位才 MODE <來源> ============
 function armState() {
