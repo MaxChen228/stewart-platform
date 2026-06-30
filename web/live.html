@@ -72,12 +72,7 @@
 <body>
 <header class="app-top">
   <div class="app-top-left"><span class="app-title">串流台</span></div>
-  <nav class="app-nav" aria-label="nav">
-    <a class="app-link" href="/" title="定點控制（設目標 → GO，走 P 最優軌跡）">主控</a>
-    <a class="app-link active" href="/live.html" title="即時串流（拖滑桿／手機／模擬）">即時</a>
-    <a class="app-link" href="/workspace.html" title="Program Workspace">Workspace</a>
-    <a class="app-link" href="/research/runs.html" title="Session 執行紀錄">Runs</a>
-  </nav>
+  <nav class="app-nav" data-app-nav aria-label="nav"></nav>
   <div class="app-top-left" style="justify-self:end; gap:10px;">
     <span class="dev-label">板子 <span id="bdot" class="dot"></span> <span id="bstat">未連線</span></span>
     <button id="drive" class="chip danger" title="把所選來源的 PF 串到板子（先起飛回 home 再交棒）">⛓ 串接板子</button>
@@ -581,5 +576,6 @@ driveBtn.onclick = () => (driving ? exitDrive() : enterDrive());
 showSourceControls();
 addEventListener('beforeunload', () => { if (driving && wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' })); });
 </script>
+<script src="/shared/app-nav.js" defer></script>
 </body>
 </html>

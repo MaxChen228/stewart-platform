@@ -608,12 +608,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 <!-- Nav Bar -->
 <nav class="nav">
   <div class="nav-brand">PHYSICS_LAB</div>
-  <nav class="app-nav nav-center" aria-label="Main navigation">
-    <a class="app-link active" href="/" title="定點控制（設目標 → GO，走 P 最優軌跡）">主控</a>
-    <a class="app-link" href="/live.html" title="即時串流（拖滑桿／手機／模擬）">即時</a>
-    <a class="app-link" href="/workspace.html" title="Program Workspace">Workspace</a>
-    <a class="app-link" href="/research/runs.html" title="Session 執行紀錄">Runs</a>
-  </nav>
+  <nav class="app-nav nav-center" data-app-nav aria-label="Main navigation"></nav>
   <div class="nav-right">
     <div id="session-badge" class="nav-session" title="manual control / program session ownership">MANUAL</div>
     <div id="transport" class="nav-transport busy" title="server↔平台 傳輸鏈">⋯ 偵測中</div>
@@ -2519,5 +2514,6 @@ updateDisturbUi();
 
 connectWS();
 </script>
+<script src="/shared/app-nav.js" defer></script>
 </body>
 </html>

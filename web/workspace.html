@@ -218,12 +218,7 @@ body { min-height: 100vh; overflow: hidden; }
     <div class="app-top-left">
       <div class="app-title">Program Workspace</div>
     </div>
-    <nav class="app-nav" aria-label="Main navigation">
-      <a class="app-link" href="/">主控</a>
-      <a class="app-link active" href="/workspace.html">Workspace</a>
-      <a class="app-link" href="/phone.html">Phone</a>
-      <a class="app-link" href="/research/runs.html">Runs</a>
-    </nav>
+    <nav class="app-nav" data-app-nav aria-label="Main navigation"></nav>
     <div class="app-top-left">
       <span id="session-badge" class="status-pill">MANUAL</span>
       <span id="transport-badge" class="status-pill">TRANSPORT</span>
@@ -1521,5 +1516,6 @@ await loadRuns();
 connectWS();
 setTimeline(0, 0, workspaceDurationSeconds(), 'ready');
 </script>
+<script src="/shared/app-nav.js" defer></script>
 </body>
 </html>

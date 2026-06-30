@@ -148,12 +148,7 @@
     <div class="app-top-left">
       <span class="app-title">執行紀錄</span>
     </div>
-    <nav class="app-nav" aria-label="Main navigation">
-      <a class="app-link" href="/">主控</a>
-      <a class="app-link" href="/workspace.html">Workspace</a>
-      <a class="app-link" href="/phone.html">Phone</a>
-      <a class="app-link active" href="/research/runs.html">Runs</a>
-    </nav>
+    <nav class="app-nav" data-app-nav aria-label="Main navigation"></nav>
   </div>
   <div class="app-heading">執行紀錄</div>
   <div class="app-hint">每筆 session 的波形、軌跡回放、參數、摘要與原始檔集中查閱。</div>
@@ -1123,5 +1118,6 @@ loadRuns().catch(err => {
   $('run-list').innerHTML = `<div class="empty-state">讀取失敗：${esc(err.message)}</div>`;
 });
 </script>
+<script src="/shared/app-nav.js" defer></script>
 </body>
 </html>
