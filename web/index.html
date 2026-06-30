@@ -682,19 +682,7 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
           <div class="live-motor-cell" id="he-5"><div class="matrix-cell-label">M6</div><div class="matrix-cell-value">—</div></div>
         </div>
       </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button class="chip zbtn" id="follow-toggle" onclick="toggleFollow()" disabled style="flex:1;font-weight:600" title="電腦模式：拖滑桿即時跟隨（速度受限，拖快不硬撲）。需先 HOLD。手機模式啟用時鎖定。">🎯 跟隨模式 OFF</button>
-        <button class="chip" id="gyro-btn" onclick="toggleGyroMode()" style="flex:0 0 auto;font-weight:600" title="手機模式：用手機陀螺儀獨立驅動平台（與電腦滑桿互斥，兩個獨立世界）。掃 QR 開手機頁、傾斜手機即時驅動。">📱 手機模式</button>
-      </div>
-      <div id="follow-latency" style="margin-top:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#766f67;display:flex;gap:10px;justify-content:space-between" title="跟隨延遲（真實量測）：e2e=指令→實際 felt-lag（含濾波器+馬達，server 對指令角 vs 編碼器角互相關，需有動作才有值）；傳輸=板→server 遙測新鮮度（永遠可見的傳輸+感測地板）">
-        <span>延遲 e2e <b id="lat-e2e" style="color:#27231f">—</b></span>
-        <span>傳輸 <b id="lat-tele" style="color:#27231f">—</b></span>
-      </div>
-      <label class="param-row" style="grid-template-columns:64px minmax(0,1fr) 48px;margin-top:8px" title="跟隨緊度（單旋鈕，越大跟越緊）：一鈕統管 vmax／加速時間／jerk／趨近增益 K。大＝撲得快、收尾緊；小＝柔順、遲緩。">
-        <span>跟隨緊度</span>
-        <input type="range" id="follow-tight" min="0" max="100" value="50" step="1">
-        <output id="follow-tight-v">50%</output>
-      </label>
+      <div class="dev-label" style="margin-top:8px">即時串流（拖滑桿／手機／模擬）已移至 <a href="/live.html" style="color:var(--contra)">即時串流台</a>。本頁＝定點控制（設目標→GO）。</div>
     </div>
 
     <!-- 2. 擾動控制（單一強度 + 隨機標準模態；擾動數學走 DisturbModes SoT）-->
@@ -1232,7 +1220,6 @@ function poseUpdateGhost() {
   const st = document.getElementById('pose-ctl-status');
   if (!poseReachable) { st.textContent = '✗ 此組合超工作空間'; st.style.color = '#C0392B'; }
   else { st.textContent = ''; st.style.color = 'var(--sub)'; }
-  if (followActive && poseReachable) streamPF(ghostTarget);   // 跟隨：滑桿即時串流 PF
 }
 POSE_AXES.forEach(([id]) => document.getElementById(id).addEventListener('input', () => { poseUpdateGhost(); savePlatformConfigSoon(); }));
 // Home 姿態（絕對 pose）：HOME 鍵與實驗腳本共用的目的地。
@@ -1459,16 +1446,12 @@ function sendPoseCommand(pose, label) {
   return prof;
 }
 
-// 「到達指定位置」鐵律：HOME/RELEASE/GO 是離散 pose 目標 → 一律走 P min-jerk（最優波形），
-// 絕不走 PF 串流濾波器。若正在跟隨，先退串流：韌體 followStep 會壓過 P 軌跡，必須先 FOLLOW 0。
-// MODE off 釋放 owner（server 轉 FOLLOW 0）；followReset 立即停本地 PF pump（不等遙測往返）。
-// FOLLOW 0 不動 holdMode → 退出後 holdMode 仍 true、P 立即可用、isHolding 不掉。
+// 「到達指定位置」鐵律：HOME/RELEASE/GO 是離散 pose 目標 → 一律走 P min-jerk（最優波形），絕不走 PF。
+// 即時串流已全移到串流台(/live.html)；本頁按定點前一律先送 MODE off：釋放串流台可能持有的任何 owner
+// （server 轉 FOLLOW 0，followStep 不再壓過 P 軌跡）。FOLLOW 0 不動 holdMode → 退出後 holdMode 仍 true、
+// P 立即可用、isHolding 不掉。無 owner 時 MODE off 為 no-op（FOLLOW 0 對非跟隨無害）。
 function exitFollowForDiscrete() {
-  cancelArm();   // 作廢進行中的起飛編排（離散 P 指令搶佔，避免兩條 P 鏈衝突）
-  // 退出任何串流 owner（desktop 滑桿跟隨 或 phone 陀螺儀）→ 韌體 FOLLOW 0、followStep 不再壓過 P。
-  // 不分 owner：操作員按到達指定位置 = 接管控制權並走 P；phone 端見 owner 釋放即停止串流。
-  if (controlMode === 'desktop' || controlMode === 'phone') window.sendCmd('MODE off');
-  if (followActive) followReset();
+  window.sendCmd('MODE off');
 }
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
@@ -1484,7 +1467,7 @@ window.poseHome = function() {
   // 回到 homePose（預設中位，或經「存 Home」設定的姿態）。到達指定位置一律走 P（跟隨中先退串流）。
   exitFollowForDiscrete();
   poseApplyHomeToSliders();
-  poseUpdateGhost();   // followActive 已 false → 不會 streamPF stale 值
+  poseUpdateGhost();   // 更新綠色 ghost 目標預覽
   const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   sendPoseCommand(pose, 'HOME');
@@ -1522,244 +1505,6 @@ window.poseSetRelease = function() {
 };
 document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfigSoon);
 
-// ===== 跟隨模式：FOLLOW 1/0 + PF target updates =====
-// Browser 只提交最新人機輸入；server 只做 latest-wins 轉送，
-// ESP32 以固定 control tick 產生 acceleration/jerk limited PF reference。
-let followActive = false;
-const PF_PUMP_MS = 10;              // 100Hz post 上限（server resampler 擁 100Hz emit clock，此處只防爆量非節流手感）；舊 33ms=30Hz 是瀏覽器當時鐘時代遺毒
-const PF_POSE_EPS = 0.001;
-let _pfPending = null, _pfLast = 0, _pfTrailTimer = null, _pfLastSent = null;
-function _pfPoseDelta(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b)) return Infinity;
-  let m = 0;
-  for (let i = 0; i < 6; i++) m = Math.max(m, Math.abs(Number(a[i]) - Number(b[i])));
-  return m;
-}
-function _pfSend(pose) {
-  _pfLast = performance.now();
-  _pfLastSent = pose.slice();
-  window.sendCmd(`PF ${pose.map(x=>x.toFixed(3)).join(' ')}`);
-}
-// Event-driven leading+trailing throttle. No idle self-rescheduling timer: the
-// browser only posts the latest intent when sliders/sensors change; server.js
-// re-emits it at a steady 100Hz and holds it when input stops. This frees the
-// main thread (was a perpetual 30Hz setTimeout competing with rendering).
-function _pfFlush() {
-  _pfTrailTimer = null;
-  if (!followActive || sessionState.active || !wsConnected) { _pfPending = null; return; }
-  const target = _pfPending; _pfPending = null;
-  if (!Array.isArray(target) || target.length !== 6 || !target.every(Number.isFinite)) return;
-  if (!window.Kin.ik(target).valid) return;          // don't post unreachable poses
-  if (!_pfLastSent || _pfPoseDelta(_pfLastSent, target) > PF_POSE_EPS) _pfSend(target);
-}
-function streamPF(pose) {
-  _pfPending = pose.slice();
-  if (!followActive || sessionState.active) { _pfPending = null; return; }
-  const dt = performance.now() - _pfLast;
-  if (dt >= PF_PUMP_MS) {
-    if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
-    _pfFlush();
-  } else if (!_pfTrailTimer) {
-    _pfTrailTimer = setTimeout(_pfFlush, PF_PUMP_MS - dt);
-  }
-}
-function updateFollowUI() {
-  const b = document.getElementById('follow-toggle');
-  if (!b) return;
-  b.textContent = followActive ? '🎯 跟隨模式 ON · 拖滑桿即時跟' : '🎯 跟隨模式 OFF';
-  b.style.background = followActive ? 'var(--contra)' : '';
-  b.style.color = followActive ? '#fff' : '';
-}
-window.toggleFollow = async function() {
-  // 電腦模式 = 滑桿跟隨。改走 MODE（owner 仲裁）而非裸 FOLLOW：server 轉 FOLLOW 1/0 給韌體，
-  // 並把 controlOwner 設成 'desktop'（鎖掉手機模式）。followActive 仍待韌體 {status:"follow on"} 才設真。
-  // 進入前一律先用 P 把平台帶到 home（起飛），到位才 MODE desktop 進串流。
-  if (controlMode === 'desktop') { window.sendCmd('MODE off'); return; }
-  if (_armRun) return;                          // 起飛進行中(含手機路徑，共用守衛)，忽略重複點擊
-  const b = document.getElementById('follow-toggle');
-  if (b) b.textContent = '⤴ 起飛中…';
-  const ok = await armToHome('跟隨');            // armToHome 自管 _armRun；搶佔/即時復原由 cancelArm 處理
-  if (ok) window.sendCmd('MODE desktop');        // → server FOLLOW 1 → onFollowOn 啟用串流
-  else updateFollowUI();                          // 起飛失敗/被搶佔 → 復原按鈕文字
-};
-// 手機模式 = 手機陀螺儀獨立驅動。與電腦模式互斥（server owner 仲裁）。進入前同樣先用 P 帶到 home(起飛)，
-// 到位才 MODE phone 交棒；QR 配對面板先彈讓使用者掃，起飛同時進行。phone.html 由 server owner 廣播
-// 驅動 followActive，唯一進入點就是此處 MODE phone → 起飛閘完整覆蓋手機模式。
-window.toggleGyroMode = async function() {
-  if (controlMode === 'phone') { window.sendCmd('MODE off'); return; }
-  if (_armRun) return;                          // 起飛進行中(含電腦路徑，共用守衛)，忽略重複點擊
-  const gb = document.getElementById('gyro-btn');
-  if (gb) gb.textContent = '⤴ 起飛中…';          // 與 follow 路徑對稱的起飛回饋
-  window.openPhonePanel();                       // 先彈 QR：起飛同時可掃碼配對
-  const ok = await armToHome('手機模式');
-  if (ok) window.sendCmd('MODE phone');          // 到 home 才交棒給手機，phone.html 從 home 起串流；成功時 owner 廣播會改鈕文字
-  else { window.closePhonePanel(); if (gb && controlMode !== 'phone') gb.textContent = '📱 手機模式'; }   // 失敗/被搶佔：關面板、復原鈕
-};
-// server 廣播 evt:'mode' 的權威狀態 → 落實兩個互斥世界的 UI 鎖定。
-let controlMode = null;   // null | 'desktop' | 'phone'
-function updateControlMode(owner) {
-  controlMode = (owner === 'desktop' || owner === 'phone') ? owner : null;
-  if (controlMode !== 'desktop' && followActive) followReset();   // 退出電腦模式 → 清本地串流
-  refreshCommandLocks();   // 互斥 disable（滑桿/兩鈕）統一在此套用
-  const gb = document.getElementById('gyro-btn');
-  if (gb) {
-    const phone = controlMode === 'phone';
-    gb.textContent = phone ? '📱 手機模式 ON' : '📱 手機模式';
-    gb.style.borderColor = phone ? '#27AE60' : '';
-    gb.style.background = phone ? 'rgba(39,174,96,.12)' : '';
-    gb.style.color = phone ? '#1d7a4a' : '';
-  }
-}
-// 韌體確認進跟隨 → 用回傳的絕對 pose 同步滑桿+ghost（不跳），再啟用串流
-function onFollowOn(pose) {
-  const off = [pose[0], pose[1], pose[2] - NEUTRAL_Z, pose[3], pose[4], pose[5]];
-  for (const [id, idx] of POSE_AXES) {
-    const el = document.getElementById(id);
-    el.value = Math.max(+el.min, Math.min(+el.max, off[idx]));   // clamp 進滑桿範圍
-  }
-  poseUpdateGhost();          // 此時 followActive 仍 false → 不會 streamPF stale 值
-  followActive = true;
-  _pfLast = 0;
-  _pfLastSent = null;
-  updateFollowUI();
-  streamPF(ghostTarget || pose);
-}
-function followReset() {
-  followActive = false;
-  _pfPending = null;
-  _pfLastSent = null;
-  if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
-  updateFollowUI();
-}
-
-// ===== 即時控制起飛編排：進入任何串流(跟隨/手機)前，一律先用 P 把平台帶到 home =====
-// 鐵律：串流即時控制只從 home 起；「到達指定位置」只走 P。依當前狀態分支：
-//   D(pos=0,斷電)  → 起飛：H(抓當前下垂、使能死咬) → P release(經 landing 暫存) → P home
-//   H(死咬中)      → 直達：P home
-//   E(使能非死咬)  → 先 H 再 P home
-// 各段用 poseCommandMs 算的 min-jerk 時長串接(deterministic timer，與韌體 holdMoveMs 同源)；
-// re-entrancy(token) / 不可達 / 斷線 一律中止。回傳 true=已到 home，可進串流。
-let _armToken = 0, _armRun = 0;   // _armRun = 進行中起飛的 token(0=無)；token-guard 避免舊 run 的 finally 清掉新 run 旗標
-const ARM_SETTLE_MS = 220;   // 每段完成後安定餘裕(指令往返 + 積分落定)
-const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
-function cancelArm() {   // 作廢進行中的起飛並即時解鎖(被離散 P 指令或退串流搶佔)
-  _armToken++;
-  if (_armRun) { _armRun = 0; updateFollowUI(); }   // 即時復原 follow 鈕「起飛中…」標籤，不卡到舊鏈 finally
-}
-function _armState() {
-  const t = scope.last;
-  if (!t || !wsConnected) return 'offline';
-  if (!t.pos) return 'D';                 // 斷電
-  if (Array.isArray(t.hold)) return 'H';  // 死咬中(holdAngles 快照存在)
-  return 'E';                             // 使能但非死咬(mode 0/1)
-}
-function _armStatus(msg, color) {
-  const st = document.getElementById('pose-ctl-status');
-  if (st) { st.textContent = msg; st.style.color = color || 'var(--sub)'; }
-}
-// 送一段 P 並等它走完(時長 = 韌體 holdMoveMs 同源)；token 失效或斷線即中止。
-async function _armSegmentP(pose, label, token) {
-  if (!wsConnected) { _armStatus('✗ 起飛中止：未連線', 'var(--dev)'); return false; }   // 送 P 前先確認連線(別發到斷線的洞裡)
-  if (!window.Kin.ik(pose).valid) { _armStatus(`✗ 起飛中止：${label} 超工作空間`, 'var(--dev)'); return false; }
-  const prof = poseCommandMs(pose);
-  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${prof.ms}`);
-  _armStatus(`⤴ 起飛 → ${label} (${prof.ms}ms)…`, 'var(--dual)');
-  await _sleep(prof.ms + ARM_SETTLE_MS);
-  if (token !== _armToken) return false;                 // 被新動作搶佔
-  if (!wsConnected) { _armStatus('✗ 起飛中止：連線中斷', 'var(--dev)'); return false; }
-  return true;
-}
-async function armToHome(reason) {
-  const token = ++_armToken;                             // 搶佔任何進行中的起飛
-  _armRun = token;
-  try {
-    const st0 = _armState();
-    if (st0 === 'offline') { _armStatus('✗ 未連線，無法起飛', 'var(--dev)'); return false; }
-    const home = homePose.slice();
-    if (!window.Kin.ik(home).valid) { _armStatus('✗ home 超工作空間', 'var(--dev)'); return false; }
-    if (st0 === 'D') {
-      window.sendCmd('H');                               // 抓當前下垂、使能死咬
-      await _sleep(ARM_SETTLE_MS);
-      if (token !== _armToken || !wsConnected) return false;
-      if (!await _armSegmentP(releasePose.slice(), 'release', token)) return false;
-      if (!await _armSegmentP(home, 'home', token)) return false;
-    } else {
-      if (st0 === 'E') {                                 // 使能非死咬 → 先 H 抓當前再走 P
-        window.sendCmd('H'); await _sleep(ARM_SETTLE_MS);
-        if (token !== _armToken || !wsConnected) return false;
-      }
-      if (!await _armSegmentP(home, 'home', token)) return false;
-    }
-    if (token !== _armToken) return false;
-    _armStatus(`✓ 已到 home → 進入${reason || '即時控制'}`, 'var(--sub)');
-    return true;
-  } finally {
-    if (_armRun === token) _armRun = 0;                  // 只清自己的 run；被搶佔/新 run 接手則不動
-  }
-}
-
-// ===== 跟隨延遲即時顯示（server evt:'latency'，真實量測）=====
-// e2e = 指令→實際 felt-lag（互相關，需有動作）；tele = 板→server 遙測新鮮度（傳輸+感測地板，永遠可見）。
-function updateLatencyUi(d) {
-  const e2e = document.getElementById('lat-e2e');
-  const tele = document.getElementById('lat-tele');
-  if (e2e) {
-    if (d.e2e == null) { e2e.textContent = d.following ? '量測中…' : '—'; e2e.style.color = '#766f67'; }
-    else { e2e.textContent = Math.round(d.e2e) + ' ms'; e2e.style.color = d.e2e < 150 ? '#326f63' : d.e2e < 300 ? '#b2642c' : '#b73b36'; }
-  }
-  if (tele) {
-    tele.textContent = d.teleAge == null ? '—' : Math.round(d.teleAge) + ' ms';
-    tele.style.color = (d.teleAge != null && d.teleAge < 120) ? '#27231f' : '#b2642c';
-  }
-}
-
-// ===== 跟隨來源（手機陀螺儀／其他 client）的 live 目標 → 綠色 ghost =====
-// server 廣播 evt:'followtgt'（25Hz）。followActive 時把綠 ghost 設成該目標（不串流、不回授），
-// 紅維持遙測實際。對齊「綠=意圖(手機現在陀螺儀姿態)、紅=板子實際」心智模型。
-// 若 dashboard 自己剛串過 PF（拖滑桿），_pfLast 新鮮 → 跳過，讓本地滑桿 ghost 為準。
-function onRemoteFollowTgt(pose) {
-  // 手機模式：電腦端純觀察，綠 ghost 鏡像手機即時陀螺儀目標（即使本地 followActive=false）。
-  // 電腦模式：本地剛拖滑桿（_pfLast 新鮮）則讓本地 ghost 為準，跳過遠端。
-  const watch = controlMode === 'phone' || followActive;
-  if (!watch || !Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
-  if (performance.now() - _pfLast < 250) return;
-  ghostTarget = pose.slice();
-  poseReachable = window.Kin.ik(ghostTarget).valid;
-  const hex = poseReachable ? 0x27AE60 : 0xC0392B;
-  ghostMat.color.setHex(hex);
-  ghostPlatMesh.material.color.setHex(hex);
-  updateGhost();
-}
-
-// ===== 手機陀螺儀配對面板（QR → phone.html）=====
-// 主腳本是 <script type="module">：inline onclick 只看得到 window.* → 必須掛 window。
-window.openPhonePanel = async function() {
-  let info = {};
-  try { info = await (await fetch('/api/netinfo')).json(); } catch {}
-  document.getElementById('phone-url').textContent = info.phoneUrl || '(server 未提供)';
-  document.getElementById('phone-ca').style.display = info.mkcert ? '' : 'none';
-  if (info.caUrl) document.getElementById('phone-ca-link').href = info.caUrl;
-  document.getElementById('phone-qr').src = '/api/qrcode';   // 不加 query：server 路由精確比對；no-store 已防快取
-  document.getElementById('phone-modal').style.display = 'flex';
-};
-window.closePhonePanel = function() { document.getElementById('phone-modal').style.display = 'none'; };
-
-// 跟隨緊度單旋鈕 → FE <0..1>（一鈕統管 vmax/accelT/jerkT/趨近增益 K，越大跟越緊）。
-// input 即時更新標籤 + ~10Hz 節流送 FE（避免拖動洗指令/灌爆 ack）；change 補送最終值確保落定。
-(function initFollowTight() {
-  const el = document.getElementById('follow-tight');
-  const out = document.getElementById('follow-tight-v');
-  if (!el) return;
-  let lastSentMs = 0;
-  const sendFE = (pct) => window.sendCmd(`FE ${(pct / 100).toFixed(3)}`);
-  el.addEventListener('input', () => {
-    const pct = Number(el.value);
-    if (out) out.textContent = pct + '%';
-    const now = performance.now();
-    if (now - lastSentMs >= 100) { lastSentMs = now; sendFE(pct); }   // ~10Hz 節流
-  });
-  el.addEventListener('change', () => { lastSentMs = performance.now(); sendFE(Number(el.value)); });  // 釋放補最終值
-})();
 
 // ===== 更新視覺化 =====
 function updateViz(motorAngles) {
@@ -1779,7 +1524,7 @@ function updateViz(motorAngles) {
 // 初始顯示 home（刷新後反映 homePose——含 localStorage 存的自訂 home，而非寫死中位）
 (function initPoseToHome(){
   poseApplyHomeToSliders();
-  poseUpdateGhost();              // 設 ghostTarget=home + 更新綠色 ghost（followActive 仍 false → 不串流）
+  poseUpdateGhost();              // 設 ghostTarget=home + 更新綠色 ghost 目標預覽
   updateViz(ik(homePose));        // 紅色初始 placeholder 也顯示 home（連線後由遙測覆蓋）
   poseLoadHomeFromServer();
 })();
@@ -1852,12 +1597,6 @@ function sessionBlocksCommand(cmd) {
 function refreshCommandLocks() {
   const manualEnabled = wsConnected && !sessionState.active;
   document.querySelectorAll('.zbtn').forEach(b => b.disabled = !manualEnabled);
-  // 控制權互斥：手機模式 → 鎖跟隨鈕 + 6 軸滑桿（電腦端純觀察）；電腦模式 → 鎖手機鈕。
-  const fb = document.getElementById('follow-toggle');
-  const gb = document.getElementById('gyro-btn');
-  if (fb && controlMode === 'phone') fb.disabled = true;
-  if (gb) gb.disabled = !manualEnabled || controlMode === 'desktop';
-  for (const [id] of POSE_AXES) { const el = document.getElementById(id); if (el) el.disabled = (controlMode === 'phone'); }
   const poseStatus = document.getElementById('pose-ctl-status');
   if (poseStatus && sessionState.active) {
     poseStatus.textContent = 'session 執行中：即時控制鎖定';
@@ -1906,11 +1645,7 @@ function connectWS() {
       if (data.evt === 'transport') { updateTransportBadge(data); return; }
       if (data.evt === 'session_event') return;
       if (data.evt === 'session') {
-        const wasActive = sessionState.active;
         sessionState = { active: !!data.active, owner: data.owner || 'manual', phase: data.phase || 'idle', label: data.label || '' };
-        if (sessionState.active && !wasActive) {
-          followReset();
-        }
         refreshCommandLocks();
         return;
       }
@@ -1919,9 +1654,7 @@ function connectWS() {
         btnResolve('fail');
         return;
       }
-      if (data.evt === 'latency') { updateLatencyUi(data); return; }
-      if (data.evt === 'mode') { updateControlMode(data.owner); return; }
-      if (data.evt === 'followtgt') { onRemoteFollowTgt(data.pose); return; }
+      // 即時串流(latency/mode/followtgt 廣播)歸串流台 /live.html；本頁＝定點控制，不訂閱。
 
       // HOLD 模式把鎖位目標餵進 scope 的 tgt 槽 → 角度疊圖/誤差圖/相圖在 HOLD 下都有意義；
       // 再交給單一監控引擎（波形/緩衝/FFT/事件全靠它，宿主 WS 是唯一傳輸源）
@@ -1949,9 +1682,6 @@ function connectWS() {
         setHoldingUI(holding, data.hmax);
         setEncoderHealthUI(data);
       }
-      // 韌體 followMode（"fl"）為權威，獨立於 pos 判斷：前端以為在跟隨但韌體已退出
-      // （failsafe/E/任何路徑）→ 同步歸零，避免持續送被靜默丟棄的 PF。
-      if (data.fl !== undefined && !data.fl && followActive) followReset();
 
       // Per-motor joint error
       if (data.herr) {
@@ -1982,10 +1712,7 @@ function connectWS() {
       if (data.status) {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
-        // follow-on 廣播給所有 client；只有「電腦擁有(或無 owner)」時才認，否則手機模式下 desktop 會
-        // 誤設 followActive + 改滑桿值（雖 PF 被 server gate 擋不洩漏驅動，仍是狀態謊言）。
-        if (data.status === 'follow on' && Array.isArray(data.pose) && controlMode !== 'phone') onFollowOn(data.pose);
-        if (data.status === 'follow off') followReset();
+        // follow on/off 狀態歸串流台處理；本頁不再追蹤跟隨態。
         if (data.status === 'ar period' || data.status === 'auto-return ON' || data.status === 'loop period') {
           syncRuntimeRates(data, true);
           savePlatformConfigSoon();
@@ -2062,7 +1789,6 @@ function connectWS() {
     document.getElementById('status').className = 'nav-status disconnected';
     updateTransportBadge({ kind: null, state: 'selecting', detail: '' });  // server 斷 → 傳輸狀態未知，轉灰
     refreshCommandLocks();
-    followReset();   // 斷線 → 韌體跟隨態不可知，前端歸零（重連後須重按 HOLD+跟隨）
     setTimeout(connectWS, 1000);
   };
 }
@@ -2793,17 +2519,5 @@ updateDisturbUi();
 
 connectWS();
 </script>
-
-<!-- 手機陀螺儀配對面板（QR 指向 phone.html；server 端生成 QR/cert）-->
-<div id="phone-modal" onclick="if(event.target===this)closePhonePanel()" style="display:none;position:fixed;inset:0;background:rgba(20,16,10,.45);z-index:9999;align-items:center;justify-content:center;padding:20px">
-  <div style="background:#fffdf9;border:1px solid #ded7cd;border-radius:10px;padding:20px;max-width:340px;width:100%;text-align:center;font-family:ui-monospace,Menlo,monospace;box-shadow:0 8px 40px rgba(40,32,20,.25)">
-    <div style="font-weight:800;letter-spacing:.05em;margin-bottom:4px">📱 手機陀螺儀配對</div>
-    <div style="font-size:11px;color:#766f67;margin-bottom:12px;line-height:1.5">手機掃 QR 開啟 → 點「校正」→ 在此開 🎯 跟隨。傾斜手機即時驅動平台（LAN 直連、低延遲）。</div>
-    <img id="phone-qr" alt="QR" style="width:220px;height:220px;background:#fff;border:1px solid #ece6dd;border-radius:6px"/>
-    <div id="phone-url" style="font-size:11px;color:#27231f;margin-top:10px;word-break:break-all">—</div>
-    <div id="phone-ca" style="font-size:11px;margin-top:10px;color:#766f67;line-height:1.5">首次：先在手機<a id="phone-ca-link" href="/rootCA.pem" style="color:#3d6388">下載安裝 rootCA</a>（設定→一般→VPN與裝置管理裝描述檔→關於本機→憑證信任設定打開）→ 之後零警告</div>
-    <button class="chip" onclick="closePhonePanel()" style="margin-top:14px;font-weight:600;width:100%">關閉</button>
-  </div>
-</div>
 </body>
 </html>
