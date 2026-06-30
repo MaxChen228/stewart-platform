@@ -565,7 +565,7 @@ async function enterDrive() {
   driveBtn.disabled = false; if (currentSource === 'sim') btn.disabled = false;
   if (!ok || !boardConnected || !wsReady()) { setDriveBtn(false); lockSourceUI(false); if (ok) statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
   driving = true; setDriveBtn(true);
-  if (currentSource === 'sim') { speedEl.disabled = true; setSpeed(1); if (!es) startSim(); }
+  if (currentSource === 'sim') { speedEl.disabled = true; setSpeed(1); if (es) { es.close(); es = null; } startSim(); }   // 驅動一律重開流從 ×1：generator 速度烤在 SSE URL，非重開不生效（防 auto-preview 高速殘留→板子靜默超速）
   ws3.send(JSON.stringify({ cmd: 'MODE ' + currentSource }));   // 到 home 才交棒：FOLLOW 1 從 home 起、PF 平滑串
 }
 function exitDrive() {

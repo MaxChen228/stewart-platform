@@ -85,11 +85,11 @@ https://<computer-lan-ip>:3443/phone.html
 |------|-------|--------------|--------------|
 | 🎯 拖滑桿 | `desktop` | 6 軸相對 home 滑桿 | 本頁拖滑桿（節流 ~100Hz） |
 | 📱 手機 | `phone` | server `evt:'followtgt'` 鏡像手機陀螺儀 | phone.html 自串（本頁僅觀察）|
-| 🤖 模擬 | `sim` | SSE generator（不開 phone-capture）| 本頁逐幀（×0.1～×500 log 速度）|
+| 🤖 模擬 | `sim` | SSE generator（不開 phone-capture）| 本頁逐幀（預覽 ×0.1～×500 log；**驅動時鉗 ×1**，板子跟不上高速）|
 
 - **串接板子鈕**（統一）：先 `armToHome` **起飛回 home**（D/H/E 狀態機，home/landing 取自 `/api/platform-config`，與主控頁同邏輯，避免板子從歪姿直接串 PF 大跳/超界），到位才 `MODE <來源>` 交棒。停止/關頁送 `MODE off` 釋放。串接中鎖來源切換；server `evt:'mode'` 廣播會在被其他端接管時復原本頁。
 - **role 仲裁**：PF owner-gate 要求 `ws._role===controlOwner`，故換來源時本頁重新宣告 `{role:<來源>}`。手機來源本頁不送 PF（phone.html role=`phone` 自送），只鏡像 followtgt。
-- 跟隨來源（拖滑桿/手機）共用「跟隨緊度（→`FE`）」+「延遲 e2e/傳輸（server `evt:'latency'`）」。
+- **三來源恆顯**「跟隨緊度（→`FE`）」+「延遲 e2e/傳輸（server `evt:'latency'`）」：拖滑桿/手機/模擬皆串 PF 過韌體 followStep，故 FE/延遲對所有來源一致適用（含 sim）。
 - 後端 lazy：SSE `/stream` 與 `/workspace_data.json` 首次請求才載/算（不拖慢控制 server 啟動）；無 phone-capture 語料庫時 envelope 仍服務、`/stream` 回 503 → 只「模擬」不可用，拖滑桿/手機照常。
 - 串流原語在 `gen.js`（`makeBootstrapStream`+`makePhonePipe`，可 `require`，:3000 直接 require）；CLI `node gen.js --dur <sec> --mode bootstrap|iaaft --validate` 寫固定長度檔。
 
