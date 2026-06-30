@@ -2633,8 +2633,10 @@ function safeLandSequence(reason) {
 }
 
 function setControlMode(arg) {
-  const a = String(arg || '').toLowerCase();   // normalize：前端送 'DESKTOP'/'PHONE'/'OFF' 任意大小寫都接
-  const owner = (a === 'desktop' || a === 'phone') ? a : null;
+  const a = String(arg || '').toLowerCase();   // normalize：前端送 'DESKTOP'/'PHONE'/'SIM'/'OFF' 任意大小寫都接
+  // 'sim' = 模擬手機（generator 串 PF 走真 follow 路徑）：與 phone 同樣驅動，但**不開 phone-capture**
+  //         → 模擬資料絕不被當真手機擷取存檔、不汙染 generator 語料庫。
+  const owner = (a === 'desktop' || a === 'phone' || a === 'sim') ? a : null;
   // session 進行中：MODE 的 FOLLOW 會被 commandAllowed 的 movementCommand gate 丟（無 token），
   // 但 owner 仍被改 → 三端 desync。直接拒絕：回報當前真實 owner（此時應為 null，session 已接管）。
   if (activeSession) { broadcast(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
@@ -2684,7 +2686,7 @@ function handleWsConnection(ws, req) {
           return;
         }
         // role 宣告（dashboard='desktop' / 手機='phone'）→ 記在 ws，供 PF owner 仲裁 + 斷線 failsafe
-        if (typeof d.role === 'string') { ws._role = d.role === 'phone' ? 'phone' : 'desktop'; ws.send(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
+        if (typeof d.role === 'string') { ws._role = (d.role === 'phone' || d.role === 'sim') ? d.role : 'desktop'; ws.send(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
         if (typeof d.cmd === 'string') cmd = d.cmd.trim();
         if (typeof d.sessionToken === 'string') sessionToken = d.sessionToken;
       } catch {}

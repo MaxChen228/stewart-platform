@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模擬手機 — 工作空間累積 + 三軸波形</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/app-ui.css">
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  /* 共用 app-top header，但本工具滿版不捲動 */
+  .app-top { position: static; margin: 0; min-height: 52px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+             padding: 8px 16px; border-bottom: 1px solid var(--borderL); background: var(--surface); }
+  .toolbar .grp { display: flex; align-items: center; gap: 7px; }
+  .toolbar .lbl { font-family: var(--font-mono); font-size: 11px; color: var(--sub); letter-spacing: .04em; }
+  .toolbar input[type=number] { width: 80px; }
+  .toolbar input[type=range] { width: 116px; vertical-align: middle; }
+  .toolbar .sep { width: 1px; height: 22px; background: var(--borderBase); margin: 0 2px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--borderBase); display: inline-block; }
+  .dot.on { background: #2e9c5b; box-shadow: 0 0 5px #2e9c5b88; }
+  #stat { font-family: var(--font-mono); font-size: 11px; color: var(--sub); }
+  #stat b { color: var(--ink); font-weight: 500; }
+  .split { display: flex; flex: 1; min-height: 0; }
+  .pane { position: relative; min-width: 0; height: 100%; }
+  #paneW { flex: 1 1 0; } #paneR { flex: 1.5 1 0; border-left: 1px solid var(--borderBase); }
+  .pane canvas { display: block; width: 100%; height: 100%; }
+  .float { position: absolute; background: rgba(252,251,250,.92); border: 1px solid var(--borderBase);
+           border-radius: 4px; padding: 10px 12px; backdrop-filter: blur(8px); }
+  .float .hd { font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: .08em;
+               text-transform: uppercase; color: var(--sub); margin-bottom: 8px; }
+  #legend { top: 12px; left: 12px; }
+  .ck { display: flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; padding: 2px 0; font-size: 12px; }
+  .ck input { margin: 0; accent-color: var(--contra); cursor: pointer; }
+  .sw { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  #conv { bottom: 12px; left: 12px; font-family: var(--font-mono); }
+  #conv .grid { display: grid; grid-template-columns: auto auto auto auto; gap: 3px 12px; font-size: 11px; }
+  #conv .hd2 { color: var(--sub); font-size: 10px; } #conv .ar { text-align: right; font-variant-numeric: tabular-nums; }
+  #readout { top: 12px; right: 12px; font-family: var(--font-mono); font-size: 12px; }
+  #readout .row { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
+  .cap { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+         font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--sub);
+         background: rgba(252,251,250,.85); padding: 3px 11px; border: 1px solid var(--borderL); border-radius: 999px; white-space: nowrap; }
+  .hint { position: absolute; bottom: 10px; left: 12px; font-family: var(--font-mono); font-size: 10px; color: var(--sub); }
+  #wave { border-top: 1px solid var(--borderBase); padding: 8px 16px 10px; background: var(--surface); height: 176px; }
+  #wave .leg { display: flex; align-items: center; gap: 18px; font-family: var(--font-mono); font-size: 11px; color: var(--sub); margin-bottom: 5px; }
+  #wave .leg .ln { display: inline-block; width: 20px; height: 0; vertical-align: middle; margin-right: 5px; }
+  #wave canvas { width: 100%; height: 124px; background: var(--bg); border: 1px solid var(--borderL); border-radius: 3px; }
+  /* M1–M6 馬達標籤（與主畫面 web/index.html 完全一致）*/
+  .motor-label { font-family: var(--font-mono); font-weight: 700; font-size: 11px; letter-spacing: 0.08em;
+                 color: var(--ink); background: var(--surface); border: 1px solid var(--borderBase);
+                 border-radius: 3px; padding: 1px 5px; pointer-events: none; white-space: nowrap;
+                 text-shadow: none; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+</style>
+</head>
+<body>
+<header class="app-top">
+  <div class="app-top-left"><span class="app-title">模擬手機</span></div>
+  <nav class="app-nav" aria-label="nav">
+    <a class="app-link" id="nav-main" title="即時主控 (:3000)">主控</a>
+    <a class="app-link active">模擬</a>
+  </nav>
+  <div class="app-top-left" style="justify-self:end; gap:10px;">
+    <span class="dev-label">板子 <span id="bdot" class="dot"></span> <span id="bstat">未連線</span></span>
+    <button id="drive" class="chip danger" title="把模擬 PF 串到 :3000（與真手機同路徑驅動板子）">⛓ 串接板子</button>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button id="btn" class="chip good">▶ 開始</button>
+  <button id="clr" class="chip" title="清空累積點雲 + 波形">清除軌跡</button>
+  <span class="sep"></span>
+  <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
+  <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
+  <span class="sep"></span>
+  <span id="stat">待機</span>
+</div>
+
+<div class="split">
+  <div class="pane" id="paneW">
+    <canvas id="cws"></canvas>
+    <div class="cap">工作空間 · roll / pitch / yaw（度）· 原點 = home</div>
+    <div class="float" id="legend">
+      <div class="hd">顯示圖層</div>
+      <label class="ck"><input type="checkbox" id="ck-ws" checked><span class="sw" style="background:#6f8fb0"></span>工作空間殼（IK 可解）</label>
+      <label class="ck"><input type="checkbox" id="ck-safe" checked><span class="sw" style="background:#3f9e63"></span>安全（25% 裕度）</label>
+      <label class="ck"><input type="checkbox" id="ck-phone" checked><span class="sw" style="background:#D35400"></span>手機歷史 PF</label>
+      <label class="ck"><input type="checkbox" id="ck-accum" checked><span class="sw" style="background:#0d8aa0"></span>即時生成（累積）</label>
+    </div>
+    <div class="float" id="conv">
+      <div class="hd" style="color:var(--contra)">收斂監測：生成累積 → 手機歷史</div>
+      <div class="grid" id="convgrid"></div>
+    </div>
+  </div>
+  <div class="pane" id="paneR">
+    <canvas id="crig"></canvas>
+    <div class="cap">3D 模型 · <span style="color:#2e9c5b">綠 = 模擬 PF（意圖）</span> · <span style="color:var(--dev)">紅 = 板子實際</span></div>
+    <div class="float" id="readout">
+      <div class="hd">roll / pitch / yaw（°）</div>
+      <div class="row"><span style="color:#2e9c5b">模擬 PF</span><span id="v-sim" class="mono">0, 0, 0</span></div>
+      <div class="row"><span style="color:var(--dev)">板子實際</span><span id="v-act" class="mono">—</span></div>
+    </div>
+    <div class="hint">拖曳旋轉 · 滾輪縮放</div>
+  </div>
+</div>
+
+<div id="wave">
+  <div class="leg">三軸時域波形
+    <span><span class="ln" style="border-top:2px solid var(--ink)"></span>模擬 PF（送出）</span>
+    <span><span class="ln" style="border-top:2px dashed var(--ink)"></span>板子實際（FK）</span>
+    <span style="margin-left:auto"><b style="color:#C0392B">■</b> roll &nbsp;<b style="color:#2e7d46">■</b> pitch &nbsp;<b style="color:#4A6B8C">■</b> yaw</span>
+  </div>
+  <canvas id="wcv"></canvas>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script src="/sysid/kin.js"></script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { createStewartModel, createStewartRig, createGhostRig, StewartStyle } from '/shared/stewart-renderer.js';
+
+const Kin = window.Kin;
+const HOMEPOSE = [0, 0, 133, 0, 0, 0];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+document.getElementById('nav-main').href = `http://${location.hostname}:3000/`;
+const WS = await (await fetch('/workspace_data.json')).json();
+
+// ============ 左：工作空間場景（淺底，與主畫面一致；roll=X pitch=Y yaw=Z 度）============
+const hostW = document.getElementById('cws');
+const sceneW = new THREE.Scene(); sceneW.background = new THREE.Color(StewartStyle.scene.lightBg);
+const camW = new THREE.PerspectiveCamera(48, hostW.clientWidth / hostW.clientHeight, 1, 2000);
+camW.position.set(120, 95, 150);
+const rdrW = new THREE.WebGLRenderer({ canvas: hostW, antialias: true });
+rdrW.setPixelRatio(Math.min(2, devicePixelRatio));
+const ctlW = new OrbitControls(camW, rdrW.domElement); ctlW.enableDamping = true;
+
+function staticCloud(pts, color, size, op) {
+  const g = new THREE.BufferGeometry(); const a = new Float32Array(pts.length * 3);
+  for (let i = 0; i < pts.length; i++) { a[i * 3] = pts[i][0]; a[i * 3 + 1] = pts[i][1]; a[i * 3 + 2] = pts[i][2]; }
+  g.setAttribute('position', new THREE.BufferAttribute(a, 3));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color, size, transparent: true, opacity: op, sizeAttenuation: true, depthWrite: false }));
+}
+const cloudWS = staticCloud(WS.workspace, 0x6f8fb0, 1.8, 0.35); sceneW.add(cloudWS);
+const cloudSafe = staticCloud(WS.safe, 0x3f9e63, 2.0, 0.4); sceneW.add(cloudSafe);
+const cloudPhone = staticCloud(WS.phone, 0xD35400, 3.0, 0.7); sceneW.add(cloudPhone);
+
+function axis(dir, len, color) {
+  const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), dir.clone().multiplyScalar(len)]);
+  sceneW.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color })));
+}
+const L = Math.max(WS.lim.r[1], WS.lim.p[1]) + 8, LY = WS.lim.y[1] + 8;
+axis(new THREE.Vector3(1, 0, 0), L, 0xC0392B); axis(new THREE.Vector3(-1, 0, 0), L, 0xE0B4AE);
+axis(new THREE.Vector3(0, 1, 0), L, 0x2e7d46); axis(new THREE.Vector3(0, -1, 0), L, 0xB6D6C0);
+axis(new THREE.Vector3(0, 0, 1), LY, 0x4A6B8C); axis(new THREE.Vector3(0, 0, -1), LY, 0xC0CCD8);
+function label(txt, pos, color) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const x = cv.getContext('2d');
+  x.fillStyle = color; x.font = 'bold 32px "JetBrains Mono",monospace'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(txt, 128, 32);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false, depthTest: false }));
+  sp.position.copy(pos); sp.scale.set(28, 7, 1); sceneW.add(sp);
+}
+label('Roll +' + WS.lim.r[1] + '°', new THREE.Vector3(L + 6, 0, 0), '#C0392B');
+label('Pitch +' + WS.lim.p[1] + '°', new THREE.Vector3(0, L + 6, 0), '#2e7d46');
+label('Yaw +' + WS.lim.y[1] + '°', new THREE.Vector3(0, 0, LY + 6), '#4A6B8C');
+sceneW.add(new THREE.Mesh(new THREE.SphereGeometry(1.8, 16, 16), new THREE.MeshBasicMaterial({ color: 0x2A2520 })));
+const gridW = new THREE.GridHelper(80, 8, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor); gridW.rotation.x = Math.PI / 2; sceneW.add(gridW);
+
+// 即時累積生成點雲（teal，淺底用實心高 opacity）
+const MAXPTS = 20000;
+const accumGeo = new THREE.BufferGeometry();
+const accumArr = new Float32Array(MAXPTS * 3);
+accumGeo.setAttribute('position', new THREE.BufferAttribute(accumArr, 3));
+accumGeo.setDrawRange(0, 0);
+const accumPts = new THREE.Points(accumGeo, new THREE.PointsMaterial({ color: 0x0d8aa0, size: 2.6, transparent: true, opacity: 0.55, sizeAttenuation: true, depthWrite: false }));
+sceneW.add(accumPts);
+let accHead = 0, accCount = 0, accGeoDirty = false;
+function accumPush(roll, pitch, yaw) {
+  accumArr[accHead * 3] = roll; accumArr[accHead * 3 + 1] = pitch; accumArr[accHead * 3 + 2] = yaw;
+  accHead = (accHead + 1) % MAXPTS; if (accCount < MAXPTS) accCount++; accGeoDirty = true;
+}
+const layers = { ws: cloudWS, safe: cloudSafe, phone: cloudPhone, accum: accumPts };
+for (const [id, obj] of Object.entries(layers)) document.getElementById('ck-' + id).addEventListener('change', e => { obj.visible = e.target.checked; });
+
+// ============ 右：rig 場景（淺底，與主畫面同慣例）。紅實心 rig=板子實際，綠 ghost=模擬 PF 意圖 ============
+const hostR = document.getElementById('crig');
+const paneR = document.getElementById('paneR');
+const model = createStewartModel(Kin);
+const sceneR = new THREE.Scene(); sceneR.background = new THREE.Color(StewartStyle.scene.lightBg);
+const camR = new THREE.PerspectiveCamera(50, hostR.clientWidth / hostR.clientHeight, 1, 2000);
+camR.up.set(0, 0, 1); camR.position.set(300, -300, 250);
+const rdrR = new THREE.WebGLRenderer({ canvas: hostR, antialias: true });
+rdrR.setPixelRatio(Math.min(2, devicePixelRatio));
+// CSS2D 馬達標籤層（M1–M6，與主畫面同機制）：覆在 rig pane 上、不吃滑鼠
+const labelRdr = new CSS2DRenderer();
+labelRdr.domElement.style.position = 'absolute';
+labelRdr.domElement.style.top = '0'; labelRdr.domElement.style.left = '0';
+labelRdr.domElement.style.pointerEvents = 'none';
+paneR.appendChild(labelRdr.domElement);
+const ctlR = new OrbitControls(camR, rdrR.domElement); ctlR.target.set(0, 0, 60); ctlR.update();
+sceneR.add(new THREE.AmbientLight(0xffffff, 0.7));
+const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(200, -200, 300); sceneR.add(dl);
+const gridR = new THREE.GridHelper(400, 20, StewartStyle.scene.gridMajor, StewartStyle.scene.gridMinor); gridR.rotation.x = Math.PI / 2; sceneR.add(gridR);
+const rig = createStewartRig(sceneR, model, { CSS2DObject, labels: true, labelClassName: 'motor-label' });   // 紅實心 = 板子實際（含 M1–M6 標籤）
+const ghost = createGhostRig(sceneR, model); ghost.hide();   // 綠 ghost = 模擬 PF 意圖
+rig.update(Kin.ik(HOMEPOSE).angles, HOMEPOSE);
+
+// ============ 三軸波形（時域 8s）：模擬 PF 實線 + 板子實際虛線 ============
+const wcv = document.getElementById('wcv'), wctx = wcv.getContext('2d');
+const WAVE_SEC = 8, WAVE_YLIM = 70, WCOL = ['#C0392B', '#2e7d46', '#4A6B8C'];
+const simWave = [], actWave = [];
+function pushWave(arr, v) { arr.push({ t: performance.now(), v }); }
+function pruneWave(arr, now) { const cut = now - WAVE_SEC * 1000 - 500; while (arr.length && arr[0].t < cut) arr.shift(); }
+function sizeWave() { const r = wcv.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio); wcv.width = r.width * dpr; wcv.height = r.height * dpr; wctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+function drawWaveSeries(arr, w, h, now, dashed) {
+  if (arr.length < 2) return;
+  const x = t => (1 - (now - t) / (WAVE_SEC * 1000)) * w;
+  for (let k = 0; k < 3; k++) {
+    wctx.strokeStyle = WCOL[k]; wctx.lineWidth = dashed ? 1.1 : 1.6; wctx.globalAlpha = dashed ? 0.75 : 1;
+    wctx.setLineDash(dashed ? [4, 3] : []); wctx.beginPath();
+    let started = false;
+    for (const s of arr) { const px = x(s.t); if (px < -2) continue; const py = h / 2 - (s.v[k] / WAVE_YLIM) * (h / 2 - 4); started ? wctx.lineTo(px, py) : (wctx.moveTo(px, py), started = true); }
+    wctx.stroke();
+  }
+  wctx.setLineDash([]); wctx.globalAlpha = 1;
+}
+function drawWave() {
+  const r = wcv.getBoundingClientRect(), w = r.width, h = r.height, now = performance.now();
+  wctx.clearRect(0, 0, w, h);
+  wctx.strokeStyle = '#E8E4DB'; wctx.lineWidth = 1;
+  for (const f of [0.25, 0.5, 0.75]) { const y = f * h; wctx.beginPath(); wctx.moveTo(0, y); wctx.lineTo(w, y); wctx.stroke(); }
+  wctx.strokeStyle = '#DBD6CD'; wctx.beginPath(); wctx.moveTo(0, h / 2); wctx.lineTo(w, h / 2); wctx.stroke();
+  pruneWave(simWave, now); pruneWave(actWave, now);
+  drawWaveSeries(simWave, w, h, now, false);
+  if (boardConnected) drawWaveSeries(actWave, w, h, now, true);
+}
+
+// ============ readout + 收斂 ============
+const elSim = document.getElementById('v-sim'), elAct = document.getElementById('v-act');
+const fmt3 = p => `${p[3].toFixed(1)}, ${p[4].toFixed(1)}, ${p[5].toFixed(1)}`;
+const ax3 = ['roll', 'pitch', 'yaw'];
+const convGrid = document.getElementById('convgrid');
+function fmtConv() {
+  const n = accCount; let rows = `<span class="hd2"></span><span class="hd2 ar">生成σ</span><span class="hd2 ar">手機σ</span><span class="hd2 ar">比</span>`;
+  const col = ['#C0392B', '#2e7d46', '#4A6B8C'];
+  for (let k = 0; k < 3; k++) {
+    let m = 0; for (let i = 0; i < n; i++) m += accumArr[i * 3 + k]; m /= (n || 1);
+    let s = 0; for (let i = 0; i < n; i++) { const d = accumArr[i * 3 + k] - m; s += d * d; } s = Math.sqrt(s / (n || 1));
+    const ph = WS.stats.pfStd[k]; const ratio = ph ? (s / ph) : 0;
+    rows += `<span style="color:${col[k]}">${ax3[k]}</span><span class="ar">${s.toFixed(1)}°</span><span class="ar" style="color:#D35400">${ph.toFixed(1)}°</span><span class="ar">${ratio.toFixed(2)}×</span>`;
+  }
+  convGrid.innerHTML = rows;
+}
+fmtConv();
+
+// ============ 狀態 + render loop（綠 ghost=模擬 PF 插值到 60Hz；紅 rig=板子實際）============
+let boardConnected = false, actPose = null;
+let prevSim = HOMEPOSE.slice(), targetSim = HOMEPOSE.slice(), dispSim = HOMEPOSE.slice();
+let recvAtSim = 0, intervalSim = 16, simActive = false;
+function simArrive(pose) {
+  const now = performance.now();
+  if (recvAtSim) intervalSim = intervalSim * 0.7 + Math.max(1, Math.min(1000, now - recvAtSim)) * 0.3;
+  prevSim = dispSim.slice(); targetSim = pose.slice(); recvAtSim = now; simActive = true;
+}
+function resize() {
+  for (const [host, cam, rdr] of [[hostW, camW, rdrW], [hostR, camR, rdrR]]) {
+    const w = host.clientWidth, h = host.clientHeight; cam.aspect = w / h; cam.updateProjectionMatrix(); rdr.setSize(w, h, false);
+  }
+  labelRdr.setSize(hostR.clientWidth, hostR.clientHeight);
+  sizeWave();
+}
+addEventListener('resize', resize); resize();
+
+function loop() {
+  requestAnimationFrame(loop);
+  ctlW.update(); ctlR.update();
+  if (accGeoDirty) { accumGeo.setDrawRange(0, accCount); accumGeo.attributes.position.needsUpdate = true; accGeoDirty = false; }
+  if (simActive) {                                  // 綠 ghost：模擬 PF 線性插值播放
+    const frac = recvAtSim ? Math.min(1, (performance.now() - recvAtSim) / intervalSim) : 1;
+    for (let i = 0; i < 6; i++) dispSim[i] = prevSim[i] + (targetSim[i] - prevSim[i]) * frac;
+    ghost.update(Kin.ik(dispSim).angles, dispSim);
+  }
+  rig.update(Kin.ik(actPose || HOMEPOSE).angles, actPose || HOMEPOSE);   // 紅 rig：板子實際（無遙測→home）
+  drawWave();
+  rdrW.render(sceneW, camW); rdrR.render(sceneR, camR); labelRdr.render(sceneR, camR);
+}
+loop();
+
+// ============ :3000 控制系統連線（板子實際 + 串接驅動）============
+let ws3 = null, ws3Timer = null;
+const bdot = document.getElementById('bdot'), bstat = document.getElementById('bstat');
+function setBoard(conn) { boardConnected = conn; bdot.classList.toggle('on', conn); bstat.textContent = conn ? '已連線' : '未連線'; if (!conn) { actPose = null; elAct.textContent = '—'; } }
+function connect3000() {
+  try { ws3 = new WebSocket(`ws://${location.hostname}:3000`); } catch { scheduleReconnect(); return; }
+  ws3.onopen = () => ws3.send(JSON.stringify({ role: 'sim' }));
+  ws3.onmessage = e => {
+    let d; try { d = JSON.parse(e.data); } catch { return; }
+    if (d.evt === 'transport') { setBoard(d.state === 'connected'); return; }
+    if (Array.isArray(d.a)) {
+      const fk = Kin.solveFK(d.a);
+      if (fk && fk.pose) { actPose = fk.pose.slice(); pushWave(actWave, [fk.pose[3], fk.pose[4], fk.pose[5]]); elAct.textContent = fmt3(fk.pose); }
+      if (!boardConnected) setBoard(true);
+    }
+  };
+  ws3.onclose = () => { ws3 = null; setBoard(false); scheduleReconnect(); };
+  ws3.onerror = () => { try { ws3.close(); } catch {} };
+}
+function scheduleReconnect() { if (ws3Timer) return; ws3Timer = setTimeout(() => { ws3Timer = null; connect3000(); }, 3000); }
+connect3000();
+
+// ============ SSE 生成串流 + 速度 + 串接驅動 ============
+const btn = document.getElementById('btn'), statEl = document.getElementById('stat'), seedEl = document.getElementById('seed');
+const speedEl = document.getElementById('speed'), speedvEl = document.getElementById('speedv'), driveBtn = document.getElementById('drive');
+let es = null, t0 = 0, fpsAcc = 0, lastFpsT = 0, pps = 0, curSeed = 0, lastN = 0, lastIk = 0, driving = false;
+const SMIN = 0.1, SMAX = 500, SL0 = Math.log10(SMIN), SL1 = Math.log10(SMAX);
+const sliderToSpeed = (pos) => Math.pow(10, SL0 + (pos / 1000) * (SL1 - SL0));
+const speedToSlider = (s) => Math.round(1000 * (Math.log10(s) - SL0) / (SL1 - SL0));
+const fmtSpeed = (s) => s >= 10 ? String(Math.round(s)) : (s >= 1 ? s.toFixed(1) : s.toFixed(2));
+let curSpeed = sliderToSpeed(speedEl.value);
+
+function openStream() {
+  es = new EventSource('/stream?seed=' + (Number(seedEl.value) || 0) + '&speed=' + curSpeed.toFixed(4));
+  es.addEventListener('meta', e => { curSeed = JSON.parse(e.data).seed; seedEl.value = curSeed; });
+  es.onmessage = e => {
+    const f = JSON.parse(e.data);
+    for (const p of f.pts) accumPush(p[0], p[1], p[2]);
+    simArrive(f.last); pushWave(simWave, [f.last[3], f.last[4], f.last[5]]); elSim.textContent = fmt3(f.last);
+    if (driving && ws3 && ws3.readyState === 1) ws3.send(JSON.stringify({ cmd: 'PF ' + f.last.map(v => v.toFixed(2)).join(' ') }));
+    lastN = f.n; lastIk = f.ikDrop; fpsAcc += f.pts.length;
+    const now = performance.now();
+    if (now - lastFpsT >= 500) { pps = fpsAcc / (now - lastFpsT) * 1000; fpsAcc = 0; lastFpsT = now;
+      const el = (now - t0) / 1000, mm = Math.floor(el / 60), ssx = Math.floor(el % 60);
+      const rate = pps >= 1000 ? `${(pps / 1000).toFixed(1)}k` : pps.toFixed(0);
+      statEl.innerHTML = `串流中 ×<b>${fmtSpeed(curSpeed)}</b> · <b>${rate}</b> 點/s · 累積 <b>${accCount.toLocaleString()}</b> · ${mm}:${ssx.toString().padStart(2, '0')} · IK夾限 <b>${(lastIk / (lastN + 1) * 100).toFixed(1)}%</b>`;
+      fmtConv();
+    }
+  };
+  es.onerror = () => { statEl.innerHTML = '<b style="color:var(--dev)">生成連線中斷</b>'; };
+}
+function start() { t0 = performance.now(); lastFpsT = t0; fpsAcc = 0; openStream(); btn.textContent = '■ 停止'; btn.classList.remove('good'); btn.classList.add('danger'); }
+function stop() {
+  if (es) { es.close(); es = null; }
+  if (driving) toggleDrive();
+  btn.textContent = '▶ 開始'; btn.classList.add('good'); btn.classList.remove('danger');
+  statEl.innerHTML = `已停 · 累積 <b>${accCount.toLocaleString()}</b> 點`; fmtConv();
+}
+btn.onclick = () => (es ? stop() : start());
+document.getElementById('clr').onclick = () => {
+  accHead = 0; accCount = 0; accGeoDirty = true; simWave.length = 0; actWave.length = 0;
+  if (es) { lastN = 0; lastIk = 0; t0 = performance.now(); } fmtConv();
+};
+function setSpeed(s) { curSpeed = s; speedEl.value = String(speedToSlider(s)); speedvEl.textContent = '×' + fmtSpeed(s); }
+speedEl.addEventListener('input', () => { curSpeed = sliderToSpeed(speedEl.value); speedvEl.textContent = '×' + fmtSpeed(curSpeed); });
+speedEl.addEventListener('change', () => { curSpeed = sliderToSpeed(speedEl.value); speedvEl.textContent = '×' + fmtSpeed(curSpeed); if (es) { es.close(); openStream(); } });
+speedvEl.textContent = '×' + fmtSpeed(curSpeed);
+
+// 串接板子：先起飛回 home（與主畫面同邏輯），到位才 MODE sim（不開 phone-capture）+ 鎖 ×1 逐幀送 PF。
+// 板子常停在歪姿（上次串流殘留），直接串 PF 會大跳/超工作空間 → H→P home 用 min-jerk 平滑帶回再交棒。
+const wsReady = () => ws3 && ws3.readyState === 1;
+async function toggleDrive() {
+  if (driving) {   // 停止串接
+    driving = false; driveBtn.classList.remove('active'); driveBtn.textContent = '⛓ 串接板子'; speedEl.disabled = false;
+    if (wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' }));
+    return;
+  }
+  if (!boardConnected || !wsReady()) { statEl.innerHTML = '<b style="color:var(--dev)">需先連線板子才能串接</b>'; return; }
+  driveBtn.disabled = true; btn.disabled = true; driveBtn.textContent = '⤴ 起飛回 home…';   // 起飛中鎖兩鈕
+  const ms = 1800;
+  ws3.send(JSON.stringify({ cmd: 'H' }));                                                    // 抓當前、使能死咬
+  await sleep(160);
+  ws3.send(JSON.stringify({ cmd: `P ${HOMEPOSE.map(v => v.toFixed(2)).join(' ')} ${ms}` })); // min-jerk 回 home
+  await sleep(ms + 220);
+  driveBtn.disabled = false; btn.disabled = false;
+  if (!boardConnected || !wsReady()) { driveBtn.textContent = '⛓ 串接板子'; statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
+  driving = true; driveBtn.classList.add('active'); driveBtn.textContent = '⛓ 已串接（按停）'; speedEl.disabled = true;
+  setSpeed(1); if (es) { es.close(); openStream(); } else start();
+  ws3.send(JSON.stringify({ cmd: 'MODE sim' }));   // 到 home 才交棒：FOLLOW 1 從 home 起，PF 從 home 平滑串
+}
+driveBtn.onclick = toggleDrive;
+addEventListener('beforeunload', () => { if (driving && ws3 && ws3.readyState === 1) ws3.send(JSON.stringify({ cmd: 'MODE off' })); });
+</script>
+</body>
+</html>
