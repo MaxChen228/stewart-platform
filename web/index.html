@@ -1464,6 +1464,7 @@ function sendPoseCommand(pose, label) {
 // MODE off 釋放 owner（server 轉 FOLLOW 0）；followReset 立即停本地 PF pump（不等遙測往返）。
 // FOLLOW 0 不動 holdMode → 退出後 holdMode 仍 true、P 立即可用、isHolding 不掉。
 function exitFollowForDiscrete() {
+  cancelArm();   // 作廢進行中的起飛編排（離散 P 指令搶佔，避免兩條 P 鏈衝突）
   if (controlMode === 'desktop') window.sendCmd('MODE off');
   if (followActive) followReset();
 }
@@ -1567,11 +1568,20 @@ function updateFollowUI() {
   b.style.background = followActive ? 'var(--contra)' : '';
   b.style.color = followActive ? '#fff' : '';
 }
-window.toggleFollow = function() {
+window.toggleFollow = async function() {
   // 電腦模式 = 滑桿跟隨。改走 MODE（owner 仲裁）而非裸 FOLLOW：server 轉 FOLLOW 1/0 給韌體，
   // 並把 controlOwner 設成 'desktop'（鎖掉手機模式）。followActive 仍待韌體 {status:"follow on"} 才設真。
-  if (controlMode === 'desktop') window.sendCmd('MODE off');
-  else window.sendCmd('MODE desktop');
+  // 進入前一律先用 P 把平台帶到 home（起飛），到位才 MODE desktop 進串流。
+  if (controlMode === 'desktop') { window.sendCmd('MODE off'); return; }
+  if (_arming) return;                          // 起飛進行中，忽略重複點擊
+  _arming = true;
+  const b = document.getElementById('follow-toggle');
+  if (b) b.textContent = '⤴ 起飛中…';
+  try {
+    const ok = await armToHome('跟隨');
+    if (ok) window.sendCmd('MODE desktop');      // → server FOLLOW 1 → onFollowOn 啟用串流
+    else updateFollowUI();                        // 起飛失敗 → 復原按鈕文字
+  } finally { _arming = false; }
 };
 // 手機模式 = 手機陀螺儀獨立驅動。與電腦模式互斥（server owner 仲裁）。開啟同時彈 QR 配對面板。
 window.toggleGyroMode = function() {
@@ -1613,6 +1623,63 @@ function followReset() {
   _pfLastSent = null;
   if (_pfTrailTimer) { clearTimeout(_pfTrailTimer); _pfTrailTimer = null; }
   updateFollowUI();
+}
+
+// ===== 即時控制起飛編排：進入任何串流(跟隨/手機)前，一律先用 P 把平台帶到 home =====
+// 鐵律：串流即時控制只從 home 起；「到達指定位置」只走 P。依當前狀態分支：
+//   D(pos=0,斷電)  → 起飛：H(抓當前下垂、使能死咬) → P release(經 landing 暫存) → P home
+//   H(死咬中)      → 直達：P home
+//   E(使能非死咬)  → 先 H 再 P home
+// 各段用 poseCommandMs 算的 min-jerk 時長串接(deterministic timer，與韌體 holdMoveMs 同源)；
+// re-entrancy(token) / 不可達 / 斷線 一律中止。回傳 true=已到 home，可進串流。
+let _armToken = 0, _arming = false;
+const ARM_SETTLE_MS = 220;   // 每段完成後安定餘裕(指令往返 + 積分落定)
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function cancelArm() { _armToken++; }   // 作廢進行中的起飛(被離散 P 指令或退串流搶佔)
+function _armState() {
+  const t = scope.last;
+  if (!t || !wsConnected) return 'offline';
+  if (!t.pos) return 'D';                 // 斷電
+  if (Array.isArray(t.hold)) return 'H';  // 死咬中(holdAngles 快照存在)
+  return 'E';                             // 使能但非死咬(mode 0/1)
+}
+function _armStatus(msg, color) {
+  const st = document.getElementById('pose-ctl-status');
+  if (st) { st.textContent = msg; st.style.color = color || 'var(--sub)'; }
+}
+// 送一段 P 並等它走完(時長 = 韌體 holdMoveMs 同源)；token 失效或斷線即中止。
+async function _armSegmentP(pose, label, token) {
+  if (!window.Kin.ik(pose).valid) { _armStatus(`✗ 起飛中止：${label} 超工作空間`, 'var(--dev)'); return false; }
+  const prof = poseCommandMs(pose);
+  window.sendCmd(`P ${pose.map(x => x.toFixed(3)).join(' ')} ${prof.ms}`);
+  _armStatus(`⤴ 起飛 → ${label} (${prof.ms}ms)…`, 'var(--dual)');
+  await _sleep(prof.ms + ARM_SETTLE_MS);
+  if (token !== _armToken) return false;                 // 被新動作搶佔
+  if (!wsConnected) { _armStatus('✗ 起飛中止：連線中斷', 'var(--dev)'); return false; }
+  return true;
+}
+async function armToHome(reason) {
+  const token = ++_armToken;                             // 搶佔任何進行中的起飛
+  const st0 = _armState();
+  if (st0 === 'offline') { _armStatus('✗ 未連線，無法起飛', 'var(--dev)'); return false; }
+  const home = homePose.slice();
+  if (!window.Kin.ik(home).valid) { _armStatus('✗ home 超工作空間', 'var(--dev)'); return false; }
+  if (st0 === 'D') {
+    window.sendCmd('H');                                 // 抓當前下垂、使能死咬
+    await _sleep(ARM_SETTLE_MS);
+    if (token !== _armToken || !wsConnected) return false;
+    if (!await _armSegmentP(releasePose.slice(), 'release', token)) return false;
+    if (!await _armSegmentP(home, 'home', token)) return false;
+  } else {
+    if (st0 === 'E') {                                   // 使能非死咬 → 先 H 抓當前再走 P
+      window.sendCmd('H'); await _sleep(ARM_SETTLE_MS);
+      if (token !== _armToken || !wsConnected) return false;
+    }
+    if (!await _armSegmentP(home, 'home', token)) return false;
+  }
+  if (token !== _armToken) return false;
+  _armStatus(`✓ 已到 home → 進入${reason || '即時控制'}`, 'var(--sub)');
+  return true;
 }
 
 // ===== 跟隨延遲即時顯示（server evt:'latency'，真實量測）=====
