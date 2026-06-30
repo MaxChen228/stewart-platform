@@ -305,6 +305,52 @@ static void applyHoldIntegral(float targets[NUM_MOTORS], float dt, bool active) 
     }
 }
 
+// ===== 反共振 notch（peaking-EQ biquad on motor setpoint）=====
+// 實機多正弦 ID（sysid plant-ID）量得 plant 在 ~2.875Hz 有 ~3.2× 共振峰（yaw-coupled 主模態, Q≈1.8,
+// ζ≈0.21）。followStep 設點裡這頻段能量被馬達+機構放大成抖動；拉緊 tight 時生成器低通遮蔽變弱→更凶。
+// 在 holdAngles→F5 設點路徑放一個反共振 biquad（per-motor, DF2T）等化掉它，與 tight 解耦。
+// DC 增益=1（不動靜態 hold），手部 <1Hz 幾乎不擾。係數由 f0/Q/gainDb + 實際 loop rate 算（recomputeNotch）。
+// BOOT 預設關：真實 follow 運動能量全在 <2Hz、激不出 plant 3Hz 共振 → notch 對其為淨損(+延遲)；僅快速搖晃直灌 3Hz 才需手動開。
+// notch 開關/參數 + predict 經 followTuneV1 NVS 持久化（NOTCH/PREDICT 即設即存、重開保留）。
+bool  notchEnabled = false;
+float notchF0 = 3.0f, notchQ = 2.6f, notchGainDb = -11.0f;   // 掃出的最佳 notch 參數（手動啟用時套用）
+float ntB0 = 1.0f, ntB1 = 0.0f, ntB2 = 0.0f, ntA1 = 0.0f, ntA2 = 0.0f;   // normalized biquad
+float notchZ1[NUM_MOTORS] = {0}, notchZ2[NUM_MOTORS] = {0};               // DF2T state per channel
+
+static void recomputeNotch() {
+    float fs = 1.0e6f / (float)loopPeriodUs;
+    float A  = powf(10.0f, notchGainDb / 40.0f);
+    float w0 = 2.0f * PI * notchF0 / fs;
+    float c  = cosf(w0), s = sinf(w0);
+    float al = s / (2.0f * notchQ);
+    float a0 = 1.0f + al / A;
+    ntB0 = (1.0f + al * A) / a0;
+    ntB1 = (-2.0f * c)     / a0;
+    ntB2 = (1.0f - al * A) / a0;
+    ntA1 = (-2.0f * c)     / a0;
+    ntA2 = (1.0f - al / A) / a0;
+}
+
+// 重置 biquad 狀態（bumpless：seed 到當前 holdAngles 的穩態，避免使能瞬間 ring）。
+static void resetNotchState() {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        notchZ1[i] = (1.0f - ntB0) * holdAngles[i];
+        notchZ2[i] = (1.0f - ntB0) * holdAngles[i];
+    }
+}
+
+// 對設點施反共振 biquad（DF2T）。在 motorTargets=holdAngles 之後、積分/阻尼之前呼叫。
+static void applyResonanceNotch(float targets[NUM_MOTORS]) {
+    if (!notchEnabled) return;
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        float x = targets[i];
+        float y = ntB0 * x + notchZ1[i];
+        notchZ1[i] = ntB1 * x - ntA1 * y + notchZ2[i];
+        notchZ2[i] = ntB2 * x - ntA2 * y;
+        targets[i] = y;
+    }
+}
+
 // 跟隨模式（FOLLOW/PF）：HOLD 下接 host 的「最新 pose 目標」，ESP32 在控制 tick 內產生唯一物理 reference。
 // 與 P minimum-jerk profile 互斥（follow on 時 followStep 接管 holdAngles，忽略 holdMoveMs）。
 // 設計：host/browser/server 只更新 followTgt；followStep 以固定 control loop 做 acceleration/jerk limited
@@ -312,7 +358,14 @@ static void applyHoldIntegral(float targets[NUM_MOTORS], float dt, bool active) 
 bool  followMode = false;
 float followCur[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 當前濾波後 pose（IK 對象）
 float followTgt[6] = {0, 0, NEUTRAL_Z, 0, 0, 0};   // 串流進來的目標 pose（PF 設）
+float followTgtEff[6] = {0, 0, NEUTRAL_Z, 0, 0, 0}; // 生成器實際追蹤的目標（=followTgt 或 predict 前推後）
 float followVel[6] = {0, 0, 0, 0, 0, 0};            // pose reference velocity（mm/s 或 deg/s）
+// 速度前饋 predict：估 followTgt 速度，把目標前推 horizon → 生成器領先輸入抵消下游延遲。
+// 實機量得延遲 ~170ms（手部 <1Hz 段），predict ~0.10s 砍 ~60%。runtime `PREDICT` 設；0=off。
+float followPredict = 0.0f;        // 前推 horizon(秒)，0=off
+float followTgtVel[6] = {0};       // followTgt 速度估計（低通）
+float followTgtPrev[6] = {0};
+bool  followPredInit = false;
 float followAcc[6] = {0, 0, 0, 0, 0, 0};            // pose reference acceleration
 float followTight  = 0.5f;     // 跟隨「緊度」單參數 ∈[0,1]：越大跟越緊（FE 可調，runtime，不存 NVS）
 float followVmaxT  = 77.5f;    // 平移速度上限 mm/s（tight 派生；VF 可底層覆寫）
@@ -358,9 +411,13 @@ static void resetFollowDynamics(const float init[6]) {
     for (int i = 0; i < 6; i++) {
         followCur[i] = init[i];
         followTgt[i] = init[i];
+        followTgtEff[i] = init[i];
         followVel[i] = 0.0f;
         followAcc[i] = 0.0f;
+        followTgtVel[i] = 0.0f;
+        followTgtPrev[i] = init[i];
     }
+    followPredInit = false;
 }
 
 static inline Pose poseFromArr(const float a[6]) {
@@ -374,12 +431,12 @@ static void followAxisCandidate(int i, float dt, float cand[6], float velNext[6]
     const float eps = i < 3 ? FOLLOW_EPS_T : FOLLOW_EPS_R;
 
     const float x = followCur[i];
-    const float err = followTgt[i] - x;
+    const float err = followTgtEff[i] - x;
     const float v = followVel[i];
     const float a = followAcc[i];
 
     if (fabsf(err) <= eps && fabsf(v) <= eps / fmaxf(dt, 0.001f) && fabsf(a) <= amax * 0.01f) {
-        cand[i] = followTgt[i];
+        cand[i] = followTgtEff[i];
         velNext[i] = 0.0f;
         accNext[i] = 0.0f;
         return;
@@ -404,8 +461,8 @@ static void followAxisCandidate(int i, float dt, float cand[6], float velNext[6]
     float nextV = constrain(v + nextA * dt, -vmax, vmax);
     float nextX = x + nextV * dt;
 
-    if ((followTgt[i] - x) * (followTgt[i] - nextX) <= 0.0f) {
-        nextX = followTgt[i];
+    if ((followTgtEff[i] - x) * (followTgtEff[i] - nextX) <= 0.0f) {
+        nextX = followTgtEff[i];
         nextV = 0.0f;
         nextA = 0.0f;
     }
@@ -419,6 +476,25 @@ static void followAxisCandidate(int i, float dt, float cand[6], float velNext[6]
 // IK 無效（拖出工作空間）→ 維持上一有效點，並清速度/加速度，避免重新進可達區時帶著舊動量衝出去。
 static void followStep(float dt) {
     dt = constrain(dt, 0.001f, 0.02f);
+    // 速度前饋 predict：估 followTgt 速度（低通 50ms），目標前推 horizon，clamp 過衝。
+    if (followPredict > 0.0f) {
+        if (!followPredInit) {
+            for (int i = 0; i < 6; i++) { followTgtPrev[i] = followTgt[i]; followTgtVel[i] = 0.0f; }
+            followPredInit = true;
+        }
+        const float a = dt / (0.05f + dt);
+        for (int i = 0; i < 6; i++) {
+            float v = (followTgt[i] - followTgtPrev[i]) / dt;
+            followTgtVel[i] += a * (v - followTgtVel[i]);
+            followTgtPrev[i] = followTgt[i];
+            float lim = i < 3 ? 10.0f : 8.0f;                 // 前推量上限（mm / deg），擋反轉過衝
+            float d = constrain(followTgtVel[i] * followPredict, -lim, lim);
+            followTgtEff[i] = followTgt[i] + d;
+        }
+    } else {
+        followPredInit = false;
+        for (int i = 0; i < 6; i++) followTgtEff[i] = followTgt[i];
+    }
     float cand[6], velNext[6], accNext[6];
     for (int i = 0; i < 6; i++) followAxisCandidate(i, dt, cand, velNext, accNext);
 
@@ -727,6 +803,53 @@ static bool saveRuntimeTuningToNVS() {
     size_t written = prefs.putBytes("runtimeTuneV1", &cfg, sizeof(cfg));
     prefs.end();
     return written == sizeof(cfg);
+}
+
+// ===== follow 調參持久化（反共振 notch + 速度前饋 predict）=====
+// 獨立 NVS key followTuneV1（不擾動 runtimeTuneV1）。boot 載入覆寫 BOOT 預設；NOTCH/PREDICT 指令即設即存。
+struct FollowTuneNVS {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t notchOn;          // 0/1
+    float notchF0, notchQ, notchGainDb;
+    float followPredict;
+};
+constexpr uint32_t FOLLOW_TUNE_MAGIC = 0x4654554E; // "FTUN"
+constexpr uint16_t FOLLOW_TUNE_VERSION = 1;
+bool nvsFollowTunePresent = false;
+
+static bool validFollowTune(const FollowTuneNVS& c) {
+    return c.magic == FOLLOW_TUNE_MAGIC && c.version == FOLLOW_TUNE_VERSION && c.notchOn <= 1 &&
+           isfinite(c.notchF0) && c.notchF0 >= 0.5f && c.notchF0 <= 20.0f &&
+           isfinite(c.notchQ) && c.notchQ >= 0.2f && c.notchQ <= 10.0f &&
+           isfinite(c.notchGainDb) && c.notchGainDb >= -24.0f && c.notchGainDb <= 0.0f &&
+           isfinite(c.followPredict) && c.followPredict >= 0.0f && c.followPredict <= 0.3f;
+}
+
+static bool loadFollowTuneFromNVS() {
+    Preferences prefs;
+    FollowTuneNVS c;
+    prefs.begin("stewart", true);
+    size_t len = prefs.getBytes("followTuneV1", &c, sizeof(c));
+    prefs.end();
+    if (len != sizeof(c) || !validFollowTune(c)) return false;
+    notchEnabled = (c.notchOn != 0);
+    notchF0 = c.notchF0; notchQ = c.notchQ; notchGainDb = c.notchGainDb;
+    followPredict = c.followPredict;
+    nvsFollowTunePresent = true;
+    return true;
+}
+
+static bool saveFollowTuneToNVS() {
+    FollowTuneNVS c = {FOLLOW_TUNE_MAGIC, FOLLOW_TUNE_VERSION, (uint16_t)(notchEnabled ? 1 : 0),
+        notchF0, notchQ, notchGainDb, followPredict};
+    Preferences prefs;
+    prefs.begin("stewart", false);
+    size_t w = prefs.putBytes("followTuneV1", &c, sizeof(c));
+    prefs.end();
+    if (w != sizeof(c)) return false;
+    nvsFollowTunePresent = true;
+    return true;
 }
 
 static bool applyVFOCPid(uint16_t kp, uint16_t ki, uint16_t kd, uint16_t kv, int okMask[NUM_MOTORS], int& okCnt) {
@@ -1112,6 +1235,8 @@ void setup() {
     loadRuntimeTuningFromNVS();
     loadHoldIntFromNVS();            // HOLD 積分組態：有保存值則載入，否則維持 BOOT 預設（Ki=0）
     applyFollowTight(0.7f);          // 跟隨預設緊度 0.5→0.7：tau 0.275→0.205s，lag 顯著降而 step 過衝仍低（FE 可 runtime 再調）
+    loadFollowTuneFromNVS();         // notch 開關/參數 + predict：有保存值則覆寫 BOOT 預設（notch off / predict 0）
+    recomputeNotch();                // 反共振 biquad 係數（依當前 loop rate + 上面載入的 f0/Q/gainDb）
     enc.init();
     pidSaved = loadVFOCPidFromNVS();
 
@@ -1249,12 +1374,32 @@ void dispatch(const String& cmd, bool fromNet = false) {
             if (periodUs < 1000) periodUs = 1000;
             if (periodUs > 100000) periodUs = 100000;
             loopPeriodUs = periodUs;
+            recomputeNotch();          // loop rate 變 → 重算反共振 biquad 係數
             bool saved = saveRuntimeTuningToNVS();
             Out.printf("{\"status\":\"loop period\",\"period_ms\":%.3f,\"period_us\":%u,\"hz\":%.3f,\"saved\":%d}\n",
                 periodUs / 1000.0f, periodUs, 1000000.0f / periodUs, saved ? 1 : 0);
         } else {
             Out.println("{\"error\":\"usage L period_ms\"}");
         }
+    } else if (cmd.startsWith("NOTCH")) {
+        // 反共振 notch：`NOTCH 0/1` 切換；`NOTCH f0 Q gainDb` 調參；`NOTCH` 查狀態。設值即存 NVS（重開保留）。
+        float f0 = 0, q = 0, g = 0;
+        int n = sscanf(cmd.c_str(), "NOTCH %f %f %f", &f0, &q, &g);
+        if (n >= 3) {
+            notchF0 = constrain(f0, 0.5f, 20.0f);
+            notchQ  = constrain(q, 0.2f, 10.0f);
+            notchGainDb = constrain(g, -24.0f, 0.0f);
+            recomputeNotch();
+            resetNotchState();
+            notchEnabled = true;
+        } else if (n == 1) {
+            notchEnabled = (f0 != 0.0f);
+            resetNotchState();
+        }
+        bool saved = (n >= 1) ? saveFollowTuneToNVS() : nvsFollowTunePresent;   // 純查詢(n<1)不寫 NVS
+        Out.printf("{\"status\":\"notch\",\"on\":%d,\"f0\":%.3f,\"Q\":%.2f,\"gainDb\":%.2f,\"saved\":%d,"
+                   "\"b\":[%.6f,%.6f,%.6f],\"a\":[1,%.6f,%.6f]}\n",
+            notchEnabled ? 1 : 0, notchF0, notchQ, notchGainDb, saved ? 1 : 0, ntB0, ntB1, ntB2, ntA1, ntA2);
     } else if (cmd == "HP" || cmd == "HP?") {
         Out.printf("{\"status\":\"hold profile\",\"maxVelDps\":%.1f,\"enabled\":%d,\"maxMs\":%lu}\n",
             holdProfileMaxVelDps, holdProfileMaxVelDps > 0.0f ? 1 : 0, (unsigned long)HOLD_PROFILE_MAX_MS);
@@ -1374,6 +1519,7 @@ void dispatch(const String& cmd, bool fromNet = false) {
         holdMode = true;
         followMode = false;   // 進 HOLD 一律純死咬，跟隨須另送 FOLLOW 1
         posEnabled = true;
+        resetNotchState();    // bumpless seed 反共振 biquad 到當前 holdAngles
         autoReturnWarnLatched = false;
         maxHoldErr = 0;
         resetHoldDampingState();
@@ -1493,6 +1639,14 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 followAccelT, followJerkT, followApproachK,
                 followAmaxForAxis(0), followAmaxForAxis(3));
         }
+    } else if (cmd.startsWith("PREDICT")) {
+        // 速度前饋 predict：`PREDICT <horizon秒>`（0..0.3，0=off）；`PREDICT` 查詢。設值即存 NVS（重開保留）。
+        // ⚠️ phone.html client 端另有 0.08s predict 會疊加；韌體值勿設太高（總和 >~0.18 劇烈運動易過衝失能）。
+        float h;
+        int n = sscanf(cmd.c_str(), "PREDICT %f", &h);
+        bool saved = false;
+        if (n >= 1) { followPredict = constrain(h, 0.0f, 0.3f); followPredInit = false; saved = saveFollowTuneToNVS(); }
+        Out.printf("{\"status\":\"predict\",\"horizon\":%.3f,\"saved\":%d}\n", followPredict, saved ? 1 : 0);
     } else if (cmd == "OTA" || cmd.startsWith("OTA ")) {
         // HTTP-pull OTA：ESP32 主動 outbound 抓 firmware（繞 host 防火牆，比 ArduinoOTA 回連可靠、可全自動）。
         // 用法：OTA <url>（host 提供 http://<ip>:3000/firmware.bin）。下載在 controlTick(core1) 內阻塞 ~10s，
@@ -2001,6 +2155,7 @@ static void controlTick() {
             }
             // 擾動疊加已移至 F5 共同匯流口（plant-input，全模式通用）→ 此處只設 HOLD 目標。
             for (int i = 0; i < NUM_MOTORS; i++) motorTargets[i] = holdAngles[i];
+            applyResonanceNotch(motorTargets);   // 反共振等化（設點路徑，積分/阻尼之前）
             // 積分主閘：唯有「純死咬靜止 + 編碼器新鮮」才積分；運動/跟隨/stale 一律凍結。
             bool intActive = !followMode && holdMoveMs == 0 && !encStale;
             applyHoldIntegral(motorTargets, dt, intActive);   // 積分外環先疊命令（消 droop）
