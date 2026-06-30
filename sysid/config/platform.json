@@ -11,10 +11,10 @@
   "landingRelative": [
     0,
     0,
-    -65,
+    -64,
     0,
     0,
-    65
+    64
   ],
   "followLimits": {
     "vmaxT": 60,
@@ -34,15 +34,15 @@
   },
   "uiState": {
     "poseTargetRelative": [
-      1,
-      1,
-      -56,
       0,
-      1.5,
-      65
+      4,
+      28,
+      8,
+      0,
+      0
     ],
     "poseMoveMs": 300,
-    "poseSpeedIndex": 40,
+    "poseSpeedIndex": 28,
     "motion": {
       "selectedId": "buoy",
       "loops": 2,
@@ -148,7 +148,7 @@
       "currentMa": 3000,
       "posSpeed": 191,
       "posAcc": 251,
-      "arHz": 50,
+      "arHz": 200,
       "loopHz": 400,
       "od": {
         "gain": 0,
@@ -157,9 +157,9 @@
       },
       "pid": {
         "kp": 1024,
-        "ki": 5,
-        "kd": 160,
-        "kv": 320
+        "ki": 10,
+        "kd": 0,
+        "kv": 0
       }
     },
     "recorderName": "run"
@@ -175,5 +175,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-29T13:41:41.705Z"
+  "updatedAt": "2026-06-30T02:43:38.850Z"
 }
