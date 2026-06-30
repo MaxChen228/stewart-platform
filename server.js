@@ -13,6 +13,8 @@ const { NEUTRAL_Z, solveFK, resetFK, ik } = require('./sysid/kin');
 const PlatformSoT = require('./sysid/platform_sot');
 const WorkspaceExecutor = require('./sysid/workspace_executor');
 const fwHash = require('./sysid/fw_hash');  // 韌體源碼身分（與 build 端同一演算法）
+const phoneGen = require('./sysid/phone_gen/gen');            // 串流台 sim owner 資料源（可 require 串流原語）
+const { computeWorkspaceData } = require('./sysid/phone_gen/workspace_viz');  // 工作空間包絡（lazy）
 
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3000;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT) || 3443;
@@ -2062,6 +2064,54 @@ function pickTree(t) {
   return { srcHash: t.srcHash, gitRev: t.gitRev, dirty: t.dirty, fileCount: t.fileCount };
 }
 
+// ===== 串流台 sim owner 資料源（原 live_server.js :8899 已併入 :3000）=====
+// gen.js 串流原語 + workspace_viz 包絡皆 **lazy**（首次請求才載/算）→ 不拖慢控制 server 啟動。
+// 無 phone-capture 語料庫時：envelope 仍可服務（純 IK）、SSE /stream 回 503 → 串流台只有「模擬」格變灰，
+// desktop/phone owner 完全不依賴語料庫、照常運作。
+let _genSessions, _genSessionsTried = false, _wsDataJson = null;
+function genSessions() {
+  if (!_genSessionsTried) {
+    _genSessionsTried = true;
+    try { const s = phoneGen.loadSessions(phoneGen.defaultRefFiles()); _genSessions = s.length ? s : null; }
+    catch { _genSessions = null; }
+  }
+  return _genSessions;
+}
+function workspaceDataJson() {
+  if (_wsDataJson == null) { try { _wsDataJson = JSON.stringify(computeWorkspaceData()); } catch { _wsDataJson = 'null'; } }
+  return _wsDataJson;
+}
+// SSE：每連線一條獨立 stream（自身 rng + 1€濾波器狀態）→ 訊息率固定 60/s。speed 浮點(0.05~500)分數累加器：
+// >1 壓縮時間軸（每 tick 多點）；<1 慢動作（某些 tick 不足一點就不送）。client 關閉即停。
+function genStartStream(req, res, u) {
+  const sessions = genSessions();
+  if (!sessions) { res.writeHead(503, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('no phone-capture corpus'); return; }
+  const seed = Number(u.searchParams.get('seed')) || Math.floor(Math.random() * 1e9);
+  const speed = Math.max(0.05, Math.min(500, Number(u.searchParams.get('speed')) || 1));
+  const rng = phoneGen.mulberry32(seed);
+  const stream = phoneGen.makeBootstrapStream(sessions, rng);
+  const pipe = phoneGen.makePhonePipe();
+  const r3 = v => Math.round(v * 1000) / 1000;
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.write(`event: meta\ndata: ${JSON.stringify({ seed, rate: phoneGen.RATE, speed, sessions: sessions.length, home: phoneGen.HOME })}\n\n`);
+  let n = 0, ikDrop = 0, acc = 0;
+  const iv = setInterval(() => {
+    acc += speed;
+    const count = Math.floor(acc); acc -= count;
+    if (count <= 0) return;
+    const pts = new Array(count); let last = null;
+    for (let b = 0; b < count; b++) {
+      const rel = stream.next();
+      const { pose, valid } = pipe.step(rel);
+      if (!valid) ikDrop++;
+      pts[b] = [r3(pose[3]), r3(pose[4]), r3(pose[5])];
+      last = pose; n++;
+    }
+    res.write(`data: ${JSON.stringify({ n, ikDrop, last: last.map(r3), pts })}\n\n`);
+  }, 1000 / phoneGen.RATE);
+  req.on('close', () => clearInterval(iv));
+}
+
 const requestHandler = (req, res) => {
   // REST: 最新資料
   if (req.url === '/api/latest') {
@@ -2557,6 +2607,20 @@ const requestHandler = (req, res) => {
       });
       res.end(data);
     });
+    return;
+  }
+
+  // 串流台 sim owner：工作空間包絡（envelope 永遠可服務）+ SSE 生成串流（無語料庫回 503）+ 可用性查詢。
+  const _simPath = req.url.split('?')[0];
+  if (_simPath === '/workspace_data.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(workspaceDataJson());
+    return;
+  }
+  if (_simPath === '/stream') { genStartStream(req, res, new URL(req.url, 'http://localhost')); return; }
+  if (_simPath === '/api/sim/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ available: !!genSessions() }));
     return;
   }
 

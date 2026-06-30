@@ -51,7 +51,7 @@ function computeWorkspaceData() {
   const rollAt = (y) => { let m = 0; for (let v = 0; v <= 60; v += 0.5) { if (ik(v, 0, y)) m = v; else break; } return m; };
   const pfRange = () => { const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; for (const p of phone) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); } return { mn: mn.map(v => +v.toFixed(1)), mx: mx.map(v => +v.toFixed(1)) }; };
   // 手機雲每軸標準差（生成累積收斂的量化標的）
-  const pfStd = () => { const out = []; for (let k = 0; k < 3; k++) { const vs = phone.map(p => p[k]); const m = vs.reduce((a, b) => a + b, 0) / vs.length; out.push(+Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length).toFixed(1)); } return out; };
+  const pfStd = () => { const out = []; for (let k = 0; k < 3; k++) { const vs = phone.map(p => p[k]); if (!vs.length) { out.push(0); continue; } const m = vs.reduce((a, b) => a + b, 0) / vs.length; out.push(+Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length).toFixed(1)); } return out; };
   const voxVol = RR[2] * PR[2] * YR[2];
   const stats = {
     rollLim: axMax(0), pitchLim: axMax(1), yawLim: axMax(2),

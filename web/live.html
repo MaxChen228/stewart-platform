@@ -60,7 +60,7 @@
 <header class="app-top">
   <div class="app-top-left"><span class="app-title">模擬手機</span></div>
   <nav class="app-nav" aria-label="nav">
-    <a class="app-link" id="nav-main" title="即時主控 (:3000)">主控</a>
+    <a class="app-link" id="nav-main" href="/" title="即時主控">主控</a>
     <a class="app-link active">模擬</a>
   </nav>
   <div class="app-top-left" style="justify-self:end; gap:10px;">
@@ -132,7 +132,6 @@ import { createStewartModel, createStewartRig, createGhostRig, StewartStyle } fr
 const Kin = window.Kin;
 const HOMEPOSE = [0, 0, 133, 0, 0, 0];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-document.getElementById('nav-main').href = `http://${location.hostname}:3000/`;
 const WS = await (await fetch('/workspace_data.json')).json();
 
 // ============ 左：工作空間場景（淺底，與主畫面一致；roll=X pitch=Y yaw=Z 度）============
@@ -294,12 +293,12 @@ function loop() {
 }
 loop();
 
-// ============ :3000 控制系統連線（板子實際 + 串接驅動）============
+// ============ 控制系統連線（同源 :3000，板子實際 + 串接驅動）============
 let ws3 = null, ws3Timer = null;
 const bdot = document.getElementById('bdot'), bstat = document.getElementById('bstat');
 function setBoard(conn) { boardConnected = conn; bdot.classList.toggle('on', conn); bstat.textContent = conn ? '已連線' : '未連線'; if (!conn) { actPose = null; elAct.textContent = '—'; } }
 function connect3000() {
-  try { ws3 = new WebSocket(`ws://${location.hostname}:3000`); } catch { scheduleReconnect(); return; }
+  try { ws3 = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`); } catch { scheduleReconnect(); return; }
   ws3.onopen = () => ws3.send(JSON.stringify({ role: 'sim' }));
   ws3.onmessage = e => {
     let d; try { d = JSON.parse(e.data); } catch { return; }

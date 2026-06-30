@@ -18,7 +18,7 @@ src/fw_identity.h
 # rig 實機原始資料封存（不可再生實測，壓縮存；體積大不入 git，靠此本地持久化）
 rig-data/
 
-# phone_gen 工具產出物（由工具 + 本地 capture 重生；不入 git，僅追蹤工具碼與手寫頁）
-# workspace_3d.html 由 workspace_viz.js 生成；live.html 是手寫源碼，照常追蹤
+# phone_gen 工具產出物（由工具 + 本地 capture 重生；不入 git，僅追蹤工具碼）
+# workspace_3d.html 由 workspace_viz.js CLI 生成（串流台 live.html 已搬 web/、由 :3000 服務）
 sysid/phone_gen/*.png
 sysid/phone_gen/workspace_3d.html

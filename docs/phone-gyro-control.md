@@ -78,9 +78,9 @@ https://<computer-lan-ip>:3443/phone.html
 
 不想拿真手機，也能餵 rig 同款 PF 串流——`sysid/phone_gen/` 從真實 phone-capture 統計合成「等價手部運動」，走 phone.html 同款 pipeline（`shaped/heading/1€/predict`）→ PF。owner 標 `sim`：**與 phone 同樣驅動，但不開 phone-capture**（模擬資料絕不被當真手機擷取存檔、不汙染語料庫）。
 
-- 啟動：`node sysid/phone_gen/live_server.js`（預設 :8899）。瀏覽器開 `http://localhost:8899/`。
+- 啟動：**併入主 server :3000**（原獨立 `live_server.js :8899` 已退役）。`npm start` 後瀏覽器開 `http://localhost:3000/live.html`（頁面 `web/live.html`）。SSE 生成串流、工作空間包絡皆由 :3000 lazy 服務（首次請求才載/算，不拖慢控制 server 啟動）；無 phone-capture 語料庫時 envelope 仍可服務、`/stream` 回 503 → 只有「模擬」不可用，desktop/phone 照常。
 - 頁面（`live.html`）：左 = 工作空間即時累積點雲（生成 σ vs 手機歷史 σ 收斂監測）、右 = 與主控頁**完全一致**的 3D（紅 rig=板子實際 FK、綠 ghost=模擬 PF 意圖、M1–M6 標籤）、下 = 三軸時域波形。SSE 60Hz 無限串流，速度 ×0.1～×500（log）。
-- 「串接板子」鈕：直連 dashboard 的 :3000 WS、宣告 `{role:'sim'}`。按下後**先起飛回 home**（與 dashboard 同邏輯：`H`→`P home` min-jerk，避免板子從歪姿直接串 PF 大跳/超界），到位才送 `MODE sim` 開始逐幀串 PF。停止／關頁送 `MODE off` 釋放 owner。
-- 串流原語在 `gen.js`（`makeBootstrapStream` + `makePhonePipe`，可 `require`）；CLI `node gen.js --dur <sec> --mode bootstrap|iaaft --validate` 寫固定長度檔。兩條路徑共用同一真相源，不重抄拼接/pipeline 邏輯。
+- 「串接板子」鈕：同源連 :3000 WS、宣告 `{role:'sim'}`。按下後**先起飛回 home**（與 dashboard 同邏輯：`H`→`P home` min-jerk，避免板子從歪姿直接串 PF 大跳/超界），到位才送 `MODE sim` 開始逐幀串 PF。停止／關頁送 `MODE off` 釋放 owner。
+- 串流原語在 `gen.js`（`makeBootstrapStream` + `makePhonePipe`，可 `require`，:3000 直接 require）；CLI `node gen.js --dur <sec> --mode bootstrap|iaaft --validate` 寫固定長度檔。兩條路徑共用同一真相源，不重抄拼接/pipeline 邏輯。
 
 > 詳細生成模型（bootstrap 聯合連續塊 vs iaaft 全合成、多場池化、工作空間守界）見記憶 `project_phone_capture_gen`。
