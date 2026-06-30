@@ -54,27 +54,54 @@
                  color: var(--ink); background: var(--surface); border: 1px solid var(--borderBase);
                  border-radius: 3px; padding: 1px 5px; pointer-events: none; white-space: nowrap;
                  text-shadow: none; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  /* 來源三選一（segmented）*/
+  .seg { display: inline-flex; border: 1px solid var(--borderBase); border-radius: 4px; overflow: hidden; }
+  .seg-btn { font-family: var(--font-mono); font-size: 12px; padding: 5px 11px; border: 0; background: var(--surface);
+             color: var(--sub); cursor: pointer; border-right: 1px solid var(--borderBase); white-space: nowrap; }
+  .seg-btn:last-child { border-right: 0; }
+  .seg-btn.active { background: var(--contra); color: #fff; font-weight: 600; }
+  .seg-btn:disabled { opacity: .45; cursor: not-allowed; }
+  /* 拖滑桿列 */
+  .sl-rows { display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 11px; }
+  .sl-row { display: grid; grid-template-columns: 42px 1fr 46px; align-items: center; gap: 7px; }
+  .sl-row .nm { color: var(--sub); }
+  .sl-row input[type=range] { width: 100%; }
+  .sl-row .vv { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <header class="app-top">
-  <div class="app-top-left"><span class="app-title">模擬手機</span></div>
+  <div class="app-top-left"><span class="app-title">串流台</span></div>
   <nav class="app-nav" aria-label="nav">
     <a class="app-link" id="nav-main" href="/" title="即時主控">主控</a>
-    <a class="app-link active">模擬</a>
+    <a class="app-link active">即時</a>
   </nav>
   <div class="app-top-left" style="justify-self:end; gap:10px;">
     <span class="dev-label">板子 <span id="bdot" class="dot"></span> <span id="bstat">未連線</span></span>
-    <button id="drive" class="chip danger" title="把模擬 PF 串到 :3000（與真手機同路徑驅動板子）">⛓ 串接板子</button>
+    <button id="drive" class="chip danger" title="把所選來源的 PF 串到板子（先起飛回 home 再交棒）">⛓ 串接板子</button>
   </div>
 </header>
 
 <div class="toolbar">
-  <button id="btn" class="chip good">▶ 開始</button>
-  <button id="clr" class="chip" title="清空累積點雲 + 波形">清除軌跡</button>
+  <span class="grp"><span class="lbl">來源</span>
+    <span class="seg">
+      <button id="src-desktop" class="seg-btn" title="拖滑桿即時驅動（desktop owner）">🎯 拖滑桿</button>
+      <button id="src-sim" class="seg-btn active" title="合成手機運動 generator（sim owner，不開 phone-capture）">🤖 模擬</button>
+    </span>
+  </span>
   <span class="sep"></span>
-  <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
-  <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
+  <!-- 模擬來源控制 -->
+  <span id="ctl-sim" class="grp" style="gap:10px">
+    <button id="btn" class="chip good">▶ 開始</button>
+    <button id="clr" class="chip" title="清空累積點雲 + 波形">清除軌跡</button>
+    <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
+    <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
+  </span>
+  <!-- 拖滑桿來源控制 -->
+  <span id="ctl-desktop" class="grp" style="display:none; gap:14px">
+    <label class="grp" title="跟隨緊度（單旋鈕，越大跟越緊）：統管 vmax/加速/jerk/趨近增益"><span class="lbl">跟隨緊度</span><input id="tight" type="range" min="0" max="100" value="50"><b id="tightv" class="mono" style="color:var(--contra);min-width:36px;display:inline-block">50%</b></label>
+    <span class="lbl" title="延遲（真實量測）：e2e=指令→實際 felt-lag；傳輸=板→server 遙測新鮮度">延遲 e2e <b id="lat-e2e" style="color:var(--ink)">—</b> · 傳輸 <b id="lat-tele" style="color:var(--ink)">—</b></span>
+  </span>
   <span class="sep"></span>
   <span id="stat">待機</span>
 </div>
@@ -94,13 +121,18 @@
       <div class="hd" style="color:var(--contra)">收斂監測：生成累積 → 手機歷史</div>
       <div class="grid" id="convgrid"></div>
     </div>
+    <div class="float" id="sliders" style="display:none; top:12px; left:12px; width:212px">
+      <div class="hd">拖滑桿驅動 · 相對 home</div>
+      <div id="sl-rows" class="sl-rows"></div>
+      <button id="sl-center" class="chip" style="width:100%; margin-top:9px; font-size:11px">↺ 回中位</button>
+    </div>
   </div>
   <div class="pane" id="paneR">
     <canvas id="crig"></canvas>
-    <div class="cap">3D 模型 · <span style="color:#2e9c5b">綠 = 模擬 PF（意圖）</span> · <span style="color:var(--dev)">紅 = 板子實際</span></div>
+    <div class="cap">3D 模型 · <span style="color:#2e9c5b">綠 = 意圖 PF</span> · <span style="color:var(--dev)">紅 = 板子實際</span></div>
     <div class="float" id="readout">
       <div class="hd">roll / pitch / yaw（°）</div>
-      <div class="row"><span style="color:#2e9c5b">模擬 PF</span><span id="v-sim" class="mono">0, 0, 0</span></div>
+      <div class="row"><span style="color:#2e9c5b">意圖 PF</span><span id="v-sim" class="mono">0, 0, 0</span></div>
       <div class="row"><span style="color:var(--dev)">板子實際</span><span id="v-act" class="mono">—</span></div>
     </div>
     <div class="hint">拖曳旋轉 · 滾輪縮放</div>
@@ -109,7 +141,7 @@
 
 <div id="wave">
   <div class="leg">三軸時域波形
-    <span><span class="ln" style="border-top:2px solid var(--ink)"></span>模擬 PF（送出）</span>
+    <span><span class="ln" style="border-top:2px solid var(--ink)"></span>意圖 PF（送出）</span>
     <span><span class="ln" style="border-top:2px dashed var(--ink)"></span>板子實際（FK）</span>
     <span style="margin-left:auto"><b style="color:#C0392B">■</b> roll &nbsp;<b style="color:#2e7d46">■</b> pitch &nbsp;<b style="color:#4A6B8C">■</b> yaw</span>
   </div>
@@ -260,14 +292,15 @@ function fmtConv() {
 }
 fmtConv();
 
-// ============ 狀態 + render loop（綠 ghost=模擬 PF 插值到 60Hz；紅 rig=板子實際）============
+// ============ 狀態 + render loop（綠 ghost=當前來源意圖 PF 插值；紅 rig=板子實際）============
+// ghost 插值對三來源通用：sim(SSE)/desktop(滑桿)/phone(server followtgt) 都呼叫 ghostArrive(pose)。
 let boardConnected = false, actPose = null;
-let prevSim = HOMEPOSE.slice(), targetSim = HOMEPOSE.slice(), dispSim = HOMEPOSE.slice();
-let recvAtSim = 0, intervalSim = 16, simActive = false;
-function simArrive(pose) {
+let prevG = HOMEPOSE.slice(), targetG = HOMEPOSE.slice(), dispG = HOMEPOSE.slice();
+let recvAtG = 0, intervalG = 16, ghostActive = false;
+function ghostArrive(pose) {
   const now = performance.now();
-  if (recvAtSim) intervalSim = intervalSim * 0.7 + Math.max(1, Math.min(1000, now - recvAtSim)) * 0.3;
-  prevSim = dispSim.slice(); targetSim = pose.slice(); recvAtSim = now; simActive = true;
+  if (recvAtG) intervalG = intervalG * 0.7 + Math.max(1, Math.min(1000, now - recvAtG)) * 0.3;
+  prevG = dispG.slice(); targetG = pose.slice(); recvAtG = now; ghostActive = true;
 }
 function resize() {
   for (const [host, cam, rdr] of [[hostW, camW, rdrW], [hostR, camR, rdrR]]) {
@@ -282,10 +315,10 @@ function loop() {
   requestAnimationFrame(loop);
   ctlW.update(); ctlR.update();
   if (accGeoDirty) { accumGeo.setDrawRange(0, accCount); accumGeo.attributes.position.needsUpdate = true; accGeoDirty = false; }
-  if (simActive) {                                  // 綠 ghost：模擬 PF 線性插值播放
-    const frac = recvAtSim ? Math.min(1, (performance.now() - recvAtSim) / intervalSim) : 1;
-    for (let i = 0; i < 6; i++) dispSim[i] = prevSim[i] + (targetSim[i] - prevSim[i]) * frac;
-    ghost.update(Kin.ik(dispSim).angles, dispSim);
+  if (ghostActive) {                                // 綠 ghost：當前來源意圖線性插值播放
+    const frac = recvAtG ? Math.min(1, (performance.now() - recvAtG) / intervalG) : 1;
+    for (let i = 0; i < 6; i++) dispG[i] = prevG[i] + (targetG[i] - prevG[i]) * frac;
+    ghost.update(Kin.ik(dispG).angles, dispG);
   }
   rig.update(Kin.ik(actPose || HOMEPOSE).angles, actPose || HOMEPOSE);   // 紅 rig：板子實際（無遙測→home）
   drawWave();
@@ -293,17 +326,37 @@ function loop() {
 }
 loop();
 
-// ============ 控制系統連線（同源 :3000，板子實際 + 串接驅動）============
-let ws3 = null, ws3Timer = null;
+// ============ 控制系統連線（同源 :3000）+ 來源(owner)仲裁 ============
+// 三來源各是一個 server owner：sim(SSE generator) / desktop(拖滑桿) / phone(陀螺儀，A3)。
+// PF owner-gate 要求 ws._role===controlOwner → 換來源時重新宣告 role，進入時才送 MODE。
+const wsReady = () => ws3 && ws3.readyState === 1;
+const btn = document.getElementById('btn'), statEl = document.getElementById('stat'), seedEl = document.getElementById('seed');
+const speedEl = document.getElementById('speed'), speedvEl = document.getElementById('speedv'), driveBtn = document.getElementById('drive');
 const bdot = document.getElementById('bdot'), bstat = document.getElementById('bstat');
+let ws3 = null, ws3Timer = null;
+let currentSource = 'sim';   // 'sim' | 'desktop'（A3 加 'phone'）
+let driving = false;         // 板子正被本頁所選來源驅動
+let lastTele = null;         // 最近一幀完整遙測（pos/hold 給起飛狀態機）
+
+// home / landing 絕對姿態（與主控頁同源；起飛目標）。非阻塞 fetch，回退 HOMEPOSE。
+let homeAbs = HOMEPOSE.slice(), landingAbs = null;
+fetch('/api/platform-config').then(r => r.json()).then(cfg => {
+  if (Array.isArray(cfg.homePose) && cfg.homePose.length === 6) homeAbs = cfg.homePose.map(Number);
+  if (Array.isArray(cfg.landingPose) && cfg.landingPose.length === 6) landingAbs = cfg.landingPose.map(Number);
+}).catch(() => {});
+
 function setBoard(conn) { boardConnected = conn; bdot.classList.toggle('on', conn); bstat.textContent = conn ? '已連線' : '未連線'; if (!conn) { actPose = null; elAct.textContent = '—'; } }
+function declareRole() { if (wsReady()) ws3.send(JSON.stringify({ role: currentSource })); }   // server 接 'sim'/'phone'，'desktop' 落預設
 function connect3000() {
   try { ws3 = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`); } catch { scheduleReconnect(); return; }
-  ws3.onopen = () => ws3.send(JSON.stringify({ role: 'sim' }));
+  ws3.onopen = () => declareRole();
   ws3.onmessage = e => {
     let d; try { d = JSON.parse(e.data); } catch { return; }
     if (d.evt === 'transport') { setBoard(d.state === 'connected'); return; }
+    if (d.evt === 'mode') { onModeBroadcast(d.owner); return; }
+    if (d.evt === 'latency') { onLatency(d); return; }
     if (Array.isArray(d.a)) {
+      lastTele = d;
       const fk = Kin.solveFK(d.a);
       if (fk && fk.pose) { actPose = fk.pose.slice(); pushWave(actWave, [fk.pose[3], fk.pose[4], fk.pose[5]]); elAct.textContent = fmt3(fk.pose); }
       if (!boardConnected) setBoard(true);
@@ -315,10 +368,34 @@ function connect3000() {
 function scheduleReconnect() { if (ws3Timer) return; ws3Timer = setTimeout(() => { ws3Timer = null; connect3000(); }, 3000); }
 connect3000();
 
-// ============ SSE 生成串流 + 速度 + 串接驅動 ============
-const btn = document.getElementById('btn'), statEl = document.getElementById('stat'), seedEl = document.getElementById('seed');
-const speedEl = document.getElementById('speed'), speedvEl = document.getElementById('speedv'), driveBtn = document.getElementById('drive');
-let es = null, t0 = 0, fpsAcc = 0, lastFpsT = 0, pps = 0, curSeed = 0, lastN = 0, lastIk = 0, driving = false;
+// server 權威 owner 廣播：若被其他端接管（owner 變成別的非本來源）→ 復原本頁串接 UI（板子已不歸我）。
+function onModeBroadcast(owner) {
+  if (driving && owner && owner !== currentSource) stopDriveLocal('其他端已接管');
+}
+// 跟隨延遲（server evt:'latency'，真實量測）：e2e=指令→實際 felt-lag；tele=板→server 遙測新鮮度。
+function onLatency(d) {
+  const e2e = document.getElementById('lat-e2e'), tele = document.getElementById('lat-tele');
+  if (e2e) { if (d.e2e == null) { e2e.textContent = d.following ? '量測中…' : '—'; e2e.style.color = 'var(--sub)'; } else { e2e.textContent = Math.round(d.e2e) + ' ms'; e2e.style.color = d.e2e < 150 ? '#326f63' : d.e2e < 300 ? '#b2642c' : '#b73b36'; } }
+  if (tele) { tele.textContent = d.teleAge == null ? '—' : Math.round(d.teleAge) + ' ms'; tele.style.color = (d.teleAge != null && d.teleAge < 120) ? 'var(--ink)' : '#b2642c'; }
+}
+
+// ============ PF 串接（節流 ~100Hz；僅 driving 且本來源產生意圖時送）============
+let _pfLast = 0, _pfTimer = null, _pfPending = null;
+function streamPFBoard(pose) {
+  if (!driving || !wsReady()) return;
+  _pfPending = pose;
+  const dt = performance.now() - _pfLast;
+  if (dt >= 12) _pfFlush(); else if (!_pfTimer) _pfTimer = setTimeout(_pfFlush, 12 - dt);
+}
+function _pfFlush() {
+  _pfTimer = null;
+  if (!driving || !wsReady() || !_pfPending) { _pfPending = null; return; }
+  const p = _pfPending; _pfPending = null; _pfLast = performance.now();
+  ws3.send(JSON.stringify({ cmd: 'PF ' + p.map(v => v.toFixed(2)).join(' ') }));
+}
+
+// ============ 模擬來源：SSE 生成串流 + 速度 ============
+let es = null, t0 = 0, fpsAcc = 0, lastFpsT = 0, pps = 0, curSeed = 0, lastN = 0, lastIk = 0;
 const SMIN = 0.1, SMAX = 500, SL0 = Math.log10(SMIN), SL1 = Math.log10(SMAX);
 const sliderToSpeed = (pos) => Math.pow(10, SL0 + (pos / 1000) * (SL1 - SL0));
 const speedToSlider = (s) => Math.round(1000 * (Math.log10(s) - SL0) / (SL1 - SL0));
@@ -331,8 +408,8 @@ function openStream() {
   es.onmessage = e => {
     const f = JSON.parse(e.data);
     for (const p of f.pts) accumPush(p[0], p[1], p[2]);
-    simArrive(f.last); pushWave(simWave, [f.last[3], f.last[4], f.last[5]]); elSim.textContent = fmt3(f.last);
-    if (driving && ws3 && ws3.readyState === 1) ws3.send(JSON.stringify({ cmd: 'PF ' + f.last.map(v => v.toFixed(2)).join(' ') }));
+    ghostArrive(f.last); pushWave(simWave, [f.last[3], f.last[4], f.last[5]]); elSim.textContent = fmt3(f.last);
+    if (driving && currentSource === 'sim') streamPFBoard(f.last);
     lastN = f.n; lastIk = f.ikDrop; fpsAcc += f.pts.length;
     const now = performance.now();
     if (now - lastFpsT >= 500) { pps = fpsAcc / (now - lastFpsT) * 1000; fpsAcc = 0; lastFpsT = now;
@@ -344,14 +421,14 @@ function openStream() {
   };
   es.onerror = () => { statEl.innerHTML = '<b style="color:var(--dev)">生成連線中斷</b>'; };
 }
-function start() { t0 = performance.now(); lastFpsT = t0; fpsAcc = 0; openStream(); btn.textContent = '■ 停止'; btn.classList.remove('good'); btn.classList.add('danger'); }
-function stop() {
+function startSim() { t0 = performance.now(); lastFpsT = t0; fpsAcc = 0; openStream(); btn.textContent = '■ 停止'; btn.classList.remove('good'); btn.classList.add('danger'); }
+function stopSim() {
   if (es) { es.close(); es = null; }
-  if (driving) toggleDrive();
+  if (driving && currentSource === 'sim') exitDrive();
   btn.textContent = '▶ 開始'; btn.classList.add('good'); btn.classList.remove('danger');
   statEl.innerHTML = `已停 · 累積 <b>${accCount.toLocaleString()}</b> 點`; fmtConv();
 }
-btn.onclick = () => (es ? stop() : start());
+btn.onclick = () => (es ? stopSim() : startSim());
 document.getElementById('clr').onclick = () => {
   accHead = 0; accCount = 0; accGeoDirty = true; simWave.length = 0; actWave.length = 0;
   if (es) { lastN = 0; lastIk = 0; t0 = performance.now(); } fmtConv();
@@ -361,30 +438,119 @@ speedEl.addEventListener('input', () => { curSpeed = sliderToSpeed(speedEl.value
 speedEl.addEventListener('change', () => { curSpeed = sliderToSpeed(speedEl.value); speedvEl.textContent = '×' + fmtSpeed(curSpeed); if (es) { es.close(); openStream(); } });
 speedvEl.textContent = '×' + fmtSpeed(curSpeed);
 
-// 串接板子：先起飛回 home（與主畫面同邏輯），到位才 MODE sim（不開 phone-capture）+ 鎖 ×1 逐幀送 PF。
-// 板子常停在歪姿（上次串流殘留），直接串 PF 會大跳/超工作空間 → H→P home 用 min-jerk 平滑帶回再交棒。
-const wsReady = () => ws3 && ws3.readyState === 1;
-async function toggleDrive() {
-  if (driving) {   // 停止串接
-    driving = false; driveBtn.classList.remove('active'); driveBtn.textContent = '⛓ 串接板子'; speedEl.disabled = false;
-    if (wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' }));
-    return;
+// ============ 拖滑桿來源：6 軸相對 home 偏移 → ghost + (driving 時)串 PF ============
+const SL_AXES = [
+  { k: 'z', nm: 'Heave', i: 2, min: -20, max: 30 }, { k: 'x', nm: 'Surge', i: 0, min: -50, max: 50 },
+  { k: 'y', nm: 'Sway', i: 1, min: -50, max: 50 }, { k: 'r', nm: 'Roll', i: 3, min: -18, max: 18 },
+  { k: 'p', nm: 'Pitch', i: 4, min: -18, max: 18 }, { k: 'w', nm: 'Yaw', i: 5, min: -60, max: 60 },
+];
+const slEls = {};
+(function buildSliders() {
+  const host = document.getElementById('sl-rows');
+  for (const a of SL_AXES) {
+    const row = document.createElement('div'); row.className = 'sl-row';
+    row.innerHTML = `<span class="nm">${a.nm}</span><input type="range" id="sl-${a.k}" min="${a.min}" max="${a.max}" value="0" step="${a.i >= 3 ? 0.5 : 1}"><span class="vv" id="slv-${a.k}">0</span>`;
+    host.appendChild(row);
+    slEls[a.k] = row.querySelector('input'); slEls[a.k].addEventListener('input', onSlider);
   }
-  if (!boardConnected || !wsReady()) { statEl.innerHTML = '<b style="color:var(--dev)">需先連線板子才能串接</b>'; return; }
-  driveBtn.disabled = true; btn.disabled = true; driveBtn.textContent = '⤴ 起飛回 home…';   // 起飛中鎖兩鈕
-  const ms = 1800;
-  ws3.send(JSON.stringify({ cmd: 'H' }));                                                    // 抓當前、使能死咬
-  await sleep(160);
-  ws3.send(JSON.stringify({ cmd: `P ${HOMEPOSE.map(v => v.toFixed(2)).join(' ')} ${ms}` })); // min-jerk 回 home
-  await sleep(ms + 220);
-  driveBtn.disabled = false; btn.disabled = false;
-  if (!boardConnected || !wsReady()) { driveBtn.textContent = '⛓ 串接板子'; statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
-  driving = true; driveBtn.classList.add('active'); driveBtn.textContent = '⛓ 已串接（按停）'; speedEl.disabled = true;
-  setSpeed(1); if (es) { es.close(); openStream(); } else start();
-  ws3.send(JSON.stringify({ cmd: 'MODE sim' }));   // 到 home 才交棒：FOLLOW 1 從 home 起，PF 從 home 平滑串
+})();
+function desktopPose() {
+  const p = HOMEPOSE.slice();
+  for (const a of SL_AXES) { const v = Number(slEls[a.k].value); p[a.i] = HOMEPOSE[a.i] + v; document.getElementById('slv-' + a.k).textContent = a.i >= 3 ? v.toFixed(1) : v.toFixed(0); }
+  return p;
 }
-driveBtn.onclick = toggleDrive;
-addEventListener('beforeunload', () => { if (driving && ws3 && ws3.readyState === 1) ws3.send(JSON.stringify({ cmd: 'MODE off' })); });
+function onSlider() {
+  const pose = desktopPose();
+  ghostArrive(pose); pushWave(simWave, [pose[3], pose[4], pose[5]]); elSim.textContent = fmt3(pose);
+  if (driving && currentSource === 'desktop') streamPFBoard(pose);
+}
+document.getElementById('sl-center').onclick = () => { for (const a of SL_AXES) slEls[a.k].value = 0; onSlider(); };
+
+// 跟隨緊度單旋鈕 → FE（一鈕統管 vmax/加速/jerk/趨近增益）；input ~10Hz 節流、change 補最終值。
+const tightEl = document.getElementById('tight'), tightvEl = document.getElementById('tightv');
+let _feLast = 0;
+const sendFE = (pct) => { if (wsReady()) ws3.send(JSON.stringify({ cmd: `FE ${(pct / 100).toFixed(3)}` })); };
+tightEl.addEventListener('input', () => { const pct = Number(tightEl.value); tightvEl.textContent = pct + '%'; const now = performance.now(); if (now - _feLast >= 100) { _feLast = now; sendFE(pct); } });
+tightEl.addEventListener('change', () => { _feLast = performance.now(); sendFE(Number(tightEl.value)); });
+
+// ============ 來源切換（串接中鎖定）============
+function lockSourceUI(lock) { document.getElementById('src-sim').disabled = lock; document.getElementById('src-desktop').disabled = lock; }
+function showSourceControls() {
+  const sim = currentSource === 'sim', desk = currentSource === 'desktop';
+  document.getElementById('ctl-sim').style.display = sim ? '' : 'none';
+  document.getElementById('ctl-desktop').style.display = desk ? '' : 'none';
+  document.getElementById('legend').style.display = sim ? '' : 'none';
+  document.getElementById('conv').style.display = sim ? '' : 'none';
+  document.getElementById('sliders').style.display = desk ? '' : 'none';
+  accumPts.visible = sim && document.getElementById('ck-accum').checked;
+  cloudPhone.visible = sim && document.getElementById('ck-phone').checked;
+  document.getElementById('src-sim').classList.toggle('active', sim);
+  document.getElementById('src-desktop').classList.toggle('active', desk);
+}
+function setSource(src) {
+  if (src === currentSource || driving) return;   // 串接中不可換來源（先按停）
+  if (currentSource === 'sim' && es) stopSim();
+  currentSource = src;
+  declareRole();                                   // ws._role 跟著來源走 → PF 過 owner gate
+  ghostActive = false; ghost.hide();
+  showSourceControls();
+  statEl.textContent = '待機';
+  if (src === 'desktop') onSlider();               // 立即顯示滑桿 ghost
+}
+document.getElementById('src-sim').onclick = () => setSource('sim');
+document.getElementById('src-desktop').onclick = () => setSource('desktop');
+
+// ============ 串接驅動：先起飛回 home（D/H/E 狀態機，與主控頁同邏輯），到位才 MODE <來源> ============
+function armState() {
+  if (!lastTele || !wsReady()) return 'offline';
+  if (!lastTele.pos) return 'D';                   // 斷電
+  if (Array.isArray(lastTele.hold)) return 'H';    // 死咬中
+  return 'E';                                      // 使能非死咬
+}
+async function armSegP(pose, label) {
+  if (!wsReady()) return false;
+  if (!Kin.ik(pose).valid) { statEl.innerHTML = `<b style="color:var(--dev)">起飛中止：${label}超工作空間</b>`; return false; }
+  const ms = 1500;
+  ws3.send(JSON.stringify({ cmd: `P ${pose.map(v => v.toFixed(2)).join(' ')} ${ms}` }));
+  driveBtn.textContent = `⤴ 起飛 → ${label}…`;
+  await sleep(ms + 220);
+  return wsReady();
+}
+async function armToHome() {
+  const st = armState();
+  if (st === 'offline') { statEl.innerHTML = '<b style="color:var(--dev)">未連線，無法起飛</b>'; return false; }
+  if (!Kin.ik(homeAbs).valid) { statEl.innerHTML = '<b style="color:var(--dev)">home 超工作空間</b>'; return false; }
+  if (st === 'D') {                                // 斷電：H 抓當前 → (有 landing 則經 release) → home
+    ws3.send(JSON.stringify({ cmd: 'H' })); await sleep(220); if (!wsReady()) return false;
+    if (landingAbs && Kin.ik(landingAbs).valid && !await armSegP(landingAbs, 'release')) return false;
+    if (!await armSegP(homeAbs, 'home')) return false;
+  } else {
+    if (st === 'E') { ws3.send(JSON.stringify({ cmd: 'H' })); await sleep(220); if (!wsReady()) return false; }
+    if (!await armSegP(homeAbs, 'home')) return false;
+  }
+  return true;
+}
+function setDriveBtn(on) { driveBtn.classList.toggle('active', on); driveBtn.textContent = on ? '⛓ 已串接（按停）' : '⛓ 串接板子'; }
+function stopDriveLocal(why) { driving = false; setDriveBtn(false); lockSourceUI(false); if (currentSource === 'sim') speedEl.disabled = false; if (why) statEl.innerHTML = `<b style="color:var(--dev)">${why}</b>`; }
+async function enterDrive() {
+  if (!boardConnected || !wsReady()) { statEl.innerHTML = '<b style="color:var(--dev)">需先連線板子才能串接</b>'; return; }
+  driveBtn.disabled = true; lockSourceUI(true); if (currentSource === 'sim') btn.disabled = true;
+  driveBtn.textContent = '⤴ 起飛回 home…';
+  const ok = await armToHome();
+  driveBtn.disabled = false; if (currentSource === 'sim') btn.disabled = false;
+  if (!ok || !boardConnected || !wsReady()) { setDriveBtn(false); lockSourceUI(false); if (ok) statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
+  driving = true; setDriveBtn(true);
+  if (currentSource === 'sim') { speedEl.disabled = true; setSpeed(1); if (!es) startSim(); }
+  ws3.send(JSON.stringify({ cmd: 'MODE ' + currentSource }));   // 到 home 才交棒：FOLLOW 1 從 home 起、PF 平滑串
+}
+function exitDrive() {
+  driving = false; setDriveBtn(false); lockSourceUI(false);
+  if (currentSource === 'sim') speedEl.disabled = false;
+  if (wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' }));
+}
+driveBtn.onclick = () => (driving ? exitDrive() : enterDrive());
+showSourceControls();
+addEventListener('beforeunload', () => { if (driving && wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' })); });
 </script>
 </body>
 </html>
