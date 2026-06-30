@@ -2570,7 +2570,7 @@ const requestHandler = (req, res) => {
     return;
   }
 
-  // 手機配對資訊：dashboard 的「📱 陀螺儀」鈕 fetch 此端點組 QR（指向 phone.html）。
+  // 手機配對資訊：串流台 /live.html「手機」來源的 QR 面板 fetch 此端點組 QR（指向 phone.html）。
   if (req.url === '/api/netinfo') {
     const lan = lanHost();
     res.writeHead(200, { 'Content-Type': 'application/json' });
