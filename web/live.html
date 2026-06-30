@@ -90,13 +90,13 @@
   <span class="sep"></span>
   <!-- 模擬來源控制 -->
   <span id="ctl-sim" class="grp" style="gap:10px">
-    <button id="btn" class="chip good">▶ 開始</button>
+    <button id="btn" class="chip" title="不接板子、純跑產生器累積點雲做工作空間覆蓋研究；驅動板子請按右上「串接板子」">▶ 預覽產生器</button>
     <button id="clr" class="chip" title="清空累積點雲 + 波形">清除軌跡</button>
     <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
     <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
   </span>
   <!-- 手機來源提示 -->
-  <span id="ctl-phone" class="grp lbl" style="display:none">掃左側 QR → 手機點「校正」→ 按「串接板子」交棒 → 傾斜手機即時驅動</span>
+  <span id="ctl-phone" class="grp lbl" style="display:none" title="① 掃左側 QR 開手機頁 ② 手機點「校正」歸零 ③ 按右上「串接板子」起飛交棒 ④ 傾斜手機即時驅動">📱 掃左側 QR 配對 →「串接板子」驅動</span>
   <!-- 跟隨來源（拖滑桿 / 手機）共用：緊度 + 延遲 -->
   <span id="ctl-follow" class="grp" style="display:none; gap:14px">
     <label class="grp" title="跟隨緊度（單旋鈕，越大跟越緊）：統管 vmax/加速/jerk/趨近增益"><span class="lbl">跟隨緊度</span><input id="tight" type="range" min="0" max="100" value="50"><b id="tightv" class="mono" style="color:var(--contra);min-width:36px;display:inline-block">50%</b></label>
@@ -442,11 +442,11 @@ function openStream() {
   };
   es.onerror = () => { statEl.innerHTML = '<b style="color:var(--dev)">生成連線中斷</b>'; };
 }
-function startSim() { t0 = performance.now(); lastFpsT = t0; fpsAcc = 0; openStream(); btn.textContent = '■ 停止'; btn.classList.remove('good'); btn.classList.add('danger'); }
+function startSim() { t0 = performance.now(); lastFpsT = t0; fpsAcc = 0; openStream(); btn.textContent = '■ 停預覽'; btn.classList.add('active'); }
 function stopSim() {
   if (es) { es.close(); es = null; }
   if (driving && currentSource === 'sim') exitDrive();
-  btn.textContent = '▶ 開始'; btn.classList.add('good'); btn.classList.remove('danger');
+  btn.textContent = '▶ 預覽產生器'; btn.classList.remove('active');
   statEl.innerHTML = `已停 · 累積 <b>${accCount.toLocaleString()}</b> 點`; fmtConv();
 }
 btn.onclick = () => (es ? stopSim() : startSim());
@@ -499,7 +499,7 @@ function lockSourceUI(lock) { for (const id of ['src-sim', 'src-desktop', 'src-p
 function showSourceControls() {
   const sim = currentSource === 'sim', desk = currentSource === 'desktop', phone = currentSource === 'phone';
   document.getElementById('ctl-sim').style.display = sim ? '' : 'none';
-  document.getElementById('ctl-follow').style.display = (desk || phone) ? '' : 'none';   // 緊度+延遲 = 跟隨來源共用
+  document.getElementById('ctl-follow').style.display = '';   // 緊度+延遲：三來源都串 PF 過 followStep → 恆顯
   document.getElementById('ctl-phone').style.display = phone ? '' : 'none';
   document.getElementById('legend').style.display = sim ? '' : 'none';
   document.getElementById('conv').style.display = sim ? '' : 'none';
@@ -519,6 +519,7 @@ function setSource(src) {
   statEl.textContent = '待機';
   if (src === 'desktop') onSlider();               // 立即顯示滑桿 ghost
   if (src === 'phone') openPhonePanel();           // 彈 QR 供掃碼配對
+  if (src === 'sim' && !es) startSim();            // 選取即預覽：ghost 立即動（與拖滑桿對齊）
 }
 document.getElementById('src-sim').onclick = () => setSource('sim');
 document.getElementById('src-desktop').onclick = () => setSource('desktop');
