@@ -1465,7 +1465,9 @@ function sendPoseCommand(pose, label) {
 // FOLLOW 0 不動 holdMode → 退出後 holdMode 仍 true、P 立即可用、isHolding 不掉。
 function exitFollowForDiscrete() {
   cancelArm();   // 作廢進行中的起飛編排（離散 P 指令搶佔，避免兩條 P 鏈衝突）
-  if (controlMode === 'desktop') window.sendCmd('MODE off');
+  // 退出任何串流 owner（desktop 滑桿跟隨 或 phone 陀螺儀）→ 韌體 FOLLOW 0、followStep 不再壓過 P。
+  // 不分 owner：操作員按到達指定位置 = 接管控制權並走 P；phone 端見 owner 釋放即停止串流。
+  if (controlMode === 'desktop' || controlMode === 'phone') window.sendCmd('MODE off');
   if (followActive) followReset();
 }
 window.poseGo = function() {
@@ -1583,10 +1585,18 @@ window.toggleFollow = async function() {
     else updateFollowUI();                        // 起飛失敗 → 復原按鈕文字
   } finally { _arming = false; }
 };
-// 手機模式 = 手機陀螺儀獨立驅動。與電腦模式互斥（server owner 仲裁）。開啟同時彈 QR 配對面板。
-window.toggleGyroMode = function() {
-  if (controlMode === 'phone') { window.sendCmd('MODE off'); }
-  else { window.sendCmd('MODE phone'); window.openPhonePanel(); }
+// 手機模式 = 手機陀螺儀獨立驅動。與電腦模式互斥（server owner 仲裁）。進入前同樣先用 P 帶到 home(起飛)，
+// 到位才 MODE phone 交棒；QR 配對面板先彈讓使用者掃，起飛同時進行。phone.html 由 server owner 廣播
+// 驅動 followActive，唯一進入點就是此處 MODE phone → 起飛閘完整覆蓋手機模式。
+window.toggleGyroMode = async function() {
+  if (controlMode === 'phone') { window.sendCmd('MODE off'); return; }
+  if (_arming) return;                          // 起飛進行中，忽略重複點擊
+  _arming = true;
+  window.openPhonePanel();                       // 先彈 QR：起飛同時可掃碼配對
+  try {
+    const ok = await armToHome('手機模式');
+    if (ok) window.sendCmd('MODE phone');         // 到 home 才交棒給手機，phone.html 從 home 起串流
+  } finally { _arming = false; }
 };
 // server 廣播 evt:'mode' 的權威狀態 → 落實兩個互斥世界的 UI 鎖定。
 let controlMode = null;   // null | 'desktop' | 'phone'
