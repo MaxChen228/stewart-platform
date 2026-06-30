@@ -1459,6 +1459,14 @@ function sendPoseCommand(pose, label) {
   return prof;
 }
 
+// 「到達指定位置」鐵律：HOME/RELEASE/GO 是離散 pose 目標 → 一律走 P min-jerk（最優波形），
+// 絕不走 PF 串流濾波器。若正在跟隨，先退串流：韌體 followStep 會壓過 P 軌跡，必須先 FOLLOW 0。
+// MODE off 釋放 owner（server 轉 FOLLOW 0）；followReset 立即停本地 PF pump（不等遙測往返）。
+// FOLLOW 0 不動 holdMode → 退出後 holdMode 仍 true、P 立即可用、isHolding 不掉。
+function exitFollowForDiscrete() {
+  if (controlMode === 'desktop') window.sendCmd('MODE off');
+  if (followActive) followReset();
+}
 window.poseGo = function() {
   const o = poseReadOffset();   // [x,y,z,roll,pitch,yaw] 相對中位偏移
   const st = document.getElementById('pose-ctl-status');
@@ -1466,18 +1474,14 @@ window.poseGo = function() {
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   if (!window.Kin.ik(pose).valid) { st.textContent = '✗ 超工作空間'; st.style.color = 'var(--dev)'; return; }
   st.style.color = 'var(--sub)';
-  if (followActive) {   // 跟隨下：GO = 更新跟隨目標（濾波器 ease 過去），不發 smoothstep P
-    streamPF(pose);
-    st.textContent = `→ 跟隨目標 [${pose.map(x=>x.toFixed(1)).join(', ')}]`;
-    return;
-  }
+  exitFollowForDiscrete();   // 到達指定位置 = P：跟隨中先退串流，不走 PF
   sendPoseCommand(pose, '絕對 pose');
 };
 window.poseHome = function() {
-  // 回到 homePose（預設中位，或經「存 Home」設定的姿態）。先把滑桿同步到 home offset。
+  // 回到 homePose（預設中位，或經「存 Home」設定的姿態）。到達指定位置一律走 P（跟隨中先退串流）。
+  exitFollowForDiscrete();
   poseApplyHomeToSliders();
-  poseUpdateGhost();   // followActive 時此呼叫會 streamPF(home) → 濾波器 ease 回 home
-  if (followActive) return;
+  poseUpdateGhost();   // followActive 已 false → 不會 streamPF stale 值
   const o = poseReadOffset();   // 讀回 clamp 後的滑桿值 → 送出與 ghost 一致（home 若超滑桿範圍不分歧）
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   sendPoseCommand(pose, 'HOME');
@@ -1494,10 +1498,10 @@ window.poseSetHome = function() {
   st.textContent = `⌂ Home 已設為 [${homePose.map(x => x.toFixed(1)).join(', ')}]`;
 };
 window.poseRelease = function() {
-  // Release 目標 = 實驗流程中的 landingPose；此按鈕只移到該 pose，不直接 D 斷電。
+  // Release 目標 = 實驗流程中的 landingPose；到達指定位置一律走 P（跟隨中先退串流），只移到該 pose 不斷電。
+  exitFollowForDiscrete();
   poseApplyReleaseToSliders();
   poseUpdateGhost();
-  if (followActive) return;
   const o = poseReadOffset();
   const pose = [o[0], o[1], NEUTRAL_Z + o[2], o[3], o[4], o[5]];
   sendPoseCommand(pose, 'RELEASE');
