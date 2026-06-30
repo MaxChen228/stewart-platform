@@ -7,7 +7,7 @@
 // 兩種用途：
 //   1) CLI 寫固定長度檔：node sysid/phone_gen/gen.js --dur <sec> --mode bootstrap|iaaft [--seed N --ref a,b --out f --validate]
 //   2) require：const G = require('./gen.js'); 取 loadSessions / makeBootstrapStream / makePhonePipe 做「無限/即時」串流
-//      （live_server.js、圖靈測試 battery 皆走此路，不重抄拼接/pipeline 邏輯）。
+//      （server.js 串流台 SSE /stream、圖靈測試 battery 皆走此路，不重抄拼接/pipeline 邏輯）。
 //
 // ⚠️ pipeline 常數是 web/phone.html 的鏡像（SoT=phone.html）。改 phone.html 的 MAP/OEF 要同步這裡。
 // ⚠️ 生成率固定 60Hz＝iOS deviceorientation 物理上限；整個模型建在此率上，不開放變動。

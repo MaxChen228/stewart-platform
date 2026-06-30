@@ -7,7 +7,7 @@
 // 兩種用途：
 //   1) CLI 吐自包含 three.js HTML：node sysid/phone_gen/workspace_viz.js [--out f.html]
 //   2) require：const { computeWorkspaceData } = require('./workspace_viz.js') → 取 {workspace,safe,phone,lim,stats}
-//      （live_server.js 啟動算一次、serve /workspace_data.json，供即時累積頁渲染包絡+橘歷史；不重抄掃描邏輯）。
+//      （server.js 串流台首次請求 lazy 算一次、serve /workspace_data.json，供即時累積頁渲染包絡+橘歷史；不重抄掃描邏輯）。
 const fs = require('fs'), path = require('path');
 const Kin = require(path.join(__dirname, '..', 'kin.js'));
 const HOME = [0, 0, 133, 0, 0, 0];
@@ -49,7 +49,7 @@ function computeWorkspaceData() {
 
   const axMax = (axis) => { let m = 0, mn = 0; for (let v = 0; v <= 92; v += 0.5) { const a = [0, 0, 0]; a[axis] = v; if (ik(a[0], a[1], a[2])) m = v; else break; } for (let v = 0; v >= -92; v -= 0.5) { const a = [0, 0, 0]; a[axis] = v; if (ik(a[0], a[1], a[2])) mn = v; else break; } return [mn, m]; };
   const rollAt = (y) => { let m = 0; for (let v = 0; v <= 60; v += 0.5) { if (ik(v, 0, y)) m = v; else break; } return m; };
-  const pfRange = () => { const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; for (const p of phone) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); } return { mn: mn.map(v => +v.toFixed(1)), mx: mx.map(v => +v.toFixed(1)) }; };
+  const pfRange = () => { if (!phone.length) return { mn: [0, 0, 0], mx: [0, 0, 0] }; const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; for (const p of phone) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); } return { mn: mn.map(v => +v.toFixed(1)), mx: mx.map(v => +v.toFixed(1)) }; };
   // 手機雲每軸標準差（生成累積收斂的量化標的）
   const pfStd = () => { const out = []; for (let k = 0; k < 3; k++) { const vs = phone.map(p => p[k]); if (!vs.length) { out.push(0); continue; } const m = vs.reduce((a, b) => a + b, 0) / vs.length; out.push(+Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length).toFixed(1)); } return out; };
   const voxVol = RR[2] * PR[2] * YR[2];
