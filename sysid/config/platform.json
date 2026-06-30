@@ -34,12 +34,12 @@
   },
   "uiState": {
     "poseTargetRelative": [
-      0,
-      4,
-      28,
-      8,
-      0,
-      0
+      6,
+      -4,
+      14,
+      -0.5,
+      -2,
+      -2
     ],
     "poseMoveMs": 300,
     "poseSpeedIndex": 28,
@@ -175,5 +175,5 @@
     ],
     "herrBackstopDeg": 15
   },
-  "updatedAt": "2026-06-30T02:43:38.850Z"
+  "updatedAt": "2026-06-30T05:11:39.061Z"
 }
