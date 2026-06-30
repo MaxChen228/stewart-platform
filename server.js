@@ -933,6 +933,7 @@ function manualPfUpdateTarget(cmd) {
   manualPf.targetUpdates++;
   manualPf.lastReason = null;
   pushWindow(manualPf.inputWindow, { at: now, pose }, now);
+  phoneCapWrite('pf', { pose });   // 原始 PF intent（僅在 phone-capture 已開檔時落盤）
   followDiagWrite('manual_pf_target', {
     pose,
     targetUpdates: manualPf.targetUpdates,
@@ -949,6 +950,43 @@ function manualPfUpdateTarget(cmd) {
     manualPfTick();
   }
   return { ok: true, via: 'manual-pf-resample' };
+}
+
+// ===== 手機運動原始資料擷取（generator 用，獨立於 followDiag 健康診斷）=====
+// 三路全速、同一 performance.now 時鐘落盤 sysid/data/phone-capture/cap_*.jsonl：
+//   imu  — 手機上傳的原始 IMU(α/β/γ) + 濾波前手部相對角(relEuler) + 濾波後 rpy(cmdRpy)
+//   pf   — server 收到的每筆原始 PF intent(~30Hz，手機真實輸出，非 100Hz 重取樣)
+//   tele — 每幀完整遙測 actual(a[6]+pose+ctl flags)，量測機器響應
+// phone-session-scoped：開/關檔邊界 = server 權威的 controlOwner==='phone'（dashboard 手機模式）。
+// 每場 phone session 一個乾淨檔；imu/pf/tele 皆「已開檔才寫」→ rig/滑桿(owner≠phone)永不污染、
+// 對快取舊手機頁(無 IMU 上傳)仍 robust(pf+tele 照錄、僅缺 imu 源層)。FOLLOW_DIAG 路徑不變。
+const PHONE_CAP_ENABLED = process.env.PHONE_CAPTURE !== '0';
+const PHONE_CAP_DIR = path.join(REC_DIR, 'phone-capture');
+let phoneCapStream = null, phoneCapPath = null, phoneCapT0 = 0, phoneCapN = 0;
+function phoneCapOpen() {
+  if (phoneCapStream || !PHONE_CAP_ENABLED) return;
+  fs.mkdirSync(PHONE_CAP_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  phoneCapPath = path.join(PHONE_CAP_DIR, `cap_${stamp}.jsonl`);
+  phoneCapStream = fs.createWriteStream(phoneCapPath, { flags: 'a' });
+  phoneCapT0 = performance.now();
+  phoneCapStream.write(JSON.stringify({ meta: { kind: 'phone-capture', wallClock: new Date().toISOString(), pfResampleHz: PF_RESAMPLE_HZ } }) + '\n');
+  console.log(`[PhoneCap] writing ${phoneCapPath}`);
+}
+function phoneCapClose(reason) {
+  if (!phoneCapStream) return;
+  try { phoneCapStream.write(JSON.stringify({ end: { reason: reason || null, records: phoneCapN, wallClock: new Date().toISOString() } }) + '\n'); } catch {}
+  try { phoneCapStream.end(); } catch {}
+  console.log(`[PhoneCap] closed ${phoneCapPath} (${phoneCapN} records, ${reason || ''})`);
+  phoneCapStream = null; phoneCapPath = null; phoneCapN = 0;
+}
+function phoneCapWrite(type, data, openIfNeeded = false) {
+  if (!PHONE_CAP_ENABLED) return;
+  if (!phoneCapStream) { if (!openIfNeeded) return; phoneCapOpen(); }
+  if (!phoneCapStream) return;
+  try {
+    phoneCapStream.write(JSON.stringify({ seq: ++phoneCapN, t: round(performance.now() - phoneCapT0, 3), type, ...data }) + '\n');
+  } catch {}
 }
 
 function followDiagWrite(type, data = {}) {
@@ -2542,6 +2580,9 @@ const requestHandler = (req, res) => {
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'text/plain',
       'Permissions-Policy': 'accelerometer=(self), gyroscope=(self), magnetometer=(self)',
+      // dev rig：禁快取，保證手機/瀏覽器每次重整都拿最新 phone.html/index.html/kin.js
+      // （否則 Safari 啟發式快取會送舊版 JS → 新增的 obs 上傳等改動失效）。
+      'Cache-Control': 'no-store',
     });
     res.end(data);
   });
@@ -2567,6 +2608,30 @@ function broadcast(line) {
 //   切換時先 FOLLOW 0 清掉舊 owner 殘留的 manualPf 串流，再 FOLLOW 1 進新世界。
 // 隔離點在 PF：非 owner 送的 PF（資料面驅動）在 ws message 一律靜默 drop → 滑桿與陀螺儀永不打架。
 let controlOwner = null;
+
+// 持久 server 端緊急降落：宣告 autoLandOnClose 的控制 client（實驗 rig）掉線 →
+// 由 server（不死的持久進程）走完 home→landing→斷電，即使該 client 被 SIGKILL。
+// 與手機/dashboard 的 hold-current failsafe 區隔：只有帶 autoLandOnClose 旗標者觸發。
+let safeLandTimer = null;
+function safeLandSequence(reason) {
+  if (safeLandTimer) return;   // 已在降落中
+  console.log(`[SAFE-LAND] ${reason} → 緊急降落序列（home→landing→斷電）`);
+  if (controlOwner) { controlOwner = null; broadcast(JSON.stringify({ evt: 'mode', owner: null })); }
+  sendCommand('FOLLOW 0');                       // 先凍結跟隨
+  const seq = [
+    [200,  'P 0 0 133 0 0 0 1200'],              // → home（min-jerk）
+    [1500, 'P 0 0 40 0 0 65 1200'],              // → landing 支撐位
+    [1500, 'D'],                                  // 斷電釋放
+  ];
+  let i = 0;
+  const step = () => {
+    if (i >= seq.length) { safeLandTimer = null; console.log('[SAFE-LAND] 完成（已斷電）'); return; }
+    const [delay, c] = seq[i++];
+    safeLandTimer = setTimeout(() => { sendCommand(c); step(); }, delay);
+  };
+  step();
+}
+
 function setControlMode(arg) {
   const a = String(arg || '').toLowerCase();   // normalize：前端送 'DESKTOP'/'PHONE'/'OFF' 任意大小寫都接
   const owner = (a === 'desktop' || a === 'phone') ? a : null;
@@ -2577,6 +2642,8 @@ function setControlMode(arg) {
     controlOwner = owner;
     sendCommand('FOLLOW 0');            // 清舊 owner 串流 + 韌體凍結
     if (owner) sendCommand('FOLLOW 1'); // 進新世界
+    if (owner === 'phone') phoneCapOpen();          // phone session 開始 → 開新擷取檔
+    else phoneCapClose(`mode ${owner || 'off'}`);   // 離開 phone → 收檔
     console.log(`[MODE] controlOwner -> ${owner || 'off'}`);
   }
   broadcast(JSON.stringify({ evt: 'mode', owner: controlOwner }));
@@ -2609,6 +2676,13 @@ function handleWsConnection(ws, req) {
     if (raw.startsWith('{')) {
       try {
         const d = JSON.parse(raw);
+        // 實驗 rig 宣告：掉線時由 server 走完安全降落+斷電（即使 rig 被 SIGKILL）。
+        if (d.autoLandOnClose === true) ws._autoLand = true;
+        // 手機原始運動觀測（純記錄、不經控制路徑、不影響 PF 仲裁）→ phone-capture 落盤。
+        if (d.obs === 'imu') {
+          if (ws._role === 'phone') phoneCapWrite('imu', { raw: d.raw, rel: d.rel, cmd: d.cmd, fol: d.fol, ct: d.t });
+          return;
+        }
         // role 宣告（dashboard='desktop' / 手機='phone'）→ 記在 ws，供 PF owner 仲裁 + 斷線 failsafe
         if (typeof d.role === 'string') { ws._role = d.role === 'phone' ? 'phone' : 'desktop'; ws.send(JSON.stringify({ evt: 'mode', owner: controlOwner })); return; }
         if (typeof d.cmd === 'string') cmd = d.cmd.trim();
@@ -2627,7 +2701,11 @@ function handleWsConnection(ws, req) {
   ws.on('close', () => {
     clientCount--;
     console.log(`[WS] client disconnected (${clientCount})`);
-    if (ws._role && ws._role === controlOwner) setControlMode(null);  // owner client（手機或電腦）掉線 → 退出該模式（failsafe，平台凍結不亂動）
+    if (ws._autoLand) {
+      safeLandSequence('rig 掉線');                                   // 實驗 rig：走完安全降落+斷電（robust，連 SIGKILL 也覆蓋）
+    } else if (ws._role && ws._role === controlOwner) {
+      setControlMode(null);                                           // 手機/電腦：退出該模式（failsafe，平台凍結保形不亂動）
+    }
     if (clientCount <= 0) manualPfStop('all clients disconnected');
   });
 }
@@ -2664,6 +2742,12 @@ function onLine(line) {
     if (d.fw != null) captureBoardFirmware({ fw: d.fw }, 'telemetry');
   }
   observeIncoming(d);
+  if (Array.isArray(d.a)) {
+    phoneCapWrite('tele', {   // 完整 actual：僅在 phone-capture 已開檔時落盤
+      a: d.a, pose: d.pose, pos: d.pos, fl: d.fl, ok: d.ok, lhz: d.lhz,
+      ikFail: d.ctl?.ikFail, coordLimit: d.ctl?.coordLimit, coordMax: d.ctl?.coordMax,
+    });
+  }
   recWrite('in', line);
   broadcast(line);
 }

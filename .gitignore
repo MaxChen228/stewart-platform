@@ -14,3 +14,10 @@ sysid/config/https-*.pem
 
 # build 時生成的韌體源碼身分（由 sysid/fw_hash.js 烤出，每次 build 重生）
 src/fw_identity.h
+
+# rig 實機原始資料封存（不可再生實測，壓縮存；體積大不入 git，靠此本地持久化）
+rig-data/
+
+# phone_gen 產生的圖/HTML（由工具 + 本地 capture 重生；體積大不入 git，僅追蹤工具碼）
+sysid/phone_gen/*.png
+sysid/phone_gen/*.html

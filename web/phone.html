@@ -118,6 +118,23 @@ function setPills(){
 }
 function sendCmd(c){ if(ws&&ws.readyState===WebSocket.OPEN){ws.send(c);return true;} return false; }
 
+// 純觀測上傳（不經控制路徑）：原始 IMU(α/β/γ) + 濾波前手部相對角(relEuler) + 濾波後 rpy(cmdRpy)。
+// server 落盤 phone-capture 供「人手運動 + 感測噪音」源層分析（1€/predict 是確定性變換，generator 可精確重現）。
+// 100Hz 上限（10ms 節流，與 PF 對稱）；真實率 = 手機 deviceorientation 事件率（iOS ~60Hz 封頂）。
+// 無論是否 followActive 都送（涵蓋校正/閒置噪音基線）。
+let lastObsAt=0;
+function sendObs(){
+  if(!ws||ws.readyState!==WebSocket.OPEN||!sensorOn) return;
+  const now=performance.now();
+  if(now-lastObsAt<10) return;
+  lastObsAt=now;
+  const e=(baseR&&curR)?relEuler(baseR,curR):[0,0,0];
+  const r4=v=>Number.isFinite(v)?Number(v.toFixed(4)):null;
+  ws.send(JSON.stringify({obs:'imu', t:Math.round(now),
+    raw:[r4(rawDeg.alpha),r4(rawDeg.beta),r4(rawDeg.gamma),rawDeg.screen],
+    rel:e.map(r4), cmd:cmdRpy.map(r4), fol:followActive?1:0}));
+}
+
 // 陀螺儀解析＝相對姿態旋轉矩陣法（治本）。直接拿 raw β/γ 當 pitch/roll 只在手機近水平時近似，
 // 且 β≈90（直立握持）落在 Euler gimbal 奇異 → roll/pitch 耦合亂跳。改：把 α/β/γ 建成完整旋轉矩陣
 // R（device frame），校正存 baseR，每幀算相對旋轉 baseRᵀ·curR 再萃取小角 Euler → 無 gimbal、與
@@ -191,7 +208,9 @@ function flushPF(){
 function streamPF(pose){
   pfPending=pose.slice();
   const dt=performance.now()-pfLast;
-  if(dt>=33) flushPF(); else if(!pfTimer) pfTimer=setTimeout(flushPF,33-dt);
+  // 10ms 節流 = 100Hz 上限（對齊 server PF 重取樣 100Hz）。真實率受手機 deviceorientation 事件率封頂
+  // （iOS Safari ~60Hz）；節流只當地板、不創造額外樣本。
+  if(dt>=10) flushPF(); else if(!pfTimer) pfTimer=setTimeout(flushPF,10-dt);
 }
 function onOrientation(e){
   const a=Number(e.alpha), b=Number(e.beta), g=Number(e.gamma);
@@ -201,6 +220,7 @@ function onOrientation(e){
   if(!baseR) baseR=curR.map(r=>r.slice());
   const ok=computePose(false);
   if(followActive && ok && !sessionActive) streamPF(cmdPose);
+  sendObs();
 }
 async function enableSensor(){
   if(!window.isSecureContext){ setLog('需 HTTPS：請從 dashboard 的 QR 開啟','bad'); return false; }
