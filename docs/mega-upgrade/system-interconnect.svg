@@ -38,24 +38,23 @@ text{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 <line x1="312" y1="64" x2="356" y2="64" class="w24" stroke-width="4" marker-end="url(#arrow)"/>
 
 <!-- ===== 24V+ MAIN RAIL (y=124) ===== -->
-<line x1="150" y1="124" x2="1018" y2="124" class="w24" stroke-width="4"/>
+<line x1="400" y1="124" x2="1018" y2="124" class="w24" stroke-width="4"/>
 <text class="ts" x="820" y="116" dominant-baseline="central">24V+ 主軌</text>
 <line x1="440" y1="90" x2="440" y2="124" class="w24" stroke-width="3"/><circle cx="440" cy="124" r="3" fill="#E04A4A"/>
 
 <!-- ===== GND STAR RAIL (y=690) ===== -->
-<line x1="150" y1="690" x2="1018" y2="690" class="wgnd" stroke-width="4"/>
+<line x1="40" y1="690" x2="1018" y2="690" class="wgnd" stroke-width="4"/>
 <text class="th" x="150" y="710" dominant-baseline="central">★ GND 星軌 = PSU 負極（單點接地匯流）</text>
 <line x1="272" y1="86" x2="272" y2="690" class="wgnd" stroke-width="2"/><circle cx="272" cy="690" r="3" fill="#6B6A66"/>
 <text class="tn" x="278" y="100" dominant-baseline="central">PSU − / 0V</text>
 
-<!-- ===== logic: LM2596 only ===== -->
-<g class="c-amber"><rect x="40" y="170" width="120" height="48" rx="8" stroke-width="0.5"/><text class="th" x="100" y="188" text-anchor="middle" dominant-baseline="central">LM2596</text><text class="ts" x="100" y="204" text-anchor="middle" dominant-baseline="central">24→5V（先調 5.0V）</text></g>
-<line x1="100" y1="124" x2="100" y2="170" class="w24" stroke-width="2"/><circle cx="100" cy="124" r="3" fill="#E04A4A"/><text class="tn" x="108" y="146" dominant-baseline="central">2A</text>
-<!-- LM2596 GND to star -->
-<line x1="60" y1="218" x2="60" y2="690" class="wgnd" stroke-width="1.5"/><circle cx="60" cy="690" r="2.5" fill="#6B6A66"/>
-<text class="tn" x="66" y="240" dominant-baseline="central">GND</text>
-<!-- LM2596 5V -> ESP32 -->
-<path d="M160 194 H284 V332 H300" fill="none" class="w5" stroke-width="2.5" marker-end="url(#arrow)"/><text class="tn" x="220" y="186" dominant-baseline="central">5V</text>
+<!-- ===== logic: phone charger 5V via Type-C ===== -->
+<g class="c-amber"><rect x="40" y="170" width="150" height="48" rx="8" stroke-width="0.5"/><text class="th" x="115" y="188" text-anchor="middle" dominant-baseline="central">手機充電器 5V</text><text class="ts" x="115" y="204" text-anchor="middle" dominant-baseline="central">Type-C（任意 ≥1A）</text></g>
+<!-- charger GND to star (MUST bond to 24V ground) -->
+<line x1="60" y1="218" x2="60" y2="690" class="wgnd" stroke-width="1.5"/><circle cx="60" cy="690" r="3" fill="#6B6A66"/>
+<text class="tn" x="66" y="240" dominant-baseline="central">GND↔星軌（必接）</text>
+<!-- charger 5V -> ESP32 USB port -->
+<path d="M190 194 H284 V332 H300" fill="none" class="w5" stroke-width="2.5" marker-end="url(#arrow)"/><text class="tn" x="232" y="186" dominant-baseline="central">→USB 口</text>
 
 <!-- ===== 24V sense ===== -->
 <g class="c-red"><rect x="344" y="150" width="152" height="42" rx="8" stroke-width="0.5"/><text class="th" x="420" y="165" text-anchor="middle" dominant-baseline="central">24V sense 分壓</text><text class="ts" x="420" y="180" text-anchor="middle" dominant-baseline="central">100k/12k→2.57V · Z3V3</text></g>
@@ -65,11 +64,11 @@ text{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 <!-- ===== ESP32-S3 ===== -->
 <g class="c-blue"><rect x="300" y="300" width="252" height="132" rx="8" stroke-width="0.5"/>
 <text class="th" x="426" y="320" text-anchor="middle" dominant-baseline="central">ESP32-S3 N16R8 · TWAI</text>
-<text class="ts" x="312" y="342" dominant-baseline="central">5V 腳 ← LM2596（USB 亦可供電）</text>
-<text class="ts" x="312" y="360" dominant-baseline="central">GPIO1 ← 24V sense (ADC 11dB)</text>
-<text class="ts" x="312" y="378" dominant-baseline="central">GPIO5→TXD · GPIO4←RXD</text>
-<text class="ts" x="312" y="396" dominant-baseline="central">3V3 → VP230 VCC</text>
-<text class="ts" x="312" y="414" dominant-baseline="central">GND → 星軌 · USB-C → host</text>
+<text class="ts" x="312" y="342" dominant-baseline="central">USB 口 ← 手機充電器 5V（供電）</text>
+<text class="ts" x="312" y="360" dominant-baseline="central">UART 口 → host PC（序列/燒錄）</text>
+<text class="ts" x="312" y="378" dominant-baseline="central">GPIO1 ← 24V sense (ADC 11dB)</text>
+<text class="ts" x="312" y="396" dominant-baseline="central">GPIO5→D · GPIO4←R (VP230)</text>
+<text class="ts" x="312" y="414" dominant-baseline="central">3V3 → VP230 VCC · GND → 星軌</text>
 </g>
 <circle cx="300" cy="332" r="2.5" fill="#BA7517"/>
 <circle cx="420" cy="300" r="2.5" fill="#378ADD"/>
