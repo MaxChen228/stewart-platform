@@ -302,6 +302,9 @@ function startSessionState({ label = 'program', phase = 'starting', program = nu
   // session 接管平台 → 退出 manual owner 世界（手機/電腦模式）。只清狀態 + 廣播，不發 FOLLOW
   // （session executor 自管 FOLLOW/PF）。否則 session 結束後 controlOwner 殘留 → 三端 desync。
   if (controlOwner) { controlOwner = null; broadcast(JSON.stringify({ evt: 'mode', owner: null })); }
+  // 維持 phone-capture 檔案邊界不變式（邊界＝controlOwner==='phone'）：session 接管 → 收掉手機語料檔，
+  // 否則 session 期間的 tele/imu 會續寫進上一場 phone 檔，污染 generator 語料。no-op 若未開檔。
+  phoneCapClose('session start');
   activeSession = {
     token: makeSessionToken(),
     owner: 'session',

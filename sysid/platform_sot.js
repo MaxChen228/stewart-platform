@@ -7,8 +7,9 @@
 (function () {
 const DEFAULT_PLATFORM_CONFIG = Object.freeze({
   version: 1,
+  // 耐久預設＝實際教導值（platform.json untracked 後，這是安全降落路徑的最後兜底；須與治具一致）
   homeRelative: [0, 0, 28, 0, 0, 0],
-  landingRelative: [0, 0, -10, 0, 0, 34],
+  landingRelative: [0, 0, -64, 0, 0, 64],
   followLimits: { vmaxT: 60, vmaxR: 45 },
   trialDefaults: {
     profile: 'heave-step',
