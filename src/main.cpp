@@ -1575,12 +1575,18 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 Out.printf("{\"status\":\"target set\",\"t\":[%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]}\n",
                     v[0],v[1],v[2],v[3],v[4],v[5]);
             }
+        } else {
+            Out.println("{\"error\":\"usage: P x y z roll pitch yaw [ms]\"}");
         }
     } else if (cmd.startsWith("FOLLOW")) {
         // FOLLOW 1 / FOLLOW 0：進/出跟隨模式（僅 HOLD 有意義）。
         // 進入時用 FK(當前角度) 當濾波器起點 → IK(起點)≈當前 holdAngles，不跳；回 pose 供前端同步滑桿。
         int on = 0;
-        sscanf(cmd.c_str(), "FOLLOW %d", &on);
+        if (sscanf(cmd.c_str(), "FOLLOW %d", &on) != 1) {
+            // 解析失敗不可預設 0：否則 "FOLLOW garbage" 被當 FOLLOW 0 靜默關閉跟隨（誤動作，比靜默更糟）
+            Out.println("{\"error\":\"usage: FOLLOW 0|1\"}");
+            return;
+        }
         if (on) {
             if (!holdMode) {
                 Out.println("{\"error\":\"FOLLOW needs HOLD (send H first)\"}");
@@ -1791,6 +1797,8 @@ void dispatch(const String& cmd, bool fromNet = false) {
                 "\"ok\":[%d,%d,%d,%d,%d,%d],\"okCnt\":%d,\"ar_ok\":%d}\n",
                 pidSaved ? 1 : 0, curKp, curKi, curKd, curKv,
                 okMask[0],okMask[1],okMask[2],okMask[3],okMask[4],okMask[5], okCnt, arOk);
+        } else {
+            Out.println("{\"error\":\"usage: K kp ki kd kv (each 0-1024)\"}");
         }
     } else if (cmd.startsWith("V ")) {
         int spd, ac;
@@ -1801,6 +1809,8 @@ void dispatch(const String& cmd, bool fromNet = false) {
             // V 是 ESP32 本地變數，下個 cycle 才會用到 → 永遠 ok（無 CAN 動作）
             Out.printf("{\"tune\":\"motion\",\"speed\":%d,\"acc\":%d,\"saved\":%d,"
                 "\"ok\":[1,1,1,1,1,1],\"okCnt\":6,\"local\":1}\n", posSpeed, posAcc, saved ? 1 : 0);
+        } else {
+            Out.println("{\"error\":\"usage: V speed(1-200) acc(1-255)\"}");
         }
     } else if (cmd.startsWith("M ")) {
         // Joint-space 參數（C 0 模式用）
@@ -2018,6 +2028,24 @@ void dispatch(const String& cmd, bool fromNet = false) {
         posEnabled = savedPos; holdMode = savedHold;
         servos.flushReceiveBuffer();
         canRxPaused = false;
+    } else if (cmd.length() > 0) {
+        // 未知指令：回錯讓打錯字看得見（前綴命中但 sscanf 失敗的已各自回 usage；此處接完全不匹配者）。
+        // cmd 內容 escape（引號/反斜線/非 ASCII）+ 截斷 ≤30，避免非法 JSON 打髒 server line-parse 統計；
+        // rate-limit 5/s，防開機噪聲/鮑率錯配的 serial garbage 突發把 TX 塞爆。PF 高頻串流不走此路（前綴命中）。
+        static uint32_t unkWinStart = 0; static uint8_t unkCount = 0;
+        uint32_t nowMs = millis();
+        if (nowMs - unkWinStart > 1000) { unkWinStart = nowMs; unkCount = 0; }
+        if (++unkCount <= 5) {
+            char esc[33]; int j = 0;
+            for (int i = 0; i < (int)cmd.length() && j < 30; i++) {
+                char c = cmd[i];
+                if (c == '"' || c == '\\') { if (j < 29) { esc[j++] = '\\'; esc[j++] = c; } }
+                else if (c >= 0x20 && c < 0x7f) esc[j++] = c;
+                else esc[j++] = '?';
+            }
+            esc[j] = 0;
+            Out.printf("{\"error\":\"unknown cmd\",\"cmd\":\"%s\"}\n", esc);
+        }
     }
 }
 

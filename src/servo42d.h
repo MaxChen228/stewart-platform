@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <mcp2515.h>
 #include <freertos/semphr.h>
+#include "net_transport.h"   // DualPrint Out：warn/diag 鏡像 TCP（WiFi 操作時 disable/enable 失敗才看得見）
 
 // SPI 腳位
 constexpr uint8_t CAN_CS_PIN  = 5;
@@ -207,7 +208,7 @@ public:
         rawSetMode(0x00);
         hasCached = false;
         diag |= ((uint32_t)rxm0_c << 8) | ((uint32_t)rxm0_n << 16) | ((uint32_t)rxm0_c2 << 24);
-        Serial.printf("{\"deep_diag\":{\"rxb0ctrl_in_config\":\"0x%02X\"}}\n", rxb0ctrl);
+        Out.printf("{\"deep_diag\":{\"rxb0ctrl_in_config\":\"0x%02X\"}}\n", rxb0ctrl);
         return diag;
     }
     bool rawSetHardwareFilter(uint32_t targetId) {
@@ -247,9 +248,6 @@ public:
         return true;
     }
 
-    // Debug: dump 一次 CAN 回覆的原始 bytes
-    bool debugDumped = false;
-
     // 讀取單顆馬達的編碼器原始值（14-bit, 0~16383）
     // 回傳 -1 表示通訊失敗，-2 表示 CRC 錯誤
     int32_t readEncoderRaw(uint8_t motorId) {
@@ -271,13 +269,6 @@ public:
                 if ((rxId & 0x7FF) != motorId) continue;    // 不是這顆馬達
                 if (rxBuf[0] != 0x30) continue;             // 不是 encoder 回覆（可能是 F5 回覆）
                 if (rxLen < 8) continue;                     // 長度不對
-
-                // Debug: 印出前幾次的原始回覆
-                if (!debugDumped) {
-                    Serial.printf("{\"debug\":\"id=0x%02lX len=%d data=\"", rxId, rxLen);
-                    for (int k = 0; k < rxLen; k++) Serial.printf("%02X ", rxBuf[k]);
-                    Serial.println("\"}");
-                }
 
                 // CRC 驗證：CRC = (motorId + data[0..6]) & 0xFF
                 uint8_t crc = motorId;
@@ -342,7 +333,6 @@ public:
             rawValues[i] = readEncoderRaw(MOTOR_ADDR[i]);
             if (rawValues[i] >= 0) ok++;
         }
-        debugDumped = true;
         return ok;
     }
 
@@ -540,7 +530,7 @@ public:
         for (int i = 0; i < NUM_MOTORS; i++) {
             bool ok = setEnable(MOTOR_ADDR[i], false);
             if (!ok) {
-                Serial.printf("{\"warn\":\"disable M%d send failed\"}\n", i+1);
+                Out.printf("{\"warn\":\"disable M%d send failed\"}\n", i+1);
             }
             delay(8);          // 給 MCP2515 TX buffer 排空 + 馬達回 ACK 時間
             flushReceiveBuffer();
@@ -555,7 +545,7 @@ public:
         for (int i = 0; i < NUM_MOTORS; i++) {
             bool ok = setEnable(MOTOR_ADDR[i], true);
             if (ok) mask |= (1 << i);
-            else Serial.printf("{\"warn\":\"enable M%d send failed\"}\n", i+1);
+            else Out.printf("{\"warn\":\"enable M%d send failed\"}\n", i+1);
             delay(8);
             flushReceiveBuffer();
         }
