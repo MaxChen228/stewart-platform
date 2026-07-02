@@ -68,7 +68,7 @@ Pair 3 (M5,M6) @ -30°
 奇數馬達在 `+ANGLE/2` 側、偶數在 `-ANGLE/2` 側（`BASE_ANGLE=18.92` / `PLATFORM_ANGLE=28.07`）。
 `MOTOR_PLANE_ANGLE=[300,120,180,0,60,240]`、`MOTOR_SIGN=[1,-1,1,-1,1,-1]`。
 
-**真相源三處須同步**（改幾何時一起改）：韌體 `kinematics.h`、前端 `web/index.html`（本地 `ik()`+常數）、共用模組 `sysid/kin.js`。實際數值以這三處為準，別在本文件重列（易腐）。
+**mm 域幾何真相源二處須同步**（改幾何時一起改）：韌體 `src/kinematics.h`、共用模組 `sysid/kin.js`（前端 `web/index.html` 已委派 `window.Kin`，不再是獨立真相源）。`MOTOR_SIGN` 另在韌體 `src/servo42d.h` ↔ JS `sysid/disturb_modes.js`。`npm test`（`sysid/check_kin_sync.js`）自動比對這兩對常數 parity。實際數值以碼為準，別在本文件重列（易腐）。
 
 ## CAN 指令
 

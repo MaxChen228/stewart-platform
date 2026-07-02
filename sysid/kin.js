@@ -1,5 +1,6 @@
 // Stewart IK — 從 web/index.html 抽出的 host 端純函數版（無 THREE 依賴）。
-// 幾何常數與前端/韌體同步；CW 排列。改幾何時三處（kinematics.h / index.html / 此檔）須一致。
+// 幾何常數與韌體同步；CW 排列。改幾何時二處（src/kinematics.h / 此檔）須一致（前端已委派 window.Kin）；
+// npm test（sysid/check_kin_sync.js）自動比對 parity。
 'use strict';
 // IIFE 隔離：瀏覽器當 classic script 載入時不污染全域（否則 ik/deltaAngle/NEUTRAL_Z 等
 // 與 disturb_modes.js 的 const 撞名 → "already declared"）。只 leak window.Kin / module.exports。
