@@ -100,7 +100,7 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 - **輪詢讀取率與迴圈率解耦（2026-07-02，`POLL` 指令）**：舊「每 cycle 全讀 6 顆」把 bus 佔用綁死迴圈率（355Hz→81%、讀等待 ~2.7ms 反鎖迴圈率天花板）。現讀取按排程（預設 100Hz/顆，bus ~23%），vel/積分類估計改走 encoder 時基（encUpdated/encDt）；主頁「讀取 Hz」滑桿=此值（原 auto-return 滑桿退役，`AR`/`A1` 僅存 console 實驗路徑）
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
 - main.cpp 的 MCP 暫存器深診斷指令（rawReadReg/rawSetMode 路徑）在 TWAI 後端是 no-op stub，回值無意義——只在 fallback 硬體上有效
-- ⚠️ **1M bitrate 判死（2026-07-02 M5 白老鼠實機定案，勿再提議）**：42D@1M 有韌體缺陷「閒置≥~5s → CAN 全聾（不 ACK）~4.2s」，500k 無此象；醒時 1M 讀取乾淨（0.6ms/TEC=0）=非類比問題、修不了。0x8A 即刻生效、混速過渡自解（旁觀者 error-passive 自閉嘴）。實驗工具 `pio run -e bitrate_probe`；詳見記憶 `project_1m_bitrate_verdict`。42ES 若要重測，先驗閒置黑屏
+- ⚠️ **1M bitrate（2026-07-02 M5 白老鼠實測）**：42D@1M 有「閒置≥~5s → CAN 全聾 ~4.2s」韌體缺陷（500k 無）；醒時 1M 乾淨（0.6ms/TEC=0）=類比裕度 OK。黑屏可工程繞開（100Hz 輪詢=天然 keepalive 永不閒置；僅 ESP32 重開機後暴露 → boot 暖機敲 5s 可解）。**重啟條件**：迴圈需求 >500Hz 且 F5 率解耦不夠用、或主動控制需 >200Hz/顆感測；屆時須全隊六顆+F5 負載 soak 驗證（本次僅驗 M5 讀路徑）。已定案知識：0x8A 即刻生效、混速過渡自解（旁觀者 error-passive 自閉嘴）、復原=敲醒趁暖發。工具 `pio run -e bitrate_probe`；詳見記憶 `project_1m_bitrate_verdict`。註：500k 迴圈天花板 ≈ F5 六顆 1.46ms/cycle + 輪詢 → ~450-500Hz；先用「F5 率與迴圈率解耦」（同輪詢解耦手法，F5>400Hz 物理收益≈0）再考慮 1M
 
 ## 編碼器與校正
 
