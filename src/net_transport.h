@@ -18,6 +18,10 @@ struct NetCfg {
     bool     enabled     = false;   // WIFION/WIFIOFF；開機時據此決定是否自動連線
     uint8_t  failsafe    = FS_HOLD_CURRENT;  // FS 指令；斷線安全態
     uint32_t hbTimeoutMs = 0;       // HB 指令；心跳逾時(ms)，0=停用心跳檢查（僅靠 socket-close）
+    // TCP 最小 shared-secret（NETKEY 指令，USB-only 設定）。空 = 開放放行（向後相容，升級不鎖死）。
+    // 定長 char[]（非 String）：netTask(core0) 讀、dispatch(core1) 寫，定長緩衝跨核讀寫不會因
+    // String 重配/指標交換 crash；最壞只是 NETKEY 改寫的微秒窗內比對撕裂，reconnect 自癒。
+    char     netkey[33]  = "";       // 最長 32 字元 token + '\0'
 
     void load();              // 從 NVS "netcfg" 讀；缺值用預設
     void save() const;        // 寫回 NVS "netcfg"

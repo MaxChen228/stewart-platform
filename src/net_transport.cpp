@@ -34,6 +34,8 @@ static volatile uint32_t netLastWriteAvail = 0;
 static volatile uint32_t netClientReject = 0;
 static volatile uint32_t netClientPreempt = 0;
 static volatile uint32_t netClientStop = 0;
+static volatile uint32_t netAuthOk = 0;      // 首行 AUTH 成功次數（NETKEY 相符）
+static volatile uint32_t netAuthFail = 0;    // 首行鑑權失敗（無 AUTH / token 不符）→ 連線被 stop
 static volatile uint32_t netWifiDrop = 0;
 static volatile uint32_t netWifiReconnect = 0;
 static volatile uint32_t netWifiHardReset = 0;
@@ -271,6 +273,7 @@ static void netTask(void* arg) {
     char  inbuf[128];           // 入站行緩衝（單 client、netTask 獨用）
     size_t inn = 0;
     bool inOverflow = false;
+    bool authed = false;        // 本連線是否已通過 NETKEY 鑑權（accept 時依 netkey 是否設定初始化）
     bool netEverConnected = false;          // 曾成功連上 → 解鎖「斷線過久重啟」（避免未配網 boot-loop）
     uint32_t netDownStartMs = 0;            // 連續斷線起點（不被 netMaintainWifi 的 30s hard-reset 重置）
     for (;;) {
@@ -339,6 +342,7 @@ static void netTask(void* arg) {
                     client.setNoDelay(true);
                     inn = 0;
                     inOverflow = false;
+                    authed = (netCfg.netkey[0] == '\0');   // 未設 NETKEY = 開放；設了則須首行 AUTH
                     lastNetRxMs = nowMs;
                     lastNetTxMs = nowMs;
                     netCloseReason = "none";
@@ -354,7 +358,7 @@ static void netTask(void* arg) {
         static uint32_t lastTeleWriteMs = 0;
         OutLine ol;
         while (xQueueReceive(qOut, &ol, 0) == pdTRUE) {
-            if (netConnected) {
+            if (netConnected && authed) {   // 未鑑權 client 不外洩遙測（仍 dequeue 丟棄，queue 不堆積）
                 size_t len = strlen(ol.s);
                 bool tele = isTelemetryLine(ol.s);
                 uint32_t now = millis();
@@ -400,11 +404,33 @@ static void netTask(void* arg) {
                     inn = 0;
                     inOverflow = false;
                 } else if (inn > 0) {
-                    NetCmd nc;
-                    size_t m = (inn < sizeof(nc.s)) ? inn : sizeof(nc.s) - 1;
-                    memcpy(nc.s, inbuf, m); nc.s[m] = '\0'; inn = 0;
-                    if (qIn && xQueueSend(qIn, &nc, 0) == pdTRUE) netInLines++;
-                    else netInDrop++;
+                    // NETKEY 鑑權（設定時）：client 首個非空行須為 "AUTH <token>"。
+                    // 未設 NETKEY = 開放（authed 於 accept 時已 true），仍吞掉任何前導 AUTH 行
+                    // （避免被當未知指令回錯），達成新舊 server 皆相容。
+                    bool isAuth = (inn >= 4 && memcmp(inbuf, "AUTH", 4) == 0 &&
+                                   (inn == 4 || inbuf[4] == ' '));
+                    if (!authed && !isAuth) {          // 首行不是 AUTH → 拒絕連線
+                        stopNetClient(client, "auth_required");
+                        netAuthFail++;
+                        inn = 0;
+                        break;
+                    }
+                    if (isAuth) {
+                        if (!authed) {                 // 需 token 完全相符
+                            const size_t kl = strlen(netCfg.netkey);
+                            const bool ok = (kl > 0) && (inn == 5 + kl) &&
+                                            (memcmp(inbuf + 5, netCfg.netkey, kl) == 0);
+                            if (ok) { authed = true; netAuthOk++; }
+                            else { stopNetClient(client, "auth_fail"); netAuthFail++; inn = 0; break; }
+                        }
+                        inn = 0;                       // 吞掉 AUTH 行：開放或已鑑權皆不入 qIn
+                    } else {
+                        NetCmd nc;
+                        size_t m = (inn < sizeof(nc.s)) ? inn : sizeof(nc.s) - 1;
+                        memcpy(nc.s, inbuf, m); nc.s[m] = '\0'; inn = 0;
+                        if (qIn && xQueueSend(qIn, &nc, 0) == pdTRUE) netInLines++;
+                        else netInDrop++;
+                    }
                 }
             } else if (inn < sizeof(inbuf) - 1) {
                 inbuf[inn++] = (char)ch;
@@ -441,6 +467,8 @@ void NetCfg::load() {
     enabled     = prefs.getBool("en", false);
     failsafe    = prefs.getUChar("fs", FS_HOLD_CURRENT);
     hbTimeoutMs = prefs.getUInt("hb", 0);
+    netkey[0]   = '\0';                                   // 缺 key → 空（開放）
+    prefs.getString("nk", netkey, sizeof(netkey));        // 有則覆寫；已 null-terminate
     prefs.end();
 }
 
@@ -452,6 +480,7 @@ void NetCfg::save() const {
     prefs.putBool("en", enabled);
     prefs.putUChar("fs", failsafe);
     prefs.putUInt("hb", hbTimeoutMs);
+    prefs.putString("nk", netkey);
     prefs.end();
 }
 
@@ -528,7 +557,8 @@ static void netReportStatus() {
                "\"qout\":%u,\"qin\":%u,\"out\":%u,\"out_drop\":%u,\"out_skip\":%u,"
                "\"out_bp\":%u,\"out_short\":%u,\"wr_avail\":%u,"
                "\"reject\":%u,\"preempt\":%u,\"stop\":%u,\"wifi_drop\":%u,\"close\":\"%s\","
-               "\"in\":%u,\"in_drop\":%u,\"in_long\":%u}}}\n",
+               "\"in\":%u,\"in_drop\":%u,\"in_long\":%u,"
+               "\"auth_req\":%d,\"auth_ok\":%u,\"auth_fail\":%u}}}\n",
                   netCfg.enabled ? 1 : 0,
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   ssidEsc.c_str(),
@@ -565,11 +595,13 @@ static void netReportStatus() {
                   netCloseReason,
                   (unsigned)netInLines,
                   (unsigned)netInDrop,
-                  (unsigned)netInTooLong);
+                  (unsigned)netInTooLong,
+                  netCfg.netkey[0] ? 1 : 0,
+                  (unsigned)netAuthOk,
+                  (unsigned)netAuthFail);
 }
 
 bool netHandleCommand(const String& cmd, bool fromNet, bool motionActive) {
-    (void)fromNet;
     if (cmd == "WIFI?") {
         netReportStatus();
         return true;
@@ -629,6 +661,45 @@ bool netHandleCommand(const String& cmd, bool fromNet, bool motionActive) {
         netCfg.hbTimeoutMs = (uint32_t)cmd.substring(3).toInt();
         netCfg.save();
         Out.printf("{\"status\":\"heartbeat\",\"hb_ms\":%u}\n", (unsigned)netCfg.hbTimeoutMs);
+        return true;
+    }
+    if (cmd == "NETKEY?") {
+        // 只回是否設定/長度，不回明文 token（診斷用；net 端此時必已鑑權過）
+        Out.printf("{\"status\":\"netkey\",\"set\":%d,\"len\":%u}\n",
+                   netCfg.netkey[0] ? 1 : 0, (unsigned)strlen(netCfg.netkey));
+        return true;
+    }
+    if (cmd == "NETKEYOFF") {
+        // 清除 shared-secret → TCP 回開放放行。改鑑權組態須實體在旁（USB-only，比照 Z*）
+        if (fromNet) {
+            Out.println("{\"error\":\"NETKEYOFF is USB-only\"}");
+            return true;
+        }
+        netCfg.netkey[0] = '\0';
+        netCfg.save();
+        Out.println("{\"status\":\"netkey cleared\",\"set\":0}");
+        return true;
+    }
+    if (cmd.startsWith("NETKEY ")) {
+        // NETKEY <token>：設 TCP 鑑權密鑰存 NVS（USB-only）。naive 單 token（含空格不支援）
+        if (fromNet) {
+            Out.println("{\"error\":\"NETKEY is USB-only\"}");
+            return true;
+        }
+        String tok = cmd.substring(7);
+        tok.trim();
+        if (tok.length() == 0 || tok.indexOf(' ') >= 0) {
+            Out.println("{\"error\":\"usage: NETKEY <token> (single token, no spaces)\"}");
+            return true;
+        }
+        if (tok.length() > (int)sizeof(netCfg.netkey) - 1) {
+            Out.printf("{\"error\":\"netkey too long (max %u)\"}\n", (unsigned)(sizeof(netCfg.netkey) - 1));
+            return true;
+        }
+        strncpy(netCfg.netkey, tok.c_str(), sizeof(netCfg.netkey) - 1);
+        netCfg.netkey[sizeof(netCfg.netkey) - 1] = '\0';
+        netCfg.save();
+        Out.printf("{\"status\":\"netkey set\",\"set\":1,\"len\":%u}\n", (unsigned)strlen(netCfg.netkey));
         return true;
     }
     return false;

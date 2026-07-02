@@ -81,6 +81,16 @@ const HOME_POSE_PATH = path.join(CONFIG_DIR, 'pose-home.json');
 const PLATFORM_CONFIG_PATH = path.join(CONFIG_DIR, 'platform.json');
 const HTTPS_KEY_PATH = process.env.HTTPS_KEY || path.join(CONFIG_DIR, 'https-key.pem');
 const HTTPS_CERT_PATH = process.env.HTTPS_CERT || path.join(CONFIG_DIR, 'https-cert.pem');
+const SECRETS_PATH = path.join(CONFIG_DIR, 'secrets.json');   // gitignored：netkey / otaPassword
+// TCP shared-secret：連上 ESP32 :3333 後首包送 `AUTH <netkey>`。未設 = 不送（向後相容，
+// 對應未上鎖韌體）。ENV 優先，否則讀 gitignored secrets.json。
+const ESP32_NETKEY = (() => {
+  if (process.env.ESP32_NETKEY) return process.env.ESP32_NETKEY.trim();
+  try {
+    const s = JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8'));
+    return typeof s.netkey === 'string' && s.netkey.trim() ? s.netkey.trim() : null;
+  } catch { return null; }
+})();
 let recStream = null;
 let recPath = null;
 let recCount = 0;
@@ -2948,7 +2958,7 @@ function openSerial({ path: portPath, baud, onLine, onClose }) {
 
 // TCP 啞連線：連 ESP32 :3333（協議與 serial 逐字相同）。心跳 write 獨立於 liveness，
 // 供韌體可選 HB 失效保護；半開/idle 偵測由 manager 統一管（單一 owner，不雙頭）。
-function openTcp({ host, port, onLine, onClose }) {
+function openTcp({ host, port, onLine, onClose, auth }) {
   let closed = false, hb = null;
   const sock = net.connect({ host, port });
   const gone = (why) => {
@@ -2964,6 +2974,9 @@ function openTcp({ host, port, onLine, onClose }) {
   sock.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', onLine);
   sock.on('connect', () => {
     sock.setTimeout(0);
+    // 首包鑑權：ESP32 若設 NETKEY，首行須為 `AUTH <token>`（韌體會吞掉此行不當指令）。
+    // 未設 auth = 不送（向後相容）；此行必先於心跳與任何指令。
+    if (auth) sock.write(`AUTH ${auth}\n`);
     hb = setInterval(() => { if (!sock.destroyed && sock.writable) sock.write('\n'); }, TCP_HB_MS);
   });
   sock.on('timeout', () => gone('connect-timeout'));
@@ -3140,7 +3153,7 @@ function createTransportManager({ onLine, onState }) {
       const hosts = wifiCandidates();
       const suffix = hosts.length > 1 ? ` host ${wifiHostIndex % hosts.length + 1}/${hosts.length}` : '';
       setState('connecting', 'wifi', `${host}:${ESP32_PORT}${suffix}`);
-      conn = openTcp({ host, port: ESP32_PORT, onLine: handleLine, onClose: (w) => dropAndReselect(w) });
+      conn = openTcp({ host, port: ESP32_PORT, onLine: handleLine, onClose: (w) => dropAndReselect(w), auth: ESP32_NETKEY });
     }
     lastRx = Date.now();
     if (livenessTimer) clearTimeout(livenessTimer);

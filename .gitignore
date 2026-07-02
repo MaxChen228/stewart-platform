@@ -8,6 +8,8 @@ report_parsed/
 rag_storage/
 sysid/data/
 sysid/config/https-*.pem
+# LAN 加固金鑰：OTA 密碼（build 注入）+ TCP NETKEY shared-secret（server 送 AUTH）。絕不入 git。
+sysid/config/secrets.json
 # 執行期可變狀態（server 每次 UI 互動回寫 uiState+updatedAt）；耐久預設活在 sysid/platform_sot.js
 sysid/config/platform.json
 
