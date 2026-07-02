@@ -96,7 +96,8 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 - ⚠️ **同 ID 相剋鐵律（2026-07-02 實症定案）**：42D 的指令幀、回覆 ack 幀、0x35 主動上報幀**全部同 ID（=馬達地址）**。CAN 仲裁對同 ID 同時發送=保證 bit error；TWAI 無限重傳下 TEC 破表→bus-off，曾把六顆馬達全轟進 bus-off（只能斷電馬達救）。**BOOT 定案 = no-ack（0x8C XX=0，讀取類 0x30/0x35 不受影響仍回）+ 輪詢（不 arm 上報）**→ TX 恆零錯。`C 1 0`/`A<hz>` 可 runtime 切回實驗，但高頻上報/ack + 驅動流必炸。實測：ack 開 12 幀 TX = TEC+134；no-ack+輪詢 = 恆 0
 - 防護（`can_twai_compat.h`）：bus-off 自動 recovery + error-passive TX 死鎖斬斷（TX queue 卡 >500ms → stop/start 清卡死幀）。TWAI 進 bus-off 不自動恢復（MCP2515 硬體會），缺防護會一次瞬態永久卡死
 - **馬達 power-cycle 後 ESP32 必須重開機**（sessionZeroRaw/座標映射建立於 boot；馬達重啟後映射失效 → F5 有 ack 但不動）
-- 每 cycle 開頭 flushReceiveBuffer()：語意=排空舊回覆，兩後端皆保留。TWAI RX queue 64 深，MCP2515 的 2-buffer 塞爆問題已消失（僅餘 fallback 路徑）
+- 每次輪詢讀取前 flushReceiveBuffer()：語意=排空舊回覆，兩後端皆保留。TWAI RX queue 64 深，MCP2515 的 2-buffer 塞爆問題已消失（僅餘 fallback 路徑）
+- **輪詢讀取率與迴圈率解耦（2026-07-02，`POLL` 指令）**：舊「每 cycle 全讀 6 顆」把 bus 佔用綁死迴圈率（355Hz→81%、讀等待 ~2.7ms 反鎖迴圈率天花板）。現讀取按排程（預設 100Hz/顆，bus ~23%），vel/積分類估計改走 encoder 時基（encUpdated/encDt）；主頁「讀取 Hz」滑桿=此值（原 auto-return 滑桿退役，`AR`/`A1` 僅存 console 實驗路徑）
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
 - main.cpp 的 MCP 暫存器深診斷指令（rawReadReg/rawSetMode 路徑）在 TWAI 後端是 no-op stub，回值無意義——只在 fallback 硬體上有效
 
@@ -162,6 +163,7 @@ Jacobian: ∂f/∂T = 2v,  ∂f/∂angle = 2(v · dR·P) · DEG
 | `KIS` | 保存 HOLD 積分組態（Ki+護欄）到 ESP32 NVS |
 | `KIRESET` | 清除 NVS HOLD 積分組態，回 BOOT 預設（Ki=0 關閉） |
 | `V speed acc` | 設定位置模式速度(1-200 RPM)和加速度(1-255) |
+| `POLL hz` | 編碼器輪詢讀取率（5-500Hz/顆，due 時全讀 6 顆保時間相干），與迴圈率解耦，存 NVS。boot 預設 100Hz（bus ~23%）；mode 0/1 備援強制回每 cycle 讀 |
 | `M mu` | 設定自適應追蹤震動懲罰係數 |
 | `T0`~`T5` | 單馬達方向測試（以 3 RPM 轉 0.5 秒，回報角度變化） |
 | `WIFI ssid pass` | 設定 WiFi 憑證存 NVS（namespace netcfg；naive space-split，不支援含空格） |

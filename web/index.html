@@ -719,10 +719,10 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
 
       <div class="dev-label" style="margin-bottom:6px">Runtime rate (Hz)</div>
       <div style="display:grid;grid-template-columns:86px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:6px">
-        <span>Auto-return</span><input type="number" id="rate-ar-hz" value="50" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
+        <span>讀取</span><input type="number" id="rate-poll-hz" value="100" min="5" max="500" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
         <span>Loop</span><input type="number" id="rate-loop-hz" value="100" min="10" max="1000" step="0.001" style="width:100%;font-family:inherit;font-size:11px;padding:2px 4px;border:1px solid var(--borderBase);border-radius:2px">
       </div>
-      <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">AR 50Hz · Loop 100Hz</div>
+      <div id="tune-rate-status" style="font-family:var(--font-mono);font-size:10px;color:var(--sub);margin:-2px 0 12px 0;min-height:14px">讀 100Hz · Loop 100Hz</div>
 
       <div class="dev-label" style="margin-bottom:6px">Runtime damping (OD)</div>
       <div style="display:grid;grid-template-columns:38px 1fr 38px 1fr;gap:4px;align-items:center;font-family:var(--font-mono);font-size:11px;margin-bottom:4px">
@@ -1237,7 +1237,7 @@ function currentTuningState() {
     currentMa: inputNumber('work-current', 1600),
     posSpeed: inputNumber('pos-speed', 120),
     posAcc: inputNumber('pos-acc', 100),
-    arHz: inputNumber('rate-ar-hz', 100),
+    pollHz: inputNumber('rate-poll-hz', 100),
     loopHz: inputNumber('rate-loop-hz', 100),
     od: {
       gain: inputNumber('od-gain', 0),
@@ -1262,7 +1262,7 @@ function applyTuningUiState(tuning = {}) {
   clampInputValue(document.getElementById('work-current'), Number(tuning.currentMa));
   clampInputValue(document.getElementById('pos-speed'), Number(tuning.posSpeed));
   clampInputValue(document.getElementById('pos-acc'), Number(tuning.posAcc));
-  clampInputValue(document.getElementById('rate-ar-hz'), Number(tuning.arHz));
+  clampInputValue(document.getElementById('rate-poll-hz'), Number(tuning.pollHz ?? tuning.arHz));  // 舊存檔 arHz 相容
   clampInputValue(document.getElementById('rate-loop-hz'), Number(tuning.loopHz));
   const od = tuning.od || {};
   clampInputValue(document.getElementById('od-gain'), Number(od.gain));
@@ -1589,7 +1589,7 @@ function sessionBlocksCommand(cmd) {
   return [
     'H', 'E', 'P', 'PF', 'FOLLOW',
     'U', 'W', 'K', 'KS', 'KRESET', 'KI', 'KIC', 'KIS', 'KIRESET', 'V', 'VF', 'FE', 'J', 'M',
-    'L', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
+    'L', 'POLL', 'AR', 'A', 'C', 'OD', 'CM', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5',
     'Z', 'Z0', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5',
   ].includes(op);
 }
@@ -1719,7 +1719,7 @@ function connectWS() {
         document.getElementById('status').textContent = data.status.toUpperCase();
         document.getElementById('status').className = 'nav-status connected';
         // follow on/off 狀態歸串流台處理；本頁不再追蹤跟隨態。
-        if (data.status === 'ar period' || data.status === 'auto-return ON' || data.status === 'loop period') {
+        if (data.status === 'poll rate' || data.status === 'loop period') {
           syncRuntimeRates(data, true);
           savePlatformConfigSoon();
         }
@@ -1993,8 +1993,8 @@ window.updateMotionParams = function() {
   sendCmd(`V ${speed} ${acc}`);
 };
 
-const AR_PERIOD_MIN_MS = 1;    // 鏡像韌體：下限 1ms=1000Hz（SERVO42D timer 硬體底）。⚠️ AR>~100Hz 會與 F5 搶 500kbps 匯流排→控制變鈍，進階自負
-const AR_PERIOD_MAX_MS = 100;  // 10Hz 下限（=韌體 AR_PERIOD_MAX_MS）
+const POLL_PERIOD_MIN_MS = 2;    // 鏡像韌體 POLL_PERIOD_MIN_MS：500Hz 上限（≤迴圈週期=退化回每 cycle 讀）
+const POLL_PERIOD_MAX_MS = 200;  // 鏡像韌體 POLL_PERIOD_MAX_MS：5Hz 下限（再低觀測太鈍）
 
 function rateHzToPeriodMs(hz, minMs = 1, maxMs = 100) {
   const v = Number(hz);
@@ -2017,14 +2017,14 @@ function fmtRateInputHz(v) {
   return fmtTrim(v, 3);
 }
 
-const rateDirty = { ar: false, loop: false };
-const rateRequestedHz = { ar: NaN, loop: NaN };
-['rate-ar-hz', 'rate-loop-hz'].forEach((id) => {
+const rateDirty = { poll: false, loop: false };
+const rateRequestedHz = { poll: NaN, loop: NaN };
+['rate-poll-hz', 'rate-loop-hz'].forEach((id) => {
   const el = document.getElementById(id);
   if (!el) return;
-  const apply = () => id === 'rate-ar-hz' ? updateAutoReturnRate() : updateLoopRate();
+  const apply = () => id === 'rate-poll-hz' ? updatePollRate() : updateLoopRate();
   el.addEventListener('input', () => {
-    rateDirty[id === 'rate-ar-hz' ? 'ar' : 'loop'] = true;
+    rateDirty[id === 'rate-poll-hz' ? 'poll' : 'loop'] = true;
     const s = document.getElementById('tune-rate-status');
     if (s) { s.textContent = '未套用'; s.style.color = 'var(--dual)'; }
   });
@@ -2037,11 +2037,11 @@ const rateRequestedHz = { ar: NaN, loop: NaN };
   });
 });
 
-function updateRateStatus(arHz, loopHz, extra = '') {
+function updateRateStatus(pollHz, loopHz, extra = '') {
   const s = document.getElementById('tune-rate-status');
   if (!s) return;
   const parts = [];
-  if (Number.isFinite(arHz)) parts.push(`AR ${fmtHz(arHz)}Hz`);
+  if (Number.isFinite(pollHz)) parts.push(`讀 ${fmtHz(pollHz)}Hz`);
   if (Number.isFinite(loopHz)) parts.push(`Loop ${fmtHz(loopHz)}Hz`);
   s.textContent = (parts.length ? parts.join(' · ') : '—') + extra;
   const bus = busOccupancy(latestTelemetry?.bus, latestTelemetry?.ar);
@@ -2052,13 +2052,13 @@ function updateRateStatus(arHz, loopHz, extra = '') {
 function requestedRateDisplayHz(kind, actualHz, actualPeriodMs = NaN) {
   let requestedHz = rateRequestedHz[kind];
   if (!Number.isFinite(requestedHz)) {
-    const id = kind === 'ar' ? 'rate-ar-hz' : 'rate-loop-hz';
+    const id = kind === 'poll' ? 'rate-poll-hz' : 'rate-loop-hz';
     requestedHz = Number(document.getElementById(id)?.value);
   }
   if (!Number.isFinite(requestedHz)) return NaN;
 
-  if (kind === 'ar') {
-    const requestedMs = rateHzToPeriodMs(requestedHz);
+  if (kind === 'poll') {
+    const requestedMs = rateHzToPeriodMs(requestedHz, POLL_PERIOD_MIN_MS, POLL_PERIOD_MAX_MS);
     if (Number.isFinite(requestedMs) && Number.isFinite(actualPeriodMs) &&
         Math.round(requestedMs) === Math.round(actualPeriodMs)) {
       return requestedHz;
@@ -2072,52 +2072,52 @@ function requestedRateDisplayHz(kind, actualHz, actualPeriodMs = NaN) {
 }
 
 function syncRuntimeRates(d, fromAck = false) {
-  const arMs = Number.isFinite(Number(d.period_ms)) && (d.status === 'ar period' || d.status === 'auto-return ON')
+  const pollMs = Number.isFinite(Number(d.period_ms)) && d.status === 'poll rate'
     ? Number(d.period_ms)
-    : Number(d.ar);
+    : Number(d.poll);
   const loopHz = Number.isFinite(Number(d.hz)) && d.status === 'loop period'
     ? Number(d.hz)
     : Number(d.lhz);
-  const arHz = periodMsToHz(arMs);
-  const arEl = document.getElementById('rate-ar-hz');
+  const pollHz = periodMsToHz(pollMs);
+  const pollEl = document.getElementById('rate-poll-hz');
   const loopEl = document.getElementById('rate-loop-hz');
   if (fromAck) {
-    if (d.status === 'ar period' || d.status === 'auto-return ON') {
-      rateDirty.ar = false;
-      if (Number.isFinite(Number(d.requested_hz))) rateRequestedHz.ar = Number(d.requested_hz);
+    if (d.status === 'poll rate') {
+      rateDirty.poll = false;
+      if (Number.isFinite(Number(d.requested_hz))) rateRequestedHz.poll = Number(d.requested_hz);
     }
     if (d.status === 'loop period') {
       rateDirty.loop = false;
     }
   }
-  const arInputHz = requestedRateDisplayHz('ar', arHz, arMs);
+  const pollInputHz = requestedRateDisplayHz('poll', pollHz, pollMs);
   const loopInputHz = requestedRateDisplayHz('loop', loopHz);
-  const arDisplayHz = Number.isFinite(arInputHz) ? arInputHz : arHz;
+  const pollDisplayHz = Number.isFinite(pollInputHz) ? pollInputHz : pollHz;
   const loopDisplayHz = Number.isFinite(loopInputHz) ? loopInputHz : loopHz;
-  if (arEl && Number.isFinite(arDisplayHz) && !rateDirty.ar && document.activeElement !== arEl) arEl.value = fmtRateInputHz(arDisplayHz);
+  if (pollEl && Number.isFinite(pollDisplayHz) && !rateDirty.poll && document.activeElement !== pollEl) pollEl.value = fmtRateInputHz(pollDisplayHz);
   if (loopEl && Number.isFinite(loopDisplayHz) && !rateDirty.loop && document.activeElement !== loopEl) loopEl.value = fmtRateInputHz(loopDisplayHz);
-  const arTargetHz = Number.isFinite(arInputHz) ? arInputHz : rateRequestedHz.ar;
+  const pollTargetHz = Number.isFinite(pollInputHz) ? pollInputHz : rateRequestedHz.poll;
   let requested = '';
-  if (Number.isFinite(arTargetHz) && Number.isFinite(arHz) &&
-      Math.abs(arTargetHz - arHz) > 0.005) {
-    const arPeriod = Number.isFinite(arMs) ? ` → ${fmtTrim(arMs, 3)}ms` : '';
-    requested = ` · target AR ${fmtHz(arTargetHz)}Hz${arPeriod}`;
+  if (Number.isFinite(pollTargetHz) && Number.isFinite(pollHz) &&
+      Math.abs(pollTargetHz - pollHz) > 0.005) {
+    const pollPeriod = Number.isFinite(pollMs) ? ` → ${fmtTrim(pollMs, 3)}ms` : '';
+    requested = ` · target 讀 ${fmtHz(pollTargetHz)}Hz${pollPeriod}`;
   }
   if (fromAck && Number.isFinite(Number(d.period_us))) {
     requested = ` · ${Number(d.period_us)}us`;
   } else if (fromAck && Number.isFinite(Number(d.period_ms))) {
     requested += ` · ${fmtTrim(Number(d.period_ms), 3)}ms`;
   }
-  updateRateStatus(arHz, loopHz, requested);
+  updateRateStatus(pollHz, loopHz, requested);
 }
 
-window.updateAutoReturnRate = function() {
-  const el = document.getElementById('rate-ar-hz');
+window.updatePollRate = function() {
+  const el = document.getElementById('rate-poll-hz');
   const hz = Number(el?.value);
-  const ms = rateHzToPeriodMs(el?.value, AR_PERIOD_MIN_MS, AR_PERIOD_MAX_MS);
-  if (!ms) { logEv('AR Hz 無效', 'bad'); return; }
-  rateRequestedHz.ar = hz;
-  sendCmd(`AR ${fmtTrim(ms, 3)}`);
+  const ms = rateHzToPeriodMs(el?.value, POLL_PERIOD_MIN_MS, POLL_PERIOD_MAX_MS);
+  if (!ms) { logEv('讀取 Hz 無效', 'bad'); return; }
+  rateRequestedHz.poll = hz;
+  sendCmd(`POLL ${fmtTrim(hz, 3)}`);   // 韌體收 Hz（非 ms），clamp 到 [5,500]
 };
 
 window.updateLoopRate = function() {
