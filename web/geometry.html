@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geometry — Stewart 無量綱幾何設計</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/shared/app-ui.css">
+<style>
+  :root { --nav-height: 52px; --c-len:#1677f2; --c-ang:#2E8B7A; --c-free:#D35400; --c-pose:#9AA0A6; --c-home:#7A4FB5; }
+  body { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  .nav { height: var(--nav-height); background: var(--surface); border-bottom: 1px solid var(--borderBase);
+    display: grid; grid-template-columns: minmax(180px,1fr) auto minmax(180px,1fr); align-items: center; padding: 0 24px; flex-shrink: 0; z-index: 100; }
+  .nav-brand { font-family: var(--font-mono); font-weight: 700; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+  .nav-center { justify-self: center; }
+  .nav-right { justify-self: end; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--sub); }
+
+  .content { flex: 1; min-height: 0; display: grid; grid-template-columns: 332px 1fr 312px; }
+  .panel { overflow-y: auto; padding: 16px 18px; }
+  .panel.left { border-right: 1px solid var(--borderBase); background: var(--surface); }
+  .panel.right { border-left: 1px solid var(--borderBase); background: var(--surface); }
+  .center { display: flex; flex-direction: column; background: var(--bg); min-width: 0; }
+  .view { position: relative; min-height: 0; }
+  .view.mech { flex: 1 1 56%; border-bottom: 1px solid var(--borderBase); }
+  .view.ws { flex: 1 1 44%; }
+  #canvas-zone, #ws-zone { position: absolute; inset: 0; cursor: grab; }
+  #canvas-zone:active, #ws-zone:active { cursor: grabbing; }
+  .vcap { position: absolute; top: 9px; left: 12px; z-index: 5; font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.06em; color: var(--sub); background: rgba(252,251,250,0.82); padding: 2px 7px; border-radius: 3px; pointer-events: none; }
+
+  .lede { color: var(--sub); font-size: 12px; line-height: 1.7; margin-bottom: 14px; }
+  .anchor { font-family: var(--font-mono); font-size: 11px; color: var(--inkLight); background: var(--bg);
+    border: 1px solid var(--borderBase); border-radius: 3px; padding: 7px 9px; margin-bottom: 16px; line-height: 1.5; }
+  .anchor b { color: var(--ink); }
+
+  .sec { margin-bottom: 18px; }
+  .sec-title { font-family: var(--font-mono); font-weight: 500; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+    margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--borderL);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .sec-title .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: 0; }
+  .sec-title.len { color: var(--c-len); } .sec-title.ang { color: var(--c-ang); } .sec-title.free { color: var(--c-free); }
+  .sec-title.po { color: var(--ink); } .sec-title.home { color: var(--c-home); }
+  .sec-title .ref { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 10px; color: var(--sub); }
+
+  .ctl { margin-bottom: 10px; padding-left: 9px; border-left: 3px solid transparent; }
+  .ctl.len { border-color: var(--c-len); } .ctl.ang { border-color: var(--c-ang); } .ctl.free { border-color: var(--c-free); } .ctl.po { border-color: #D7D2C9; }
+  .ctl-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+  .ctl-head .lab { font-size: 12px; color: var(--ink); }
+  .ctl-head .lab .code { font-family: var(--font-mono); font-size: 10px; color: var(--sub); letter-spacing: 0.04em; }
+  .ctl-head .val { font-family: var(--font-mono); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ctl.len .val { color: var(--c-len); } .ctl.ang .val { color: var(--c-ang); } .ctl.free .val { color: var(--c-free); } .ctl.po .val { color: var(--sub); }
+  input[type="range"] { width: 100%; height: 16px; margin: 0; }
+  .ctl.len input { accent-color: var(--c-len); } .ctl.ang input { accent-color: var(--c-ang); } .ctl.free input { accent-color: var(--c-free); } .ctl.po input { accent-color: var(--c-pose); }
+  .btnrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .note { color: var(--sub); font-size: 11px; line-height: 1.55; margin-top: 8px; }
+
+  .metric { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--borderL); }
+  .metric .k { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--sub); }
+  .metric .v { font-family: var(--font-mono); font-size: 13px; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+  .metric .v .ref { color: var(--sub); font-size: 10px; }
+  .ok { color: var(--contra); } .bad { color: var(--dev); } .mid { color: var(--dual); } .home { color: var(--c-home); }
+  .gauge { height: 5px; border-radius: 3px; background: var(--borderL); overflow: hidden; margin-top: 5px; }
+  .gauge > i { display: block; height: 100%; background: var(--contra); }
+  .gauge.warn > i { background: var(--dev); }
+  .homebox { background: #F3EFF9; border: 1px solid #DCD0EC; border-radius: 4px; padding: 4px 10px 8px; }
+
+  .legend { position: absolute; left: 12px; bottom: 12px; font-family: var(--font-mono); font-size: 10px; color: var(--inkLight);
+    background: rgba(252,251,250,0.92); border: 1px solid var(--borderBase); border-radius: 3px; padding: 8px 10px; line-height: 1.8; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .legend hr { border: 0; border-top: 1px solid var(--borderL); margin: 5px 0; }
+
+  /* 方案卡片 */
+  .cards { display: flex; flex-direction: column; gap: 6px; }
+  .card { text-align: left; cursor: pointer; background: var(--bg); border: 1px solid var(--borderBase); border-radius: 4px;
+    padding: 7px 9px; transition: border-color .15s, background .15s; }
+  .card:hover { border-color: var(--sub); background: var(--surface); }
+  .card.active { border-color: var(--c-home); background: #F3EFF9; }
+  .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .card-name { font-size: 12px; color: var(--ink); font-weight: 500; }
+  .card-badge { font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em; padding: 1px 5px; border-radius: 8px; }
+  .card-badge.build { color: var(--contra); border: 1px solid var(--contra); }
+  .card-badge.remake { color: var(--dual); border: 1px solid var(--dual); }
+  .card-mx { display: flex; gap: 10px; margin-top: 3px; font-family: var(--font-mono); font-size: 10px; color: var(--sub); }
+  .card-mx b { color: var(--ink); font-weight: 600; }
+  .card-note { margin-top: 2px; font-size: 10px; color: var(--sub); line-height: 1.4; }
+
+  /* 單參數歸位 ↺ */
+  .ctl-head .rst { font-family: var(--font-mono); font-size: 10px; color: var(--sub); cursor: pointer; border: 0; background: none;
+    padding: 0 2px; opacity: 0; transition: opacity .15s; }
+  .ctl:hover .rst { opacity: 1; }
+  .ctl-head .rst:hover { color: var(--c-len); }
+  .ctl.ang .rst:hover { color: var(--c-ang); }
+  .ctl-head .rst.dirty { opacity: 1; color: var(--dual); }
+
+  /* 工作空間殼圖例（勾選） */
+  .wslegend { position: absolute; right: 12px; bottom: 12px; z-index: 5; font-family: var(--font-mono); font-size: 10px; color: var(--inkLight);
+    background: rgba(252,251,250,0.92); border: 1px solid var(--borderBase); border-radius: 3px; padding: 8px 10px; line-height: 1.6; }
+  .wslegend .ck { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .wslegend .ck input { margin: 0; accent-color: var(--contra); cursor: pointer; }
+  .wslegend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+  .wslegend .st { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--borderL); color: var(--sub); }
+  .wslegend .st b { color: var(--ink); }
+  .wsbusy { position: absolute; right: 12px; top: 9px; z-index: 6; font-family: var(--font-mono); font-size: 10px; color: var(--c-home);
+    background: rgba(243,239,249,0.92); border: 1px solid #DCD0EC; border-radius: 3px; padding: 2px 7px; opacity: 0; transition: opacity .15s; }
+  .wsbusy.on { opacity: 1; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-brand">PHYSICS_LAB</div>
+  <nav class="app-nav nav-center" data-app-nav aria-label="Main navigation"></nav>
+  <div class="nav-right">無量綱 · home(幾何) · scale-free θ*</div>
+</nav>
+
+<div class="content">
+  <!-- 左:幾何設計參數 -->
+  <div class="panel left">
+    <p class="lede">純幾何設計台。長度<b style="color:var(--ink)">無量綱化(÷R_b)</b>。<b style="color:var(--c-home)">home(高度 z*、clocking γ*)由幾何算出</b>(最穩定+最對稱點),不是輸入。顏色:<b style="color:var(--c-len)">長度</b>·<b style="color:var(--c-ang)">角度(含 β)</b>。</p>
+    <div class="anchor">尺度錨 <b>R_b ≡ 1</b> &nbsp;|&nbsp; 7 幾何 DOF:r, α_b, α_p, ℓ, u, β(+尺度)。<span id="geoState" class="chip" style="float:right">as-built</span></div>
+
+    <div class="sec">
+      <div class="sec-title home"><span><span class="dot" style="background:var(--c-home)"></span>探索方案</span><span class="ref">點選套用 · 離線深度搜尋</span></div>
+      <div id="cards" class="cards"></div>
+      <p class="note">由 <b>sysid/geometry_explore.js</b> 對 7 幾何 DOF 搜尋(Halton 取樣 + 座標下降),目標 = 高活動度 θ* ∧ Type-II 穩健。θ*=各方向安全可達傾角;κ=home 條件數(越小越各向同性);σ=home σmin(Jx)(Type-II 裕度)。</p>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title len"><span><span class="dot" style="background:var(--c-len)"></span>長度族(無量綱)</span><span class="ref">↺ 單軸歸 as-built</span></div>
+      <div id="lenSliders"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-title ang"><span><span class="dot" style="background:var(--c-ang)"></span>角度排列</span></div>
+      <div id="angSliders"></div>
+      <p class="note">β = 曲柄擺動平面方位(切向 = 0,θ_i = spoke ± (90−β))。固定在底座、平台運動吸收不掉 → 真幾何 DOF。<b>可正可負</b>(±=往徑向兩側偏);實測 β=0 為 home 穩定的局部最佳,±β 因 CW 手性近似但不全對稱。</p>
+    </div>
+    <div class="sec">
+      <div class="btnrow"><button class="chip" id="btnReset">↺ as-built</button></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title po"><span><span class="dot" style="background:var(--c-pose)"></span>姿態 pose</span><span class="ref">×R_b · 探索裕度</span></div>
+      <div id="poseSliders"></div>
+      <div class="btnrow">
+        <button class="chip" id="btnPoseZero">姿態歸中 → 算出的 HOME</button>
+        <button class="chip active" id="btnGuides">輔助軌道</button>
+        <button class="chip active" id="btnArcs">曲柄軌跡</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 中:上=機構(物理) 下=工作空間殼(roll/pitch/yaw) -->
+  <div class="center">
+    <div class="view mech">
+      <div class="vcap">機構 · 物理空間 (mm)</div>
+      <div id="canvas-zone"></div>
+      <div class="legend">
+        <div><i style="background:#C0392B"></i>base joint &nbsp; <i style="background:#E6B300"></i>crank tip</div>
+        <div><i style="background:#4A6B8C"></i>下腿 &nbsp; <i style="background:#D35400"></i>上腿</div>
+        <hr>
+        <div><i style="background:#9AA0A6"></i>底座/平台圓 &nbsp; <i style="background:#C0392B"></i>pair 弦</div>
+        <div><i style="background:#E6A100"></i>曲柄掃掠軌跡</div>
+      </div>
+    </div>
+    <div class="view ws">
+      <div class="vcap">工作空間 · roll / pitch / yaw (°) · 中心 = 板子座標 r(x,y,z)</div>
+      <div id="ws-zone"></div>
+      <div class="wsbusy" id="wsBusy">重算中…</div>
+      <div class="wslegend">
+        <label class="ck"><input type="checkbox" id="ck-ws" checked><span class="sw" style="background:#6f8fb0"></span>工作空間(物理可達)</label>
+        <label class="ck"><input type="checkbox" id="ck-safe" checked><span class="sw" style="background:#3f9e63"></span>安全(+Type-II)</label>
+        <label class="ck"><input type="checkbox" id="ck-pt" checked><span class="sw" style="background:#9333EA"></span>當前點 roll/pitch/yaw</label>
+        <div class="st" id="wsStat">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右:第一性原理指標 -->
+  <div class="panel right">
+    <div class="sec">
+      <div class="sec-title home"><span><span class="dot" style="background:var(--c-home)"></span>計算 HOME</span><span class="ref">= f(幾何)</span></div>
+      <div class="homebox">
+        <div class="metric"><span class="k">高度 z* / R_b</span><span class="v home" id="hZ">—</span></div>
+        <div class="metric"><span class="k">clocking γ*</span><span class="v home" id="hYaw">—</span></div>
+        <div class="metric"><span class="k">平均可達傾角</span><span class="v" id="hReach">—</span></div>
+        <div class="metric"><span class="k">σmin(Jx) / κ</span><span class="v" id="hT2K">—</span></div>
+      </div>
+      <p class="note">C3 對稱閉式定 x=y=roll=pitch=0;(z*,γ*) 由 <b>max 各方向安全可達傾角的平均</b>解出(= 周圍能動最多 = 最穩定且最對稱)。home 崩潰(可達≈0)代表這組幾何本身無可用工作空間。</p>
+    </div>
+    <div class="sec">
+      <div class="sec-title po">奇異裕度 <span class="ref">@當前 pose</span></div>
+      <div class="metric"><span class="k">Type-I 可達</span><span class="v" id="mReach">—</span></div>
+      <div class="metric"><span class="k">Type-II σmin(Jx)</span><span class="v" id="mT2">—</span></div>
+      <div class="gauge" id="gT2"><i></i></div>
+      <div class="metric" style="margin-top:6px"><span class="k">條件數 κ(Ja)</span><span class="v" id="mKappa">—</span></div>
+    </div>
+    <div class="sec">
+      <div class="sec-title po">物理關節 <span class="ref">@當前 pose · 六腿範圍</span></div>
+      <div class="metric"><span class="k">J1 曲柄仰角 [−90,90]</span><span class="v" id="jJ1">—</span></div>
+      <div class="metric"><span class="k">J2 內角 ≥ θ_lim</span><span class="v" id="jJ2">—</span></div>
+      <div class="metric"><span class="k">J3 對平台法線 [−75,90]</span><span class="v" id="jJ3">—</span></div>
+      <div class="metric"><span class="k">曲柄最近距 ≥ 0.4</span><span class="v" id="jCrank">—</span></div>
+      <p class="note">理想運動學之外的實體限制。<b>J2(短柄端關節)</b>由 <b>b/tanθ+c/sinθ=l1−a</b>(a/b/c=39.3/12.65/5.2mm)解出極限,隨曲柄長 l 變;實測=綠殼/平台不 Yaw 最低點皆壓在此限。違限標紅。</p>
+    </div>
+    <div class="sec">
+      <div class="sec-title po">角度工作空間 θ* <span class="ref">繞 HOME</span></div>
+      <div class="metric"><span class="k">全方向安全傾角</span><span class="v" id="mTheta">—</span></div>
+      <div class="metric"><span class="k">各向同性 mean(1/κ)</span><span class="v" id="mGCI">—</span></div>
+    </div>
+    <div class="sec">
+      <div class="sec-title po">製造約束 <span class="ref">無量綱弦長</span></div>
+      <div class="metric"><span class="k">pair 弦 base / plat</span><span class="v" id="mChord">—</span></div>
+      <div class="metric"><span class="k">下限 δ = d_joint/R_b</span><span class="v">0.329 <span class="ref">(50mm@152)</span></span></div>
+    </div>
+    <div class="sec">
+      <div class="sec-title po">衍生比</div>
+      <div class="metric"><span class="k">U / L</span><span class="v" id="mUL">—</span></div>
+      <div class="metric"><span class="k">r = R_p/R_b</span><span class="v" id="mR">—</span></div>
+    </div>
+  </div>
+</div>
+
+<script src="/sysid/workspace_envelope.js"></script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { StewartStyle, createStewartModel, createStewartRig, createBasePlate } from './shared/stewart-renderer.js';
+const WE = window.WorkspaceEnvelope;   // 母函數（逐腿關節角 / 物理閘）SoT 同源
+
+const DEG = Math.PI/180;
+const SPOKES = [210, 90, -30], SIGN = [1, -1, 1, -1, 1, -1];
+const RENDER_RB = 152, DELTA_JOINT = 0.329;
+
+// ======= 幾何參數(無量綱,7 DOF;home 不在此,由 computeHome 算)=======
+const ASBUILT = { r:103/152, alphaB:18.92, alphaP:28.07, l:65/152, u:165/152, beta:0 };
+const params = { ...ASBUILT };
+let home = { z:105/152, yaw:0, t2:0, kappa:Infinity, valid:false };   // 由 computeHome 覆寫
+const pose = [0, 0, home.z, 0, 0, 0];                                  // 平移為 R_b 單位
+let showGuides = true, showArcs = true;
+let wsReady = false, wsLastCenter = '';   // 工作空間殼：就緒旗標 + 上次中心(偵測 r 移動)
+let curPhysOk = true;                      // 當前 pose 是否物理可達(marker 上色 + 工作空間定義)
+
+// ======= 純數學(geom/ik/jac/singv 委派 workspace_envelope,消除同頁重複;render 用的向量/SPOKES 保留)=======
+const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2], nrm3=a=>Math.sqrt(dot3(a,a));
+const geom=(p,clocking)=>WE.geoFromParams({...p,clocking});
+const ik=WE.ikN, jac=WE.jacN, singv=WE.singv;
+
+const EPS_T2=0.15, KAPPA_THR=12;
+
+// ======= home(幾何):C3 閉式定 x=y=roll=pitch=0;(z,γ) 2D 最佳化 =======
+// 目標 = 各方向「安全可達傾角」的平均(mean angular reach)。比單點 σmin(Jx) 穩健:
+// 退化低點四周一動就撞邊界(reach≈0)→ 自然被排除,不會跳到 κ 爛、θ*≈0 的角落。
+function evalHome(p, z, yaw){
+  const g=geom(p,yaw), sol=ik(g,[0,0,z,0,0,0]); if(!sol.valid) return null;
+  const J=jac(g,[0,0,z,0,0,0],sol.angles), sx=singv(J.Jx), sa=singv(J.Ja);
+  return { t2:sx[0], kappa:sa[5]/(sa[0]||1e-12) };
+}
+const _hal=(idx,b)=>{let f=1,r=0,i=idx;while(i>0){f/=b;r+=f*(i%b);i=(i/b)|0;}return r;};
+function meanReachAt(p, z, yaw){
+  const g=geom(p,yaw), tl=WE.solveThetaLim(g,WE.PHYS_DEFAULT); let sum=0; const N=12;
+  for(let k=1;k<=N;k++){
+    let d=[2*_hal(k,2)-1,2*_hal(k,3)-1,2*_hal(k,5)-1]; const dn=nrm3(d)||1; d=d.map(v=>v/dn);
+    let last=0;
+    for(let r=3;r<=30;r+=3){ const ps=[0,0,z,d[0]*r,d[1]*r,d[2]*r], sol=ik(g,ps); if(!sol.valid) break;
+      if(!WE.legPhysics(g,ps,sol.angles,WE.PHYS_DEFAULT,tl).ok) break;          // 物理閘(曲柄/J1/J2/J3)
+      const J=jac(g,ps,sol.angles), sa=singv(J.Ja), sx=singv(J.Jx);
+      if(sx[0]<EPS_T2 || sa[5]/(sa[0]||1e-12)>KAPPA_THR) break; last=r; }
+    sum+=last;
+  }
+  return sum/N;
+}
+function computeHome(p){
+  let best={ z:0.6, yaw:0, reach:-1, valid:false };
+  const scan=(yaws,zs)=>{ for(const yaw of yaws) for(const z of zs){ const m=meanReachAt(p,z,yaw);
+    if(m>best.reach) best={ z, yaw, reach:m, valid:true }; } };
+  const yawsC=[]; for(let y=0;y<120;y+=20) yawsC.push(y);
+  const zsC=[];   for(let z=0.35;z<=1.25;z+=0.07) zsC.push(z);
+  scan(yawsC, zsC);
+  if(best.valid){ const yy=[],zz=[];
+    for(let y=best.yaw-20;y<=best.yaw+20;y+=5) yy.push((y+120)%120);
+    for(let z=Math.max(0.25,best.z-0.07);z<=best.z+0.07;z+=0.025) zz.push(z);
+    scan(yy,zz); }
+  const m=evalHome(p,best.z,best.yaw)||{t2:0,kappa:Infinity};
+  best.t2=m.t2; best.kappa=m.kappa;
+  best.yawDisp=((best.yaw+60)%120)-60;
+  best.valid = best.reach>=0 && Number.isFinite(best.kappa);
+  return best;
+}
+
+function poseMetrics(p, ps){
+  const g=geom(p,home.yaw), sol=ik(g,ps);
+  if(!sol.valid) return { valid:false, t2:0, kappa:Infinity, angles:sol.angles };
+  const J=jac(g,ps,sol.angles), sa=singv(J.Ja), sx=singv(J.Jx);
+  return { valid:true, t2:sx[0], kappa:sa[5]/(sa[0]||1e-12), angles:sol.angles };
+}
+function thetaStar(p){
+  const g=geom(p,home.yaw), tl=WE.solveThetaLim(g,WE.PHYS_DEFAULT), Ndir=36;
+  const levels=[4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46];
+  const halton=(idx,b)=>{let f=1,r=0,i=idx;while(i>0){f/=b;r+=f*(i%b);i=(i/b)|0;}return r;};
+  let th=0,invK=0,nK=0;
+  for(const lvl of levels){ let ok=true;
+    for(let k=1;k<=Ndir;k++){ let d=[2*halton(k,2)-1,2*halton(k,3)-1,2*halton(k,5)-1]; const dn=nrm3(d)||1; d=d.map(v=>v/dn);
+      const ps=[0,0,home.z,d[0]*lvl,d[1]*lvl,d[2]*lvl], sol=ik(g,ps); if(!sol.valid){ok=false;break;}
+      if(!WE.legPhysics(g,ps,sol.angles,WE.PHYS_DEFAULT,tl).ok){ok=false;break;}      // 物理閘
+      const J=jac(g,ps,sol.angles), sa=singv(J.Ja), sx=singv(J.Jx), kap=sa[5]/(sa[0]||1e-12);
+      if(sx[0]<EPS_T2||kap>KAPPA_THR){ok=false;break;} invK+=1/kap; nK++; }
+    if(ok) th=lvl; else break; }
+  return { thetaStar:th, meanInvK:nK?invK/nK:0 };
+}
+
+// ======= 渲染用 kin-like(乘 RENDER_RB,clocking=home.yaw、高度=home.z)=======
+function kinFor(p){ const BA=[],PA=[],MPA=[];
+  for(let i=0;i<6;i++){ const sp=SPOKES[(i/2)|0]; BA.push(sp+SIGN[i]*p.alphaB/2); PA.push(sp+home.yaw+SIGN[i]*p.alphaP/2); MPA.push(sp+SIGN[i]*(90-p.beta)); }
+  return { BASE_RADIUS:RENDER_RB, PLATFORM_RADIUS:p.r*RENDER_RB, BASE_ANGLES:BA, PLATFORM_ANGLES:PA,
+    LOWER_LEG:p.l*RENDER_RB, UPPER_LEG:p.u*RENDER_RB, NEUTRAL_Z:home.z*RENDER_RB, MOTOR_PLANE_ANGLE:MPA }; }
+
+// ======= Three 場景 =======
+const cz=document.getElementById('canvas-zone');
+const scene=new THREE.Scene(); scene.background=new THREE.Color(StewartStyle.scene.lightBg);
+const camera=new THREE.PerspectiveCamera(50,cz.clientWidth/cz.clientHeight,1,3000); camera.up.set(0,0,1); camera.position.set(360,-360,300);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setSize(cz.clientWidth,cz.clientHeight); cz.appendChild(renderer.domElement);
+const controls=new OrbitControls(camera,renderer.domElement); controls.target.set(0,0,60); controls.update();
+scene.add(new THREE.AmbientLight(0xffffff,0.7));
+const dl=new THREE.DirectionalLight(0xffffff,0.6); dl.position.set(200,-200,300); scene.add(dl);
+const grid=new THREE.GridHelper(500,25,StewartStyle.scene.gridMajor,StewartStyle.scene.gridMinor); grid.rotation.x=Math.PI/2; scene.add(grid);
+
+let kin=kinFor(params); const model=createStewartModel(kin); const rig=createStewartRig(scene,model,{}); let baseMesh=rig.baseMesh;
+function syncModel(){ const src=createStewartModel(kin);
+  for(let i=0;i<6;i++){ model.B[i].copy(src.B[i]); model.P[i].copy(src.P[i]); }
+  model.lowerLeg=src.lowerLeg; model.upperLeg=src.upperLeg; model.neutralZ=src.neutralZ; model.motorPlaneAngle=src.motorPlaneAngle; }
+function rebuildBase(){ scene.remove(baseMesh); baseMesh.geometry.dispose(); baseMesh.material.dispose(); baseMesh=createBasePlate(scene,model); }
+
+// ======= 輔助軌道 =======
+const guides=new THREE.Group(); scene.add(guides);
+function ring(R,z,color,op=0.6){ const pts=[]; for(let i=0;i<=72;i++){const a=i/72*2*Math.PI; pts.push(new THREE.Vector3(R*Math.cos(a),R*Math.sin(a),z));}
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({color,transparent:true,opacity:op})); }
+function seg(a,b,color,op=0.9){ return new THREE.Line(new THREE.BufferGeometry().setFromPoints([a,b]), new THREE.LineBasicMaterial({color,transparent:true,opacity:op})); }
+function rebuildGuides(){
+  guides.clear(); if(!showGuides && !showArcs) return;
+  const p=params, S=RENDER_RB, Rb=S, Rp=p.r*S, h=home.z*S, gam=home.yaw;
+  if(showGuides){
+    guides.add(ring(Rb,0,0x9AA0A6,0.7)); guides.add(ring(Rp,h,0x4A6B8C,0.5));
+    for(const spoke of SPOKES){ const a=spoke*DEG; guides.add(seg(new THREE.Vector3(0,0,0), new THREE.Vector3(Rb*Math.cos(a),Rb*Math.sin(a),0), 0xC9C4BB,0.6)); }
+    for(let k=0;k<3;k++){ const i=2*k,j=2*k+1;
+      const ba=[(SPOKES[k]+SIGN[i]*p.alphaB/2)*DEG,(SPOKES[k]+SIGN[j]*p.alphaB/2)*DEG];
+      guides.add(seg(new THREE.Vector3(Rb*Math.cos(ba[0]),Rb*Math.sin(ba[0]),0), new THREE.Vector3(Rb*Math.cos(ba[1]),Rb*Math.sin(ba[1]),0), 0xC0392B,0.95));
+      const pa=[(SPOKES[k]+gam+SIGN[i]*p.alphaP/2)*DEG,(SPOKES[k]+gam+SIGN[j]*p.alphaP/2)*DEG];
+      guides.add(seg(new THREE.Vector3(Rp*Math.cos(pa[0]),Rp*Math.sin(pa[0]),h), new THREE.Vector3(Rp*Math.cos(pa[1]),Rp*Math.sin(pa[1]),h), 0xC0392B,0.95));
+    }
+  }
+  if(showArcs){ for(let i=0;i<6;i++){ const spoke=SPOKES[(i/2)|0], th=(spoke+SIGN[i]*(90-p.beta))*DEG, ct=Math.cos(th),st=Math.sin(th);
+    const bx=Rb*Math.cos((spoke+SIGN[i]*p.alphaB/2)*DEG), by=Rb*Math.sin((spoke+SIGN[i]*p.alphaB/2)*DEG), Ll=p.l*S;
+    const pts=[]; for(let s=-40;s<=130;s+=5){const a=s*DEG; pts.push(new THREE.Vector3(bx+Ll*Math.cos(a)*ct, by+Ll*Math.cos(a)*st, Ll*Math.sin(a)));}
+    guides.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({color:0xE6A100,transparent:true,opacity:0.7}))); } }
+}
+
+function redraw(){ renderer.render(scene,camera); }
+controls.addEventListener('change', redraw);
+window.addEventListener('resize',()=>{ camera.aspect=cz.clientWidth/cz.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(cz.clientWidth,cz.clientHeight); redraw(); });
+
+const ASB_HOME = computeHome(ASBUILT);
+const ASB_THETA = (()=>{ const sv=home; home=ASB_HOME; const t=thetaStar(ASBUILT).thetaStar; home=sv; return t; })();
+
+// ======= 指標 =======
+const $=id=>document.getElementById(id);
+const fmt=(n,d=1)=>Number.isFinite(n)?n.toFixed(d):'—';
+function updateMetrics(){
+  // HOME readout
+  $('hZ').textContent = home.valid?fmt(home.z,3):'—';
+  $('hYaw').textContent = home.valid?`${fmt(home.yawDisp,1)}°`:'—';
+  const rcls = home.reach>=12?'ok':home.reach>=4?'mid':'bad';
+  $('hReach').innerHTML = home.valid?`<b class="${rcls}">${fmt(home.reach,1)}°</b>`:'<b class="bad">無工作空間</b>';
+  $('hT2K').textContent = home.valid&&Number.isFinite(home.kappa)?`${fmt(home.t2,3)} / ${fmt(home.kappa,1)}`:'—';
+  // 當前 pose
+  const pm=poseMetrics(params,pose);
+  $('mReach').innerHTML = pm.valid?'<b class="ok">REACHABLE</b>':'<b class="bad">超出工作空間</b>';
+  const t2cls = pm.t2<EPS_T2?'bad':pm.t2<0.4?'mid':'ok';
+  $('mT2').innerHTML = `<b class="${t2cls}">${fmt(pm.t2,3)}</b>`;
+  const gT2=$('gT2'); gT2.classList.toggle('warn',pm.t2<EPS_T2); gT2.firstElementChild.style.width=Math.min(100,pm.t2/0.8*100)+'%';
+  $('mKappa').innerHTML = Number.isFinite(pm.kappa)?`${fmt(pm.kappa,2)} <span class="ref">(良態&lt;12)</span>`:'<b class="bad">∞</b>';
+  // θ*
+  const ts=thetaStar(params), thcls=ts.thetaStar>=16?'ok':ts.thetaStar>=8?'mid':'bad';
+  $('mTheta').innerHTML = `<b class="${thcls}">${ts.thetaStar}°</b> <span class="ref">(as-built ${ASB_THETA}°)</span>`;
+  $('mGCI').innerHTML = fmt(ts.meanInvK,3);
+  // 製造
+  const cb=2*Math.sin(params.alphaB/2*DEG), cp=2*params.r*Math.sin(params.alphaP/2*DEG), bad=cb<DELTA_JOINT-1e-3||cp<DELTA_JOINT-1e-3;
+  $('mChord').innerHTML = `<b class="${bad?'bad':'ok'}">${fmt(cb,3)} / ${fmt(cp,3)}</b>`;
+  $('mUL').textContent = fmt(params.u/params.l,2);
+  $('mR').textContent = fmt(params.r,3);
+  // 物理關節（母函數 poseMargins，同源）
+  const wg=WE.geoFromParams({r:params.r,alphaB:params.alphaB,alphaP:params.alphaP,l:params.l,u:params.u,beta:params.beta,clocking:home.yaw});
+  const wm=WE.poseMargins(wg,[pose[0],pose[1],pose[2],pose[3],pose[4],pose[5]],{phys:true});
+  curPhysOk = !!(wm.valid && wm.phys && wm.phys.ok);
+  if(wm.valid && wm.phys){ const ph=wm.phys, rng=a=>`${Math.min(...a).toFixed(0)}…${Math.max(...a).toFixed(0)}°`;
+    const j1ok=ph.okJ1, j2min=Math.min(...ph.j2), tl=ph.thetaLim;
+    $('jJ1').innerHTML=`<b class="${j1ok?'ok':'bad'}">${rng(ph.j1)}</b>`;
+    $('jJ2').innerHTML=`<b class="${ph.okJ2?'ok':'bad'}">${j2min.toFixed(1)}° (≥${tl?tl.toFixed(1):'–'})</b>`;
+    $('jJ3').innerHTML=`<b class="${ph.okJ3?'ok':'bad'}">${rng(ph.j3)}</b>`;
+    $('jCrank').innerHTML=`<b class="${ph.okCrank?'ok':'bad'}">${(ph.crankMin*RENDER_RB).toFixed(0)}mm</b>`;
+  } else { for(const id of ['jJ1','jJ2','jJ3','jCrank']) $(id).innerHTML='<b class="bad">超出工作空間</b>'; }
+}
+
+// ======= 刷新 =======
+function syncPoseUI(){ pIn.px.value=pose[0]; pIn.py.value=pose[1]; pIn.pz.value=pose[2];
+  pIn.pr.value=pose[3]; pIn.pp.value=pose[4]; pIn.pyw.value=pose[5]; for(const k in pIn) pIn[k]._show(); }
+function refresh(geoChanged){
+  if(geoChanged){ home=computeHome(params); kin=kinFor(params); syncModel(); rebuildBase(); rebuildGuides();
+    pose[0]=pose[1]=pose[3]=pose[4]=pose[5]=0; pose[2]=home.z; syncPoseUI(); }
+  const g=geom(params,home.yaw), sol=ik(g,pose);
+  rig.update(sol.angles.map(a=>a/DEG), [pose[0]*RENDER_RB,pose[1]*RENDER_RB,pose[2]*RENDER_RB,pose[3],pose[4],pose[5]]);
+  rig.upperLines.forEach(l=>l.material.color.set(sol.valid?StewartStyle.colors.upperLeg:StewartStyle.colors.basePlate));
+  updateMetrics();
+  const dirty=Object.keys(ASBUILT).some(k=>Math.abs(params[k]-ASBUILT[k])>1e-6);
+  const tag=$('geoState'); tag.textContent=dirty?'已修改':'as-built'; tag.classList.toggle('warn',dirty);
+  redraw();
+  if(wsReady){
+    markActiveCard(); updateWsMarker();
+    const c=pose[0]+','+pose[1]+','+pose[2];
+    if(geoChanged || c!==wsLastCenter){ wsLastCenter=c; scheduleWs(); }   // 幾何或中心 r 變 → 重算殼；純旋轉只動 marker
+  }
+}
+
+// ======= 滑桿 =======
+function slider(host, cat, key, label, code, mn, mx, st, get, set, asbVal){
+  const w=document.createElement('div'); w.className='ctl '+cat;
+  const hasRst = asbVal!==undefined;
+  w.innerHTML=`<div class="ctl-head"><span class="lab">${label} <span class="code">${code}</span></span>`+
+    `<span style="display:flex;align-items:baseline;gap:5px">`+
+    (hasRst?`<button class="rst" id="rst_${key}" title="歸 as-built">↺</button>`:``)+
+    `<span class="val" id="v_${key}"></span></span></div>`;
+  const inp=document.createElement('input'); inp.type='range'; inp.min=mn; inp.max=mx; inp.step=st; inp.value=get();
+  const show=()=>{ const v=get(); $('v_'+key).textContent = Number.isInteger(v)?v:Number(v.toFixed(3));
+    if(hasRst) $('rst_'+key).classList.toggle('dirty', Math.abs(v-asbVal)>1e-6); };
+  inp.addEventListener('input',()=>{ set(parseFloat(inp.value)); show(); refresh(host.dataset.geo==='1'); });
+  w.appendChild(inp); host.appendChild(w); inp._show=show; show();
+  if(hasRst) $('rst_'+key).addEventListener('click',()=>{ set(asbVal); inp.value=asbVal; show(); refresh(true); });
+  return inp;
+}
+const gIn={};
+const lenHost=$('lenSliders'); lenHost.dataset.geo='1';
+gIn.r = slider(lenHost,'len','r','平台半徑比','R_p/R_b',0.30,1.20,0.005,()=>params.r,v=>params.r=v,ASBUILT.r);
+gIn.l = slider(lenHost,'len','l','下腿(曲柄)','L/R_b',0.15,0.95,0.005,()=>params.l,v=>params.l=v,ASBUILT.l);
+gIn.u = slider(lenHost,'len','u','上腿(連桿)','U/R_b',0.50,1.70,0.005,()=>params.u,v=>params.u=v,ASBUILT.u);
+const angHost=$('angSliders'); angHost.dataset.geo='1';
+gIn.alphaB = slider(angHost,'ang','alphaB','底座分裂角','α_b °',2,55,0.1,()=>params.alphaB,v=>params.alphaB=v,ASBUILT.alphaB);
+gIn.alphaP = slider(angHost,'ang','alphaP','平台分裂角','α_p °',2,55,0.1,()=>params.alphaP,v=>params.alphaP=v,ASBUILT.alphaP);
+gIn.beta   = slider(angHost,'ang','beta','曲柄平面偏轉','β ° (±)',-90,90,1,()=>params.beta,v=>params.beta=v,ASBUILT.beta);
+
+const poseHost=$('poseSliders'); poseHost.dataset.geo='0';
+const POSE=[['px','x','×R_b',-0.35,0.35,0.005,0],['py','y','×R_b',-0.35,0.35,0.005,1],['pz','z','×R_b 絕對',0.20,1.40,0.005,2],
+  ['pr','roll','°',-30,30,0.5,3],['pp','pitch','°',-30,30,0.5,4],['pyw','yaw','°',-45,45,0.5,5]];
+const pIn={}; for(const [k,lab,u,mn,mx,st,idx] of POSE) pIn[k]=slider(poseHost,'po',k,lab,u,mn,mx,st,()=>pose[idx],v=>pose[idx]=v);
+
+// ======= 按鈕 =======
+function applyParams(src){ Object.assign(params,src); for(const k in gIn){ gIn[k].value=params[k]; gIn[k]._show(); } refresh(true); }
+$('btnReset').onclick=()=>applyParams(ASBUILT);
+$('btnPoseZero').onclick=()=>{ pose[0]=pose[1]=pose[3]=pose[4]=pose[5]=0; pose[2]=home.z; syncPoseUI(); refresh(false); };
+$('btnGuides').onclick=e=>{ showGuides=!showGuides; e.target.classList.toggle('active',showGuides); rebuildGuides(); redraw(); };
+$('btnArcs').onclick=e=>{ showArcs=!showArcs; e.target.classList.toggle('active',showArcs); rebuildGuides(); redraw(); };
+
+// ======= 探索方案卡片(離線 sysid/geometry_explore.js 搜尋結果)=======
+const PRESETS=[
+  { id:'asbuilt',   name:'as-built', tag:'現役基準',      p:{r:103/152,alphaB:18.92,alphaP:28.07,l:65/152,u:165/152,beta:0},         theta:26, kappa:4.9, sigma:0.430, crank:170, build:true,  note:'目前實機幾何(基準)。' },
+  { id:'buildable', name:'可造高活動',tag:'雙弦≥0.329 ∧ 不撞', p:{r:0.6953,alphaB:45.52, alphaP:27.84, l:0.4661, u:1.126,  beta:-15.2}, theta:36, kappa:2.6, sigma:0.753, crank:88,  build:true,  note:'物理四閘後唯一全可造的高活動度解:θ* 26→36°、接頭全可用、曲柄不撞。推薦。' },
+  { id:'mobility',  name:'活動度上限',tag:'平台關節須重做', p:{r:0.5255,alphaB:36.54, alphaP:6,     l:0.4983, u:1.4465, beta:-39.1}, theta:42, kappa:3.7, sigma:0.587, crank:63,  build:false, note:'θ*=42° 最高,但平台分裂角僅 6° → 平台接頭重疊,須重做平台關節。' },
+  { id:'near',      name:'微調',     tag:'近 as-built',   p:{r:0.6083,alphaB:24.83, alphaP:15.81, l:0.4464, u:1.3036, beta:-11},   theta:40, kappa:3.7, sigma:0.574, crank:136, build:false, note:'主要拉長連桿 u,θ* 26→40°;平台弦略小須微調平台孔位。' },
+  { id:'balanced',  name:'平衡',     tag:'低 κ',          p:{r:0.9415,alphaB:48,    alphaP:9.6,   l:0.6594, u:1.2387, beta:-7.6},  theta:24, kappa:1.5, sigma:1.150, crank:77,  build:false, note:'κ≈1.5 各向同性最佳;平台弦小須重做平台關節。' },
+  { id:'t2robust',  name:'各向同性', tag:'Type-II 最穩',  p:{r:1,     alphaB:46.11, alphaP:9.6,   l:0.6594, u:1.2387, beta:-0.4},  theta:22, kappa:1.4, sigma:1.219, crank:96,  build:false, note:'home σmin/κ 最佳(1.22/1.4);平台弦小須重做平台關節。' },
+];
+function renderCards(){
+  const host=$('cards'); host.innerHTML='';
+  for(const c of PRESETS){
+    const el=document.createElement('div'); el.className='card'; el.dataset.id=c.id;
+    el.innerHTML=`<div class="card-top"><span class="card-name">${c.name} <span style="color:var(--sub);font-size:10px;font-weight:400">${c.tag}</span></span>`+
+      `<span class="card-badge ${c.build?'build':'remake'}">${c.build?'可造':'重做'}</span></div>`+
+      `<div class="card-mx"><span>θ*<b>${c.theta}°</b></span><span>κ<b>${c.kappa}</b></span><span>σ<b>${c.sigma}</b></span><span>曲柄<b>${c.crank}</b></span></div>`+
+      `<div class="card-note">${c.note}</div>`;
+    el.addEventListener('click',()=>applyParams(c.p));
+    host.appendChild(el);
+  }
+}
+function markActiveCard(){
+  document.querySelectorAll('.card').forEach(el=>{ const c=PRESETS.find(p=>p.id===el.dataset.id);
+    const match=c && Object.keys(c.p).every(k=>Math.abs(params[k]-c.p[k])<1e-4);
+    el.classList.toggle('active',!!match); });
+}
+renderCards();
+
+// ======= 工作空間殼場景(roll=X / pitch=Y / yaw=Z 度;中心 = 板子座標 r)=======
+const wz=$('ws-zone');
+const sceneW=new THREE.Scene(); sceneW.background=new THREE.Color(StewartStyle.scene.lightBg);
+const camW=new THREE.PerspectiveCamera(48, wz.clientWidth/Math.max(1,wz.clientHeight), 1, 4000); camW.up.set(0,0,1); camW.position.set(150,-155,120);
+const rendererW=new THREE.WebGLRenderer({antialias:true}); rendererW.setSize(wz.clientWidth,wz.clientHeight); wz.appendChild(rendererW.domElement);
+const ctlW=new OrbitControls(camW,rendererW.domElement); ctlW.target.set(0,0,0); ctlW.update();
+sceneW.add(new THREE.AmbientLight(0xffffff,0.95));
+const gridW=new THREE.GridHelper(120,12,0xC9C4BB,0xE2DDD4); gridW.rotation.x=Math.PI/2; sceneW.add(gridW);
+function redrawW(){ rendererW.render(sceneW,camW); }
+ctlW.addEventListener('change', redrawW);
+
+const AXL=66, AYL=98;   // roll/pitch 軸長、yaw 軸長
+function axisLine(dir,len,color){ const g=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), dir.clone().multiplyScalar(len)]);
+  sceneW.add(new THREE.Line(g,new THREE.LineBasicMaterial({color}))); }
+function axisLabel(txt,pos,color){ const cv=document.createElement('canvas'); cv.width=256; cv.height=64; const x=cv.getContext('2d');
+  x.fillStyle=color; x.font='bold 34px sans-serif'; x.textAlign='center'; x.textBaseline='middle'; x.fillText(txt,128,32);
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),transparent:true,depthTest:false,depthWrite:false}));
+  sp.position.copy(pos); sp.scale.set(32,8,1); sceneW.add(sp); }
+axisLine(new THREE.Vector3(1,0,0),AXL,0xC0392B); axisLine(new THREE.Vector3(-1,0,0),AXL,0xE3B7B2);
+axisLine(new THREE.Vector3(0,1,0),AXL,0x2e7d46); axisLine(new THREE.Vector3(0,-1,0),AXL,0xAECDB8);
+axisLine(new THREE.Vector3(0,0,1),AYL,0x4A6B8C); axisLine(new THREE.Vector3(0,0,-1),AYL,0xB3C2D0);
+axisLabel('roll', new THREE.Vector3(AXL+7,0,0),'#C0392B'); axisLabel('pitch',new THREE.Vector3(0,AXL+7,0),'#2e7d46'); axisLabel('yaw',new THREE.Vector3(0,0,AYL+7),'#4A6B8C');
+
+let cloudAll=null, cloudSafe=null;
+const markerW=new THREE.Mesh(new THREE.SphereGeometry(2.6,18,18), new THREE.MeshBasicMaterial({color:0x9333EA}));
+sceneW.add(markerW);
+const showLayer={ ws:true, safe:true, pt:true };
+function makeCloud(pts,color,size,op){ const g=new THREE.BufferGeometry(), a=new Float32Array(pts.length*3);
+  for(let i=0;i<pts.length;i++){ a[i*3]=pts[i][0]; a[i*3+1]=pts[i][1]; a[i*3+2]=pts[i][2]; }
+  g.setAttribute('position',new THREE.BufferAttribute(a,3));
+  return new THREE.Points(g, new THREE.PointsMaterial({color,size,transparent:true,opacity:op,sizeAttenuation:true,depthWrite:false})); }
+function applyWsClouds(d){
+  const dispose=c=>{ if(c){ sceneW.remove(c); c.geometry.dispose(); c.material.dispose(); } };
+  dispose(cloudAll); dispose(cloudSafe);
+  cloudAll=makeCloud(d.physical||[],0x6f8fb0,1.9,0.34); cloudAll.visible=showLayer.ws; sceneW.add(cloudAll);   // 工作空間 = 物理可達（IK 層已棄）
+  cloudSafe=makeCloud(d.safe,0x3f9e63,2.1,0.50); cloudSafe.visible=showLayer.safe; sceneW.add(cloudSafe);
+  const s=d.stats, c=s.cuts;
+  $('wsStat').innerHTML=`物理可達 <b>${s.nPhys}</b> · 其中安全 <b>${s.nSafe}</b> (${s.nPhys?(s.nSafe/s.nPhys*100).toFixed(0):0}%)<br>不可達砍 曲柄/J1/J2/J3 = ${c.crank}/${c.j1}/${c.j2}/${c.j3} · 安全再砍 T1/T2/κ = ${c.radial}/${c.typeII}/${c.kappa}`;
+  redrawW();
+}
+function updateWsMarker(){
+  markerW.position.set(pose[3],pose[4],pose[5]);
+  markerW.material.color.set(curPhysOk?0x9333EA:0xC0392B);   // 物理可達=紫、否則紅
+  markerW.visible=showLayer.pt; redrawW();
+}
+
+// Web Worker:幾何/中心變動 → debounce 丟過去重算殼,主執行緒 3D 不卡
+const wsWorker=new Worker('/shared/workspace-worker.js');
+let wsReqId=0, wsDeb=null;
+const WS_GRID={ roll:[-54,54,3], pitch:[-54,54,3], yaw:[-92,92,4] }, WS_THR={ radialMargin:1.25, epsT2:0.15, kappaThr:12, phys:true };
+wsWorker.onmessage=(e)=>{ if(e.data.id!==wsReqId) return; $('wsBusy').classList.remove('on'); if(e.data.ok) applyWsClouds(e.data); };
+function requestWs(){ wsReqId++; $('wsBusy').classList.add('on');
+  wsWorker.postMessage({ id:wsReqId,
+    params:{ r:params.r, alphaB:params.alphaB, alphaP:params.alphaP, l:params.l, u:params.u, beta:params.beta },
+    clocking:home.yaw, center:[pose[0],pose[1],pose[2]], grid:WS_GRID, thr:WS_THR }); }
+function scheduleWs(){ clearTimeout(wsDeb); wsDeb=setTimeout(requestWs, 130); }
+
+function resizeW(){ if(!wz.clientWidth) return; camW.aspect=wz.clientWidth/wz.clientHeight; camW.updateProjectionMatrix(); rendererW.setSize(wz.clientWidth,wz.clientHeight); redrawW(); }
+window.addEventListener('resize', resizeW);
+$('ck-ws').addEventListener('change',e=>{ showLayer.ws=e.target.checked; if(cloudAll) cloudAll.visible=showLayer.ws; redrawW(); });
+$('ck-safe').addEventListener('change',e=>{ showLayer.safe=e.target.checked; if(cloudSafe) cloudSafe.visible=showLayer.safe; redrawW(); });
+$('ck-pt').addEventListener('change',e=>{ showLayer.pt=e.target.checked; markerW.visible=showLayer.pt; redrawW(); });
+
+wsReady=true;
+refresh(true);
+resizeW();
+</script>
+<script src="/shared/app-nav.js" defer></script>
+</body>
+</html>

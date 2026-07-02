@@ -1,44 +1,40 @@
 #!/usr/bin/env node
 'use strict';
 // ===== home 旋轉工作空間 3D 視覺化（roll/pitch/yaw 耦合）=====
-// 用 ../kin.js 在 home(x=y=0,z=133) 掃 (roll,pitch,yaw) 網格判 IK-valid → 工作空間殼；
-// 25% 徑向裕度子集 = 安全估計殼；疊真實手機 PF 實際用到的範圍雲。座標 X=roll/Y=pitch/Z=yaw（度）。
+// 在 home(x=y=0,z=133) 掃 (roll,pitch,yaw) 網格 → 工作空間殼（Type-I 可達）+ 安全殼。
+// 座標 X=roll/Y=pitch/Z=yaw（度）。疊真實手機 PF 實際用到的範圍雲。
+//
+// 【重構 2026-06-30】掃描核心已抽出為泛用母函數 ../workspace_envelope.js（computeEnvelope）：
+//   - center / 幾何 / 網格 / 門檻全參數化（任意 r=(x,y,z)、任意幾何構型）。
+//   - 安全空間定義強化：舊版只有 Type-I（asin clamp 的 1.25× 徑向裕度）；
+//     新版 = Type-I 徑向裕度 ∧ Type-II(σmin(Jx)≥ε ∧ κ(Ja)≤κ̄)（並聯奇異 / 病態剔除）。
+//   本檔的 computeWorkspaceData = 該母函數「center=[0,0,133]、現役 kin.js 幾何」的退化版 + 手機雲疊加。
 //
 // 兩種用途：
 //   1) CLI 吐自包含 three.js HTML：node sysid/phone_gen/workspace_viz.js [--out f.html]
 //   2) require：const { computeWorkspaceData } = require('./workspace_viz.js') → 取 {workspace,safe,phone,lim,stats}
-//      （server.js 串流台首次請求 lazy 算一次、serve /workspace_data.json，供即時累積頁渲染包絡+橘歷史；不重抄掃描邏輯）。
+//      （server.js 串流台首次請求 lazy 算一次、serve /workspace_data.json，供即時累積頁渲染包絡+橘歷史）。
 const fs = require('fs'), path = require('path');
 const Kin = require(path.join(__dirname, '..', 'kin.js'));
+const WE = require(path.join(__dirname, '..', 'workspace_envelope.js'));
 const HOME = [0, 0, 133, 0, 0, 0];
-const ik = (r, p, y) => Kin.ik([HOME[0], HOME[1], HOME[2], r, p, y]).valid;
 const CAP_DIR = path.join(__dirname, '..', 'data', 'phone-capture');
 
-// 網格 (deg)
+// 網格 (deg) — 維持原始觀測範圍
 const RR = [-42, 42, 1.5], PR = [-42, 42, 1.5], YR = [-92, 92, 2.5];
-const ax = (a) => { const o = []; for (let v = a[0]; v <= a[1]; v += a[2]) o.push(+v.toFixed(2)); return o; };
-const samp = (a, n) => { if (a.length <= n) return a; const o = [], s = a.length / n; for (let t = 0; t < n; t++) o.push(a[Math.floor(t * s)]); return o; };
+const samp = WE.samp;
 
 function computeWorkspaceData() {
-  const rs = ax(RR), ps = ax(PR), ys = ax(YR);
-  const key = (i, j, k) => i + ',' + j + ',' + k;
-  const valid = new Set(), safe = new Set();
-  for (let i = 0; i < rs.length; i++) for (let j = 0; j < ps.length; j++) for (let k = 0; k < ys.length; k++) {
-    const r = rs[i], p = ps[j], y = ys[k];
-    if (!ik(r, p, y)) continue;
-    valid.add(key(i, j, k));
-    if (ik(r * 1.25, p * 1.25, y * 1.25)) safe.add(key(i, j, k));   // 25% 徑向裕度 = 離幾何邊界有餘裕
-  }
-  function shell(set) {
-    const out = [];
-    for (const kk of set) {
-      const [i, j, k] = kk.split(',').map(Number);
-      const nb = [[i - 1, j, k], [i + 1, j, k], [i, j - 1, k], [i, j + 1, k], [i, j, k - 1], [i, j, k + 1]];
-      if (nb.some(([a, b, c]) => !set.has(key(a, b, c)))) out.push([rs[i], ps[j], ys[k]]);
-    }
-    return out;
-  }
-  // 手機 PF 實際用到的雲（兩場 pf.pose 的 roll/pitch/yaw）
+  // === 退化呼叫母函數：現役幾何（kin.js，SoT 不分叉）、center = 原始定義 [0,0,133] ===
+  const geo = WE.geoFromKin(Kin);
+  const env = WE.computeEnvelope(geo, {
+    center: [HOME[0] / Kin.BASE_RADIUS, HOME[1] / Kin.BASE_RADIUS, HOME[2] / Kin.BASE_RADIUS],
+    grid: { roll: RR, pitch: PR, yaw: YR },
+    radialMargin: 1.25, epsT2: 0.15, kappaThr: 12,
+    sampleWorkspace: 4500, sampleSafe: 2800,
+  });
+
+  // === 手機 PF 實際用到的雲（兩場 pf.pose 的 roll/pitch/yaw）— 疊加層，母函數不含 ===
   function phoneCloud(file, n) {
     const L = fs.readFileSync(file, 'utf8').trim().split('\n'); const pts = [];
     for (const l of L) { let j; try { j = JSON.parse(l); } catch { continue; } if (j.type === 'pf' && Array.isArray(j.pose)) pts.push([+j.pose[3].toFixed(2), +j.pose[4].toFixed(2), +j.pose[5].toFixed(2)]); }
@@ -47,22 +43,14 @@ function computeWorkspaceData() {
   const caps = fs.existsSync(CAP_DIR) ? fs.readdirSync(CAP_DIR).filter(f => f.startsWith('cap_') && f.endsWith('.jsonl')).map(f => path.join(CAP_DIR, f)) : [];
   let phone = []; for (const c of caps) phone = phone.concat(phoneCloud(c, 1100));
 
-  const axMax = (axis) => { let m = 0, mn = 0; for (let v = 0; v <= 92; v += 0.5) { const a = [0, 0, 0]; a[axis] = v; if (ik(a[0], a[1], a[2])) m = v; else break; } for (let v = 0; v >= -92; v -= 0.5) { const a = [0, 0, 0]; a[axis] = v; if (ik(a[0], a[1], a[2])) mn = v; else break; } return [mn, m]; };
-  const rollAt = (y) => { let m = 0; for (let v = 0; v <= 60; v += 0.5) { if (ik(v, 0, y)) m = v; else break; } return m; };
   const pfRange = () => { if (!phone.length) return { mn: [0, 0, 0], mx: [0, 0, 0] }; const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9]; for (const p of phone) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); } return { mn: mn.map(v => +v.toFixed(1)), mx: mx.map(v => +v.toFixed(1)) }; };
-  // 手機雲每軸標準差（生成累積收斂的量化標的）
   const pfStd = () => { const out = []; for (let k = 0; k < 3; k++) { const vs = phone.map(p => p[k]); if (!vs.length) { out.push(0); continue; } const m = vs.reduce((a, b) => a + b, 0) / vs.length; out.push(+Math.sqrt(vs.reduce((a, b) => a + (b - m) ** 2, 0) / vs.length).toFixed(1)); } return out; };
-  const voxVol = RR[2] * PR[2] * YR[2];
+
   const stats = {
-    rollLim: axMax(0), pitchLim: axMax(1), yawLim: axMax(2),
-    coupling: { y0: rollAt(0), y30: rollAt(30), y50: rollAt(50), y70: rollAt(70) },
-    wsVol: Math.round(valid.size * voxVol), safeVol: Math.round(safe.size * voxVol), safeFrac: +(safe.size / valid.size).toFixed(2),
+    ...env.stats,                          // rollLim/pitchLim/yawLim/coupling/wsVol/safeVol/safeFrac/cuts/thresholds
     pf: pfRange(), pfStd: pfStd(), nCaps: caps.length, nPhone: phone.length,
   };
-  return {
-    workspace: samp(shell(valid), 4500), safe: samp(shell(safe), 2800), phone: samp(phone, 2000),
-    lim: { r: RR, p: PR, y: YR }, stats,
-  };
+  return { workspace: env.workspace, safe: env.safe, phone: samp(phone, 2000), lim: env.lim, stats };
 }
 
 module.exports = { computeWorkspaceData };
@@ -90,7 +78,7 @@ hr{border:0;border-top:1px solid #2a313c;margin:9px 0}
 <div id="legend" class="panel">
  <h3>Home 旋轉工作空間</h3>
  <div><span class="sw" style="background:#3d7fd6"></span>工作空間殼（IK 可解）</div>
- <div><span class="sw" style="background:#33c06a"></span>安全估計（25% 裕度）</div>
+ <div><span class="sw" style="background:#33c06a"></span>安全（徑向裕度 ∧ Type-II σmin/κ）</div>
  <div><span class="sw" style="background:#ff8a1e"></span>手機實際用到 (PF)</div>
  <hr><div class="k" style="font-size:12px">軸：<span style="color:#e0564f">Roll(X)</span> · <span style="color:#5bcd6b">Pitch(Y)</span> · <span style="color:#5aa0e6">Yaw(Z)</span></div>
 </div>
