@@ -363,6 +363,13 @@ function ghostArrive(pose) {
   prevG = dispG.slice(); targetG = pose.slice(); recvAtG = now; ghostActive = true;
   scheduleEnvelope();   // 意圖 x/y/z 變 → 殼跟著該平移中心重算（三來源通用）
 }
+// 意圖波形/readout 取樣：三來源統一、固定 30Hz、獨立於 RAF —— 背景分頁 RAF 停擺時仍記錄
+// （板子實際是 WS 事件驅動照錄，意圖若掛在 RAF 會單邊斷線）。取 targetG（事件新鮮）非 dispG（RAF 插值）。
+setInterval(() => {
+  if (!ghostActive) return;
+  pushWave(simWave, [targetG[3], targetG[4], targetG[5]]);
+  elSim.textContent = fmt3(targetG);
+}, 33);
 function resize() {
   for (const [host, cam, rdr] of [[hostW, camW, rdrW], [hostR, camR, rdrR]]) {
     const w = host.clientWidth, h = host.clientHeight; cam.aspect = w / h; cam.updateProjectionMatrix(); rdr.setSize(w, h, false);
@@ -380,9 +387,7 @@ function loop() {
     const frac = recvAtG ? Math.min(1, (performance.now() - recvAtG) / intervalG) : 1;
     for (let i = 0; i < 6; i++) dispG[i] = prevG[i] + (targetG[i] - prevG[i]) * frac;
     ghost.update(Kin.ik(dispG).angles, dispG);
-    // 意圖波形 + readout + 左圖綠 marker：統一從顯示中的意圖取樣（三來源一致，滑桿不動也不斷線）
-    pushWave(simWave, [dispG[3], dispG[4], dispG[5]]); elSim.textContent = fmt3(dispG);
-    markInt.position.set(dispG[3], dispG[4], dispG[5]);
+    markInt.position.set(dispG[3], dispG[4], dispG[5]);   // 左圖綠 marker 跟顯示中的意圖（波形/readout 由 30Hz interval 取樣）
   }
   markInt.visible = ghostActive;                                       // 換來源 ghost 熄 → 綠 marker 同步熄
   rig.update(Kin.ik(actPose || homeAbs).angles, actPose || homeAbs);   // 紅 rig：板子實際（無遙測→home）
