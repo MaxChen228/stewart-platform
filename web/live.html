@@ -382,7 +382,9 @@ connect3000();
 
 // server 權威 owner 廣播：若被其他端接管（owner 變成別的非本來源）→ 復原本頁串接 UI（板子已不歸我）。
 function onModeBroadcast(owner) {
-  if (modeWaiter) modeWaiter(owner);   // 交棒確認（enterDrive 等這個）
+  // 交棒確認：只認「owner 變成本來源」的廣播。server 每次新連線/role 宣告也會廣播 evt:mode 帶「當前(舊)owner」，
+  // 不能被那些 stray 廣播誤觸；session 拒絕廣播 owner=null → 不 resolve，靠 waitForMode timeout 回滾。
+  if (modeWaiter && owner === modeWaiter.want) { const w = modeWaiter; modeWaiter = null; w.resolve(owner); }
   if (driving && owner && owner !== currentSource) stopDriveLocal('其他端已接管');
 }
 // session 進行中：控制被 server gate，串接必假成功 → 禁用按鈕並顯示鎖定原因。
@@ -394,9 +396,8 @@ function onSessionState() {
 // 交棒確認：MODE 送出後等 server 廣播 evt:mode。owner===本來源=成功；null（session 拒）或逾時=失敗。
 function waitForMode(want, timeoutMs = 1200) {
   return new Promise((resolve) => {
-    let done = false;
-    const t = setTimeout(() => { if (!done) { done = true; modeWaiter = null; resolve(null); } }, timeoutMs);
-    modeWaiter = (owner) => { if (!done) { done = true; clearTimeout(t); modeWaiter = null; resolve(owner); } };
+    const t = setTimeout(() => { if (modeWaiter) { modeWaiter = null; resolve(null); } }, timeoutMs);
+    modeWaiter = { want, resolve: (o) => { clearTimeout(t); resolve(o); } };   // want=期待接管的來源，onModeBroadcast 據此過濾 stray
   });
 }
 // 跟隨延遲（server evt:'latency'，真實量測）：e2e=指令→實際 felt-lag；tele=板→server 遙測新鮮度。
@@ -561,7 +562,7 @@ async function armSegP(pose, label) {
   driveBtn.textContent = `⤴ 起飛 → ${label}…`;
   await sleep(ms + 220);
   // session 若在起飛中途啟動，P 被 server 丟棄（cmd_dropped）→ 平台沒動，別假裝到位
-  if (lastDropAt > sentAt) { statEl.innerHTML = `<b style="color:var(--dev)">起飛中止：${label} 指令被拒（session 接管？）</b>`; return false; }
+  if (lastDropAt > sentAt) { statEl.innerHTML = `<b style="color:var(--dev)">起飛中止：${label} 指令被伺服器丟棄（平台未移動）</b>`; return false; }
   return wsReady();
 }
 async function armToHome() {
@@ -586,13 +587,16 @@ async function enterDrive() {
   driveBtn.disabled = true; lockSourceUI(true); if (currentSource === 'sim') btn.disabled = true;
   driveBtn.textContent = '⤴ 起飛回 home…';
   const ok = await armToHome();
-  driveBtn.disabled = false; if (currentSource === 'sim') btn.disabled = false;
-  if (!ok || !boardConnected || !wsReady()) { setDriveBtn(false); lockSourceUI(false); if (ok) statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
-  // 到 home 才交棒：送 MODE 後等 server 廣播 evt:mode 確認接管（session 拒絕會廣播 owner=null）→ 不假裝已串接
+  if (currentSource === 'sim') btn.disabled = false;
+  // driveBtn 保持 disabled 直到交棒定案：起飛+交棒窗口內再按會重跑 armToHome 並孤兒化 modeWaiter → client/server desync
+  if (!ok || !boardConnected || !wsReady()) { driveBtn.disabled = false; setDriveBtn(false); lockSourceUI(false); if (ok) statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
+  // 到 home 才交棒：送 MODE 後等 server 廣播 evt:mode owner===本來源 確認接管（session 拒絕廣播 owner=null → timeout 回滾）→ 不假裝已串接
   driveBtn.textContent = '⤳ 交棒中…';
   ws3.send(JSON.stringify({ cmd: 'MODE ' + currentSource }));
   const owner = await waitForMode(currentSource);
+  driveBtn.disabled = false;
   if (!wsReady() || owner !== currentSource) {
+    if (wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' }));   // 交棒沒定案 → 明確要 server 釋放，防遲到廣播留殘餘 owner
     stopDriveLocal(sessionActive ? 'session 執行中：串接被拒' : '交棒未確認（逾時），未串接');
     return;
   }
