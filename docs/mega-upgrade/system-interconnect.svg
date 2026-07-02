@@ -1,0 +1,126 @@
+<svg width="100%" viewBox="0 0 1060 760" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Mega 進化 — 端子級系統總接線（通用件版，無電池 UPS）</title>
+<desc>三條匯流排：24V+ 主軌（頂）、CAN H/L（中下）、GND 星軌（底＝PSU 負極）。AC 經 PSU LRS-350-24 供 24V 主軌；主軌經 2A 給 LM2596 降 5V 直供 ESP32-S3；主軌分壓進 GPIO1 偵測停電。ESP32 TWAI(GPIO5/4) 經 SN65HVD230(VP230) 非隔離收發器驅動 CAN H/L，兩端各 120 歐姆；六顆 SERVO42ES 每顆上緣接 V+/CANH/CANL、下緣 GND 回星軌。線路交叉無節點者不相接。</desc>
+<style>
+text{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.t,.th{fill:#2C2C2A;font-weight:600;font-size:13px}
+.ts{fill:#5F5E5A;font-weight:400;font-size:11px}
+.tn{fill:#5F5E5A;font-weight:400;font-size:10px}
+.c-red rect{fill:#FCEBEB;stroke:#993C1D}.c-red .t,.c-red .th{fill:#4A1B0C}.c-red .ts{fill:#712B13}
+.c-amber rect{fill:#FAEEDA;stroke:#854F0B}.c-amber .t,.c-amber .th{fill:#412402}.c-amber .ts{fill:#633806}
+.c-blue rect{fill:#E6F1FB;stroke:#185FA5}.c-blue .t,.c-blue .th{fill:#042C53}.c-blue .ts{fill:#0C447C}
+.c-teal rect{fill:#E1F5EE;stroke:#0F6E56}.c-teal .t,.c-teal .th{fill:#04342C}.c-teal .ts{fill:#085041}
+.c-gray rect{fill:#F1EFE8;stroke:#5F5E5A}.c-gray .t,.c-gray .th{fill:#2C2C2A}.c-gray .ts{fill:#444441}
+.w24{stroke:#E04A4A}.w5{stroke:#BA7517}.wsig{stroke:#378ADD}.wgnd{stroke:#6B6A66}
+.wch{stroke:#4E8A1F}.wcl{stroke:#2F5A0E}
+</style>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect x="0" y="0" width="1060" height="760" fill="#ffffff"/>
+
+<!-- ===== legend ===== -->
+<g>
+<rect x="20" y="10" width="14" height="10" fill="#E04A4A"/><text class="tn" x="38" y="15" dominant-baseline="central">24V</text>
+<rect x="78" y="10" width="14" height="10" fill="#BA7517"/><text class="tn" x="96" y="15" dominant-baseline="central">5V</text>
+<rect x="128" y="10" width="14" height="10" fill="#4E8A1F"/><text class="tn" x="146" y="15" dominant-baseline="central">CANH</text>
+<rect x="190" y="10" width="14" height="10" fill="#2F5A0E"/><text class="tn" x="208" y="15" dominant-baseline="central">CANL</text>
+<rect x="252" y="10" width="14" height="10" fill="#378ADD"/><text class="tn" x="270" y="15" dominant-baseline="central">TWAI TX/RX / sense</text>
+<rect x="392" y="10" width="14" height="10" fill="#6B6A66"/><text class="tn" x="410" y="15" dominant-baseline="central">GND</text>
+<circle cx="462" cy="15" r="3" fill="#2C2C2A"/><text class="tn" x="472" y="15" dominant-baseline="central">= 相接節點；線交叉無圓點 = 不相接</text>
+</g>
+
+<!-- ===== mains ===== -->
+<g class="c-red"><rect x="24" y="42" width="104" height="44" rx="8" stroke-width="0.5"/><text class="th" x="76" y="60" text-anchor="middle" dominant-baseline="central">AC 110V</text><text class="ts" x="76" y="75" text-anchor="middle" dominant-baseline="central">5A 慢熔 + 開關</text></g>
+<g class="c-red"><rect x="172" y="42" width="140" height="44" rx="8" stroke-width="0.5"/><text class="th" x="242" y="60" text-anchor="middle" dominant-baseline="central">PSU LRS-350-24</text><text class="ts" x="242" y="75" text-anchor="middle" dominant-baseline="central">24V / 14.6A / 350W</text></g>
+<g class="c-red"><rect x="356" y="38" width="168" height="52" rx="8" stroke-width="0.5"/><text class="th" x="440" y="56" text-anchor="middle" dominant-baseline="central">24V BUS ●</text><text class="ts" x="440" y="72" text-anchor="middle" dominant-baseline="central">主15A · 1000µF/50V · SMBJ28A</text></g>
+<line x1="128" y1="64" x2="172" y2="64" class="w24" stroke-width="3" marker-end="url(#arrow)"/>
+<line x1="312" y1="64" x2="356" y2="64" class="w24" stroke-width="4" marker-end="url(#arrow)"/>
+
+<!-- ===== 24V+ MAIN RAIL (y=124) ===== -->
+<line x1="150" y1="124" x2="1018" y2="124" class="w24" stroke-width="4"/>
+<text class="ts" x="820" y="116" dominant-baseline="central">24V+ 主軌</text>
+<line x1="440" y1="90" x2="440" y2="124" class="w24" stroke-width="3"/><circle cx="440" cy="124" r="3" fill="#E04A4A"/>
+
+<!-- ===== GND STAR RAIL (y=690) ===== -->
+<line x1="150" y1="690" x2="1018" y2="690" class="wgnd" stroke-width="4"/>
+<text class="th" x="150" y="710" dominant-baseline="central">★ GND 星軌 = PSU 負極（單點接地匯流）</text>
+<line x1="272" y1="86" x2="272" y2="690" class="wgnd" stroke-width="2"/><circle cx="272" cy="690" r="3" fill="#6B6A66"/>
+<text class="tn" x="278" y="100" dominant-baseline="central">PSU − / 0V</text>
+
+<!-- ===== logic: LM2596 only ===== -->
+<g class="c-amber"><rect x="40" y="170" width="120" height="48" rx="8" stroke-width="0.5"/><text class="th" x="100" y="188" text-anchor="middle" dominant-baseline="central">LM2596</text><text class="ts" x="100" y="204" text-anchor="middle" dominant-baseline="central">24→5V（先調 5.0V）</text></g>
+<line x1="100" y1="124" x2="100" y2="170" class="w24" stroke-width="2"/><circle cx="100" cy="124" r="3" fill="#E04A4A"/><text class="tn" x="108" y="146" dominant-baseline="central">2A</text>
+<!-- LM2596 GND to star -->
+<line x1="60" y1="218" x2="60" y2="690" class="wgnd" stroke-width="1.5"/><circle cx="60" cy="690" r="2.5" fill="#6B6A66"/>
+<text class="tn" x="66" y="240" dominant-baseline="central">GND</text>
+<!-- LM2596 5V -> ESP32 -->
+<path d="M160 194 H284 V332 H300" fill="none" class="w5" stroke-width="2.5" marker-end="url(#arrow)"/><text class="tn" x="220" y="186" dominant-baseline="central">5V</text>
+
+<!-- ===== 24V sense ===== -->
+<g class="c-red"><rect x="344" y="150" width="152" height="42" rx="8" stroke-width="0.5"/><text class="th" x="420" y="165" text-anchor="middle" dominant-baseline="central">24V sense 分壓</text><text class="ts" x="420" y="180" text-anchor="middle" dominant-baseline="central">100k/12k→2.57V · Z3V3</text></g>
+<line x1="420" y1="124" x2="420" y2="150" class="w24" stroke-width="1.5"/><circle cx="420" cy="124" r="3" fill="#E04A4A"/>
+<path d="M420 192 V300" fill="none" class="wsig" stroke-width="1.5" marker-end="url(#arrow)"/><text class="tn" x="428" y="250" dominant-baseline="central">停電 → GPIO1</text>
+
+<!-- ===== ESP32-S3 ===== -->
+<g class="c-blue"><rect x="300" y="300" width="252" height="132" rx="8" stroke-width="0.5"/>
+<text class="th" x="426" y="320" text-anchor="middle" dominant-baseline="central">ESP32-S3 N16R8 · TWAI</text>
+<text class="ts" x="312" y="342" dominant-baseline="central">5V 腳 ← LM2596（USB 亦可供電）</text>
+<text class="ts" x="312" y="360" dominant-baseline="central">GPIO1 ← 24V sense (ADC 11dB)</text>
+<text class="ts" x="312" y="378" dominant-baseline="central">GPIO5→TXD · GPIO4←RXD</text>
+<text class="ts" x="312" y="396" dominant-baseline="central">3V3 → VP230 VCC</text>
+<text class="ts" x="312" y="414" dominant-baseline="central">GND → 星軌 · USB-C → host</text>
+</g>
+<circle cx="300" cy="332" r="2.5" fill="#BA7517"/>
+<circle cx="420" cy="300" r="2.5" fill="#378ADD"/>
+<line x1="330" y1="432" x2="330" y2="690" class="wgnd" stroke-width="1.5"/><circle cx="330" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- USB host -->
+<g class="c-gray"><rect x="596" y="322" width="150" height="38" rx="8" stroke-width="0.5"/><text class="ts" x="671" y="341" text-anchor="middle" dominant-baseline="central">USB-C → host PC</text></g>
+<line x1="552" y1="340" x2="596" y2="340" class="wsig" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text class="tn" x="574" y="332" text-anchor="middle" dominant-baseline="central">序列/燒錄</text>
+
+<!-- ===== VP230 ===== -->
+<g class="c-teal"><rect x="356" y="454" width="212" height="82" rx="8" stroke-width="0.5"/>
+<text class="th" x="462" y="474" text-anchor="middle" dominant-baseline="central">SN65HVD230 (VP230)</text>
+<text class="tn" x="462" y="490" text-anchor="middle" dominant-baseline="central">非隔離 CAN 收發器</text>
+<text class="ts" x="368" y="512" dominant-baseline="central">D R VCC←3V3</text>
+<text class="ts" x="556" y="512" text-anchor="end" dominant-baseline="central">CANH/L</text>
+</g>
+<path d="M410 432 V454" fill="none" class="wsig" stroke-width="1.5" marker-end="url(#arrow)"/><text class="tn" x="404" y="444" text-anchor="end" dominant-baseline="central">G5→D</text>
+<path d="M438 432 V454" fill="none" class="wsig" stroke-width="1.5" marker-start="url(#arrow)"/><text class="tn" x="446" y="444" dominant-baseline="central">G4←R</text>
+<path d="M356 528 H346 V690" fill="none" class="wgnd" stroke-width="1.5"/><circle cx="346" cy="690" r="2.5" fill="#6B6A66"/>
+
+<!-- ===== CAN H/L rails ===== -->
+<line x1="340" y1="576" x2="1018" y2="576" class="wch" stroke-width="3"/>
+<line x1="340" y1="594" x2="1018" y2="594" class="wcl" stroke-width="3"/>
+<path d="M568 506 H588 V576" fill="none" class="wch" stroke-width="2"/><circle cx="588" cy="576" r="3" fill="#4E8A1F"/>
+<path d="M568 516 H606 V594" fill="none" class="wcl" stroke-width="2"/><circle cx="606" cy="594" r="3" fill="#2F5A0E"/>
+<line x1="340" y1="576" x2="340" y2="594" stroke="#888780" stroke-width="2"/><text class="tn" x="340" y="566" text-anchor="middle" dominant-baseline="central">120Ω</text>
+<line x1="1018" y1="576" x2="1018" y2="594" stroke="#888780" stroke-width="2"/><text class="tn" x="1018" y="566" text-anchor="middle" dominant-baseline="central">120Ω</text>
+
+<!-- ===== 24V motor rail (y=548) far-right feed ===== -->
+<line x1="1018" y1="124" x2="1018" y2="548" class="w24" stroke-width="3"/><circle cx="1018" cy="124" r="3" fill="#E04A4A"/>
+<line x1="452" y1="548" x2="1018" y2="548" class="w24" stroke-width="3"/>
+<text class="tn" x="1026" y="330" dominant-baseline="central">5A×6</text>
+<text class="ts" x="632" y="542" dominant-baseline="central">24V 馬達軌</text>
+
+<!-- ===== motors ===== -->
+<g>
+<g class="c-gray"><rect x="452" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="494" y="630" text-anchor="middle" dominant-baseline="central">M1</text><text class="ts" x="494" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x01</text></g>
+<g class="c-gray"><rect x="544" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="586" y="630" text-anchor="middle" dominant-baseline="central">M2</text><text class="ts" x="586" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x02</text></g>
+<g class="c-gray"><rect x="636" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="678" y="630" text-anchor="middle" dominant-baseline="central">M3</text><text class="ts" x="678" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x03</text></g>
+<g class="c-gray"><rect x="728" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="770" y="630" text-anchor="middle" dominant-baseline="central">M4</text><text class="ts" x="770" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x04</text></g>
+<g class="c-gray"><rect x="820" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="862" y="630" text-anchor="middle" dominant-baseline="central">M5</text><text class="ts" x="862" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x05</text></g>
+<g class="c-gray"><rect x="912" y="608" width="84" height="60" rx="8" stroke-width="0.5"/><text class="th" x="954" y="630" text-anchor="middle" dominant-baseline="central">M6</text><text class="ts" x="954" y="648" text-anchor="middle" dominant-baseline="central">42ES · 0x06</text></g>
+</g>
+
+<!-- per-motor taps: V+ (xi+18 from 548), CANH (xi+40 from 576), CANL (xi+60 from 594), GND (xi+40 to star 690) -->
+<!-- M1 452 --><line x1="470" y1="548" x2="470" y2="608" class="w24" stroke-width="2"/><circle cx="470" cy="548" r="2.5" fill="#E04A4A"/><line x1="492" y1="576" x2="492" y2="608" class="wch" stroke-width="2"/><circle cx="492" cy="576" r="2.5" fill="#4E8A1F"/><line x1="512" y1="594" x2="512" y2="608" class="wcl" stroke-width="2"/><circle cx="512" cy="594" r="2.5" fill="#2F5A0E"/><line x1="492" y1="668" x2="492" y2="690" class="wgnd" stroke-width="2"/><circle cx="492" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- M2 544 --><line x1="562" y1="548" x2="562" y2="608" class="w24" stroke-width="2"/><circle cx="562" cy="548" r="2.5" fill="#E04A4A"/><line x1="584" y1="576" x2="584" y2="608" class="wch" stroke-width="2"/><circle cx="584" cy="576" r="2.5" fill="#4E8A1F"/><line x1="604" y1="594" x2="604" y2="608" class="wcl" stroke-width="2"/><circle cx="604" cy="594" r="2.5" fill="#2F5A0E"/><line x1="584" y1="668" x2="584" y2="690" class="wgnd" stroke-width="2"/><circle cx="584" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- M3 636 --><line x1="654" y1="548" x2="654" y2="608" class="w24" stroke-width="2"/><circle cx="654" cy="548" r="2.5" fill="#E04A4A"/><line x1="676" y1="576" x2="676" y2="608" class="wch" stroke-width="2"/><circle cx="676" cy="576" r="2.5" fill="#4E8A1F"/><line x1="696" y1="594" x2="696" y2="608" class="wcl" stroke-width="2"/><circle cx="696" cy="594" r="2.5" fill="#2F5A0E"/><line x1="676" y1="668" x2="676" y2="690" class="wgnd" stroke-width="2"/><circle cx="676" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- M4 728 --><line x1="746" y1="548" x2="746" y2="608" class="w24" stroke-width="2"/><circle cx="746" cy="548" r="2.5" fill="#E04A4A"/><line x1="768" y1="576" x2="768" y2="608" class="wch" stroke-width="2"/><circle cx="768" cy="576" r="2.5" fill="#4E8A1F"/><line x1="788" y1="594" x2="788" y2="608" class="wcl" stroke-width="2"/><circle cx="788" cy="594" r="2.5" fill="#2F5A0E"/><line x1="768" y1="668" x2="768" y2="690" class="wgnd" stroke-width="2"/><circle cx="768" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- M5 820 --><line x1="838" y1="548" x2="838" y2="608" class="w24" stroke-width="2"/><circle cx="838" cy="548" r="2.5" fill="#E04A4A"/><line x1="860" y1="576" x2="860" y2="608" class="wch" stroke-width="2"/><circle cx="860" cy="576" r="2.5" fill="#4E8A1F"/><line x1="880" y1="594" x2="880" y2="608" class="wcl" stroke-width="2"/><circle cx="880" cy="594" r="2.5" fill="#2F5A0E"/><line x1="860" y1="668" x2="860" y2="690" class="wgnd" stroke-width="2"/><circle cx="860" cy="690" r="2.5" fill="#6B6A66"/>
+<!-- M6 912 --><line x1="930" y1="548" x2="930" y2="608" class="w24" stroke-width="2"/><circle cx="930" cy="548" r="2.5" fill="#E04A4A"/><line x1="952" y1="576" x2="952" y2="608" class="wch" stroke-width="2"/><circle cx="952" cy="576" r="2.5" fill="#4E8A1F"/><line x1="972" y1="594" x2="972" y2="608" class="wcl" stroke-width="2"/><circle cx="972" cy="594" r="2.5" fill="#2F5A0E"/><line x1="972" y1="668" x2="972" y2="690" class="wgnd" stroke-width="2"/><circle cx="972" cy="690" r="2.5" fill="#6B6A66"/>
+
+<text class="tn" x="470" y="734" dominant-baseline="central">每馬達上緣 V+(紅)·CANH(綠)·CANL(墨綠)，下緣 GND→星軌；42ES 雙 CAN in/out 菊鏈免 busbar，120Ω 只在兩物理端。</text>
+</svg>
