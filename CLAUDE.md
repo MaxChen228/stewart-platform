@@ -94,7 +94,8 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 ### CAN 後端注意事項
 
 - ⚠️ **同 ID 相剋鐵律（2026-07-02 實症定案）**：42D 的指令幀、回覆 ack 幀、0x35 主動上報幀**全部同 ID（=馬達地址）**。CAN 仲裁對同 ID 同時發送=保證 bit error；TWAI 無限重傳下 TEC 破表→bus-off，曾把六顆馬達全轟進 bus-off（只能斷電馬達救）。**BOOT 定案 = no-ack（0x8C XX=0，讀取類 0x30/0x35 不受影響仍回）+ 輪詢（不 arm 上報）**→ TX 恆零錯。`C 1 0`/`A<hz>` 可 runtime 切回實驗，但高頻上報/ack + 驅動流必炸。實測：ack 開 12 幀 TX = TEC+134；no-ack+輪詢 = 恆 0
-- 防護（`can_twai_compat.h`）：bus-off 自動 recovery + error-passive TX 死鎖斬斷（TX queue 卡 >500ms → stop/start 清卡死幀）。TWAI 進 bus-off 不自動恢復（MCP2515 硬體會），缺防護會一次瞬態永久卡死
+- 防護三層（2026-07-02 晚二修 7203e9b，事故#2：讀取回覆殘餘窗口引爆、初版斬幀無靜默 564 輪沒救回六顆全 bus-off）：**L1** 讀取逾時 → 該馬達 TX 靜默 5ms（`servo42d.h`；遲到回覆與同 ID 下一幀對撞=螺旋點火點，F5 跳輪無害）；**L2**（`can_twai_compat.h`）bus-off 自動 recovery + TX 卡幀 50ms 斬斷 + TEC≥128 即刻熔斷 + **斬後全域靜默 50ms**（讓對方重傳在空 bus 完成，絞肉機斷燃料）；**L3** 驅動中 ok=0 持續 1.5s → 自動停 F5 流掛 fatal（不斷電，馬達自持力矩）。TWAI 進 bus-off 不自動恢復（MCP2515 硬體會）
+- ⚠️ 遙測欄位陷阱：`can.tx`/`can.rx` 實為 **TEC/REC**（錯誤計數器，非幀數）；頂層 `poll` 為**週期 ms**（非 Hz）
 - **馬達 power-cycle 後 ESP32 必須重開機**（sessionZeroRaw/座標映射建立於 boot；馬達重啟後映射失效 → F5 有 ack 但不動）
 - 每次輪詢讀取前 flushReceiveBuffer()：語意=排空舊回覆，兩後端皆保留。TWAI RX queue 64 深，MCP2515 的 2-buffer 塞爆問題已消失（僅餘 fallback 路徑）
 - **輪詢讀取率與迴圈率解耦（2026-07-02，`POLL` 指令）**：舊「每 cycle 全讀 6 顆」把 bus 佔用綁死迴圈率（355Hz→81%、讀等待 ~2.7ms 反鎖迴圈率天花板）。現讀取按排程（預設 100Hz/顆，bus ~23%），vel/積分類估計改走 encoder 時基（encUpdated/encDt）；主頁「讀取 Hz」滑桿=此值（原 auto-return 滑桿退役，`AR`/`A1` 僅存 console 實驗路徑）
