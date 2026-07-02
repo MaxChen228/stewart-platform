@@ -22,9 +22,9 @@ function sh(cmd, args, opts = {}) {
   }
 }
 
-async function api(name) {
+async function api(name, method = 'GET') {
   try {
-    const r = await fetch(`http://localhost:${http}/api/${name}`, { signal: AbortSignal.timeout(2000) });
+    const r = await fetch(`http://localhost:${http}/api/${name}`, { method, signal: AbortSignal.timeout(2000) });
     return await r.json();
   } catch (e) {
     return { error: e.message };
@@ -56,7 +56,7 @@ function tcpOpen(host, port) {
   if (transport.state !== 'connected' && !ping.includes('100.0% packet loss')) {
     verdict.push('ESP32 reachable but dashboard transport is not connected');
     if (recover && !transport.error) {
-      await api('transport/reconnect');
+      await api('transport/reconnect', 'POST');
       await new Promise((resolve) => setTimeout(resolve, 3500));
       [transport, latest] = await Promise.all([api('transport'), api('latest')]);
     }

@@ -37,9 +37,9 @@ class Lab {
   send(cmd) { if (this.ws && this.ws.readyState === 1) { this.ws.send(cmd); return true; } return false; }
 
   // 伺服器錄製器（REST）
-  rec(path) { return fetch(`http://${this.host}/api/${path}`).then(r => r.json()).catch(() => ({})); }
-  recStart(name) { return this.rec(`rec/start?name=${encodeURIComponent(name)}`); }
-  recStop() { return this.rec('rec/stop'); }
+  rec(path, method = 'GET') { return fetch(`http://${this.host}/api/${path}`, { method }).then(r => r.json()).catch(() => ({})); }
+  recStart(name) { return this.rec(`rec/start?name=${encodeURIComponent(name)}`, 'POST'); }
+  recStop() { return this.rec('rec/stop', 'POST'); }
   recStatus() { return this.rec('rec/status'); }
 
   // ---- 統一頂欄 ----

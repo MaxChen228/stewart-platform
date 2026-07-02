@@ -924,14 +924,8 @@ const ik = (pose) => window.Kin.ik(pose).angles;
 
 // ===== FK：委派共用 kin.js；主頁只保留狀態文字 =====
 let fkStatus = '';
-
-function solveFK(measured) {
-  const r = window.Kin.solveFK(measured);
-  fkStatus = r.converged
-    ? `FK OK iter=${r.iterations} err=${r.residual.toFixed(3)}`
-    : `FK NO CONVERGE iter=${r.iterations} err=${r.residual.toFixed(1)}`;
-  return r.pose;
-}
+let encoderHealthy = true;   // 全 6 顆編碼器回授正常；劣化時 DISABLE 距離檢查 fail-closed
+const fkPose = (angles) => window.Kin.solveFK(angles).pose;   // 純 angles→pose（不動 fkStatus，供 scope/self-test）
 
 // ===== 從馬達角度算 A 點 =====
 function computeA(angles) {
@@ -1505,13 +1499,19 @@ document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfi
 
 
 // ===== 更新視覺化 =====
-let lastActualPose = null;   // 最近一次 FK 實際 pose（絕對座標）；DISABLE 前的距離檢查用
+// DISABLE 前的距離檢查用：只採信「FK 收斂」的 pose（solveFK 發散時仍回全 finite 的最後迭代值，
+// finite guard 擋不住——見 kin.js solveFK）。null=尚無可信姿態 → fail-closed 一律確認。
+let lastActualPose = null;
 function updateViz(motorAngles) {
   const Apt = computeA(motorAngles);
-  const pose = solveFK(motorAngles);
+  const r = window.Kin.solveFK(motorAngles);
+  const pose = r.pose;
+  fkStatus = r.converged
+    ? `FK OK iter=${r.iterations} err=${r.residual.toFixed(3)}`
+    : `FK NO CONVERGE iter=${r.iterations} err=${r.residual.toFixed(1)}`;
   const Q = platformPointsFromPose(pose, stewartModel);
   stewartRig.updateFromPoints(Apt, Q);
-  if (Array.isArray(pose) && pose.length === 6 && pose.every(Number.isFinite)) lastActualPose = pose;
+  lastActualPose = r.converged ? pose : null;
 
   setPoseErrorLive(pose);
 
@@ -1534,12 +1534,12 @@ function updateViz(motorAngles) {
   const testPose = [0, 0, NEUTRAL_Z, 0, 10, 0];
   const testAngles = ik(testPose);
   window.Kin.resetFK([0, 0, Z_LEGS_UP, 0, 0, 0]);
-  const recovered = solveFK(testAngles);
+  const r = window.Kin.solveFK(testAngles);
   console.log('FK self-test:');
   console.log('  input pose:', testPose);
   console.log('  IK angles:', testAngles.map(a=>a.toFixed(2)));
-  console.log('  FK recovered:', recovered.map(v=>v.toFixed(2)));
-  console.log('  status:', fkStatus);
+  console.log('  FK recovered:', r.pose.map(v=>v.toFixed(2)));
+  console.log('  status:', r.converged ? `OK iter=${r.iterations}` : `NO CONVERGE iter=${r.iterations}`);
   window.Kin.resetFK([0, 0, NEUTRAL_Z, 0, 0, 0]);
 }
 
@@ -1601,7 +1601,9 @@ function refreshCommandLocks() {
   const landBtn = document.getElementById('btn-land');
   if (landBtn) landBtn.disabled = !wsConnected;
   const poseStatus = document.getElementById('pose-ctl-status');
-  if (poseStatus && sessionState.active) {
+  if (poseStatus && poseStatus.dataset.sticky) {
+    // LAND 進行中的回饋（session 中也可按）——別被「session 執行中」蓋掉
+  } else if (poseStatus && sessionState.active) {
     poseStatus.textContent = 'session 執行中：即時控制鎖定';
     poseStatus.style.color = 'var(--dual)';
   } else if (poseStatus && poseStatus.textContent.includes('session 執行中')) {
@@ -1685,6 +1687,7 @@ function connectWS() {
         setHoldingUI(holding, data.hmax);
         setEncoderHealthUI(data);
       }
+      if (data.ok !== undefined) encoderHealthy = data.ok >= 6;   // 編碼器回授健康 → DISABLE 距離檢查可信
 
       // Per-motor joint error
       if (data.herr) {
@@ -1953,11 +1956,13 @@ function setEncoderHealthUI(data) {
 
 window.toggleHold = function() {
   if (!isHolding) { sendCmd('H'); return; }
-  // DISABLE＝原地斷電（自由塌落）。距 landing 支撐位太遠時先確認，高位/大傾角誤按不再直接摔落。
-  const far = Array.isArray(lastActualPose) && Array.isArray(releasePose) && releasePose.length === 6 &&
-    ([0, 1, 2].some((i) => Math.abs(lastActualPose[i] - releasePose[i]) > 5) ||
-     [3, 4, 5].some((i) => Math.abs(lastActualPose[i] - releasePose[i]) > 3));
-  if (far && !confirm('平台不在 landing 支撐位附近，直接斷電會自由塌落。\n建議改用 LAND（home→landing→斷電）。仍要原地斷電？')) return;
+  // DISABLE＝原地斷電（自由塌落）。fail-closed：只有「確信平台就在 landing 支撐位附近」才免確認；
+  // 姿態未知（FK 未收斂/尚無遙測）、編碼器劣化、或離 landing 太遠，一律先確認 → 高位誤按不摔落。
+  const near = encoderHealthy && Array.isArray(lastActualPose) &&
+    Array.isArray(releasePose) && releasePose.length === 6 &&
+    [0, 1, 2].every((i) => Math.abs(lastActualPose[i] - releasePose[i]) <= 5) &&
+    [3, 4, 5].every((i) => Math.abs(lastActualPose[i] - releasePose[i]) <= 3);
+  if (!near && !confirm('平台不確定在 landing 支撐位附近，直接斷電可能自由塌落。\n建議改用 LAND（home→landing→斷電）。仍要原地斷電？')) return;
   sendCmd('D');
 };
 
@@ -1973,6 +1978,7 @@ window.requestLand = async function() {
       st.style.color = r.ok ? 'var(--sub)' : 'var(--dev)';
       st.textContent = !r.ok ? `✗ LAND 失敗（HTTP ${r.status}）`
         : d.already ? '⤓ 降落序列已在進行中' : '⤓ 安全降落中：home→landing→斷電';
+      if (r.ok) { st.dataset.sticky = '1'; setTimeout(() => { delete st.dataset.sticky; }, 5000); }
     }
   } catch (e) {
     if (st) { st.style.color = 'var(--dev)'; st.textContent = `✗ LAND 失敗：${e.message}`; }
@@ -2218,7 +2224,7 @@ const scope = new ScopeCore({
             anglesTitle:'scope-title-main', errorsTitle:'scope-title-error' },
   ui: { legend:'scope-legend', stats:'scope-stats', viewPos:'scope-viewpos',
         pauseBtn:'scope-pause', dataBtn:'scope-data', csvBtn:'scope-csv', charts:'charts' },
-  poseFromAngles: solveFK,
+  poseFromAngles: fkPose,
   poseNeutralZ: NEUTRAL_Z,
 });
 scope.start({ connect: false });   // 不開自有 WS，靠宿主 ingest 餵資料

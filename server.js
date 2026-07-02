@@ -2117,24 +2117,33 @@ function genStartStream(req, res, u) {
 // 跨站攻擊頁的 Origin 是攻擊者公網域名、不符此段 → 擋掉。無 Origin 的 curl/Node 放行。
 const LAN_ORIGIN_ALLOW = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/;
 
-// 帶副作用端點的守門：僅 POST（擋 <img>/超連結 GET-CSRF），且瀏覽器跨站 Origin 一律拒
-// （HTML form 可跨站 POST 不經 CORS preflight，故 method gate 之外還要驗 Origin）。
+// 跨站瀏覽器來源攔截：HTML form 可跨站 POST 不經 CORS preflight，
+// 故所有帶副作用端點（含既有 POST 路由）都要驗 Origin，擋 JSON-CSRF。回 true=已擋下。
+function crossSiteBlocked(req, res) {
+  const origin = req.headers.origin;
+  if (origin && !LAN_ORIGIN_ALLOW.test(origin)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'origin not allowed' }));
+    return true;
+  }
+  return false;
+}
+
+// 帶副作用端點的守門：僅 POST（擋 <img>/超連結 GET-CSRF）+ 跨站 Origin 拒。
 function mutationAllowed(req, res) {
   if (req.method !== 'POST') {
     res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' });
     res.end(JSON.stringify({ error: 'use POST' }));
     return false;
   }
-  const origin = req.headers.origin;
-  if (origin && !LAN_ORIGIN_ALLOW.test(origin)) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'origin not allowed' }));
-    return false;
-  }
-  return true;
+  return !crossSiteBlocked(req, res);
 }
 
 const requestHandler = (req, res) => {
+  // 所有帶副作用請求（非 GET/HEAD）統一擋跨站 Origin：JSON-CSRF 防線，與 WS 同白名單，
+  // 覆蓋全部 POST 路由（platform-config/home/workspace/session/runs…）含未來新增者。
+  // GET 讀取端點不受影響；無 Origin 的 curl/Node 放行。
+  if (req.method !== 'GET' && req.method !== 'HEAD' && crossSiteBlocked(req, res)) return;
   // REST: 最新資料
   if (req.url === '/api/latest') {
     res.writeHead(200, { 'Content-Type': 'application/json' });

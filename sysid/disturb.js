@@ -37,7 +37,7 @@ const MS = parseInt(process.argv[4] ?? '120', 10);
 const REPS = parseInt(process.argv[5] ?? '5', 10);
 const BACKSTOP = parseFloat(process.argv[6] ?? '12');
 const SETTLE = parseFloat(process.argv[7] ?? '4') * 1000;
-const rest = (p) => fetch(`http://${HOST}/api/${p}`).then(r => r.json()).catch(() => ({}));
+const rest = (p, method = 'GET') => fetch(`http://${HOST}/api/${p}`, { method }).then(r => r.json()).catch(() => ({}));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 if (!MODE) { console.log('用法: node sysid/disturb.js preview | <mode> <sev> <ms> <reps> [backstop] [settle]'); process.exit(1); }
@@ -54,7 +54,7 @@ function onMsg(m) {
 }
 async function safeStop(msg) {
   if (msg) console.log(msg);
-  try { await rest('rec/stop'); } catch {}
+  try { await rest('rec/stop', 'POST'); } catch {}
   try { if (ws?.readyState === 1) ws.send('D'); } catch {}
 }
 process.on('SIGINT', async () => { await safeStop('\n⛔ Ctrl-C：停錄+斷電'); await sleep(300); process.exit(0); });
@@ -82,7 +82,7 @@ async function main() {
 
   const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '').slice(0, 13);
   const name = `dist_${MODE}_s${SEV}_pid${(s.pid || []).join('-')}_${ts}`;
-  await rest(`rec/start?name=${name}`);
+  await rest(`rec/start?name=${name}`, 'POST');
   console.log(`\n● 錄製 [${name}]  ${MODE} sev=${SEV}° × ${REPS} 發，每發等 ${SETTLE / 1000}s。backstop>${BACKSTOP}°→D。Ctrl-C 可停。\n`);
 
   const wCmd = `W ${dAngle.map(x => x.toFixed(3)).join(' ')} ${MS}`;
@@ -102,7 +102,7 @@ async function main() {
   clearInterval(watch);
 
   if (!tripped) {
-    const r = await rest('rec/stop');
+    const r = await rest('rec/stop', 'POST');
     console.log(`\n✓ ${REPS} 發完成，${r.lines || '?'} lines。全程最大漂移 M${maxAxis + 1}=${maxAbs.toFixed(2)}°`);
     console.log(`分析: uv run sysid/recover_analyze.py 'sysid/data/${name}*.jsonl'`);
   }

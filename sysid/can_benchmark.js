@@ -63,8 +63,8 @@ function parseArgs(argv) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function rest(host, path) {
-  const r = await fetch(`http://${host}/api/${path}`);
+async function rest(host, path, method = 'GET') {
+  const r = await fetch(`http://${host}/api/${path}`, { method });
   if (!r.ok) throw new Error(`HTTP ${r.status} for /api/${path}`);
   return r.json();
 }
@@ -151,7 +151,7 @@ async function runCondition(opts, ws, resp, loop, ar) {
     await sleep(opts.settleMs);
   }
 
-  const rec = await rest(opts.host, `rec/start?name=${opts.name}_${label}`);
+  const rec = await rest(opts.host, `rec/start?name=${opts.name}_${label}`, 'POST');
   const latestAtStart = await rest(opts.host, 'latest').catch(() => null);
   const manifestPath = writeManifest(opts, label, { resp, loop, ar, seconds: opts.seconds, enable: opts.enable }, rec.path, latestAtStart);
   const rows = [];
@@ -164,7 +164,7 @@ async function runCondition(opts, ws, resp, loop, ar) {
   ws.on('message', onMessage);
   await sleep(opts.seconds * 1000);
   ws.off('message', onMessage);
-  const stopped = await rest(opts.host, 'rec/stop');
+  const stopped = await rest(opts.host, 'rec/stop', 'POST');
 
   if (opts.enable) {
     send(ws, 'D');

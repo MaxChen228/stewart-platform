@@ -37,7 +37,7 @@ if (process.argv[2] === 'preview') {
 // ---------- runner ----------
 const TAG = process.argv[2] || '';
 const BACKSTOP = parseFloat(process.argv[3] ?? '15');   // herr 超此 → 發散/翻倒，自動 D+中止
-const rest = (p) => fetch(`http://${HOST}/api/${p}`).then(r => r.json()).catch(() => ({}));
+const rest = (p, method = 'GET') => fetch(`http://${HOST}/api/${p}`, { method }).then(r => r.json()).catch(() => ({}));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 let ws, herr = null, tripped = false, maxAbs = 0, maxAxis = -1;
@@ -50,7 +50,7 @@ function onMsg(m) {
 }
 async function safeStop(msg) {
   if (msg) console.log(msg);
-  try { await rest('rec/stop'); } catch {}
+  try { await rest('rec/stop', 'POST'); } catch {}
   try { if (ws?.readyState === 1) ws.send('D'); } catch {}
 }
 process.on('SIGINT', async () => { tripped = true; await safeStop('\n⛔ Ctrl-C：停錄+斷電'); await sleep(300); process.exit(0); });
@@ -68,7 +68,7 @@ async function main() {
 
   const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '').slice(0, 13);
   const name = `battery_${TAG ? TAG + '_' : ''}pid${pid}_${ts}`;
-  await rest(`rec/start?name=${name}`);
+  await rest(`rec/start?name=${name}`, 'POST');
   console.log(`\n● battery [${name}]  ${SEQ.length} 事件，backstop>${BACKSTOP}°→D+中止。Ctrl-C 可停。\n`);
 
   const watch = setInterval(() => {
@@ -91,7 +91,7 @@ async function main() {
   clearInterval(watch);
 
   if (!tripped) {
-    const r = await rest('rec/stop');
+    const r = await rest('rec/stop', 'POST');
     console.log(`\n✓ battery 完成，${r.lines || '?'} lines。全程最大漂移 M${maxAxis + 1}=${maxAbs.toFixed(2)}°`);
     console.log(`圖: uv run sysid/plot.py 'sysid/data/${name}*.jsonl' --out /tmp/${name}.png`);
   }

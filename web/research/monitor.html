@@ -196,9 +196,9 @@ function setK(kp,ki,kd,kv){ [['k-kp',kp],['k-ki',ki],['k-kd',kd],['k-kv',kv]].fo
 
 let recording=false;
 async function recToggle(){
-  const rest=p=>fetch(`http://${HOST}/api/${p}`).then(r=>r.json()).catch(()=>({}));
-  if(!recording){ const r=await rest(`rec/start?name=${encodeURIComponent($('rec-name').value||'mon')}`); recording=true; $('rec-go').textContent='■ 停止'; $('rec-stat').textContent=(r.path||'').split('/').pop()||''; logEv('● 錄製開始','cmd'); }
-  else { const r=await rest('rec/stop'); recording=false; $('rec-go').textContent='● 錄製'; logEv(`■ 停止 ${r.lines??''}行`,'cmd'); }
+  const rest=(p,method='GET')=>fetch(`http://${HOST}/api/${p}`,{method}).then(r=>r.json()).catch(()=>({}));
+  if(!recording){ const r=await rest(`rec/start?name=${encodeURIComponent($('rec-name').value||'mon')}`,'POST'); recording=true; $('rec-go').textContent='■ 停止'; $('rec-stat').textContent=(r.path||'').split('/').pop()||''; logEv('● 錄製開始','cmd'); }
+  else { const r=await rest('rec/stop','POST'); recording=false; $('rec-go').textContent='● 錄製'; logEv(`■ 停止 ${r.lines??''}行`,'cmd'); }
 }
 
 // ===== CAN 健康（用 S.last 最近遙測）=====
