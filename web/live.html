@@ -256,16 +256,19 @@ const wsWorker = new Worker('/shared/workspace-worker.js');
 const WS_GRID = { roll: [-42, 42, 3], pitch: [-42, 42, 3], yaw: [-92, 92, 4] };
 const WS_THR = { radialMargin: 1.25, epsT2: 0.15, kappaThr: 12, phys: true };   // 與 geometry.html 同門檻 + 物理四閘
 const geoKin = WE.geoFromKin(Kin);   // 現役幾何（kin.js SoT），純資料直傳 worker
-let wsReqId = 0, envCenter = null, envTimer = null, envInflight = false, envDirty = false;
+let wsReqId = 0, envCenter = null, envInflight = false, envDirty = false;
 function runEnvelope() {
-  if (envInflight) { envDirty = true; return; }
+  if (envInflight) { envDirty = true; return; }   // 計算中 → 一結束立刻補算最新 targetG
   envInflight = true; envCenter = [targetG[0], targetG[1], targetG[2]];
+  document.getElementById('wscap').textContent =
+    `工作空間 · roll / pitch / yaw（度）· 重算中 → x=${envCenter[0].toFixed(0)} y=${envCenter[1].toFixed(0)} z=${envCenter[2].toFixed(0)} mm`;
   wsWorker.postMessage({ id: ++wsReqId, geo: geoKin, center: envCenter.map(v => v / Kin.BASE_RADIUS), grid: WS_GRID, thr: WS_THR });
 }
-function scheduleEnvelope() {   // 意圖平移離上次計算中心 <1mm 不重算；拖曳中 160ms debounce 取尾值
+// 中心有效移動（≥1mm）→ 立即算，不 debounce（單次 ~100ms，inflight+dirty 本身就是節流：拖曳中
+// 有效節奏 = 一個計算週期）。<1mm 略過 = sim/phone xyz 不動時 25–60Hz 的 ghostArrive 全部免費通過。
+function scheduleEnvelope() {
   if (envCenter && Math.hypot(targetG[0] - envCenter[0], targetG[1] - envCenter[1], targetG[2] - envCenter[2]) < 1.0) return;
-  if (envTimer) return;
-  envTimer = setTimeout(() => { envTimer = null; runEnvelope(); }, 160);
+  runEnvelope();
 }
 function disposeCloud(o) { if (o) { sceneW.remove(o); o.geometry.dispose(); o.material.dispose(); } }
 wsWorker.onmessage = (e) => {
