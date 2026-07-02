@@ -1,24 +1,25 @@
-# Stewart Platform — ESP32 + MCP2515 + SERVO42D
+# Stewart Platform — ESP32 + TWAI/VP230 + SERVO42D
 
 ## 硬體配置
 
 | 組件 | 規格 |
 |------|------|
 | 主控 | ESP32 WROOM (3.3V) |
-| CAN 橋接 | MCP2515 (SPI, 8MHz 晶振) + TJA1050 |
+| CAN 收發 | **SN65HVD230 (VP230) + ESP32 原生 TWAI**（2026-07-02 起現役；前代 MCP2515+TJA1050 退役備援） |
 | 致動器 ×6 | MKS SERVO42D, SR_vFOC 模式, 14-bit 磁編碼器 |
 | CAN 鮑率 | 500 Kbps |
 | 馬達位址 | 0x01 ~ 0x06 |
 
-### SPI 腳位
+### CAN 接線（TWAI + VP230）
 
-| ESP32 | MCP2515 | 功能 |
-|-------|---------|------|
-| GPIO 18 | SCK | SPI 時脈 |
-| GPIO 23 | SI | MOSI |
-| GPIO 19 | SO | MISO |
-| GPIO 5 | CS | 片選 |
-| GPIO 17 | INT | 中斷 |
+| ESP32 | VP230 | 功能 |
+|-------|-------|------|
+| GPIO 21 | CTX/D | TWAI TX |
+| GPIO 22 | CRX/R | TWAI RX |
+| 3V3 | VCC | ⚠ 3.3V 元件，接 5V 會燒 |
+| GND | GND | 與馬達側 bus 共地（非隔離） |
+
+**後端雙軌**（`src/servo42d.h` 之 `USE_TWAI_CAN`，主 env 已開）：現役=TWAI（`src/can_twai_compat.h`，RX queue 64、無 SPI；telemetry `can.backend` 如實報 `"twai"`）；退役備援=MCP2515(SPI)（`pio run -e esp32_mcp2515 -t upload` 即回，腳位 SCK18/MOSI23/MISO19/CS5/INT17）。帶機探測：`pio run -e twai_probe -t upload`（唯讀 0x30 掃 0x01–0x06，不驅動）。
 
 ## 架構
 
@@ -44,7 +45,7 @@ Node.js server (server.js:3000)  ←→  REST /api/latest
     │ Serial
     ▼
 ESP32 (20ms trajectory coordinator)
-    │ CAN bus (MCP2515, 500kbps)
+    │ CAN bus (TWAI+VP230, 500kbps)
     ▼
 SERVO42D ×6 (0xF5 position mode, internal 10kHz PID)
 ```
@@ -90,10 +91,11 @@ Pair 3 (M5,M6) @ -30°
 
 CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 
-### MCP2515 注意事項
+### CAN 後端注意事項
 
-- 只有 2 個接收 buffer，F5 回覆會塞爆 → 每 cycle 開頭必須 flushReceiveBuffer()
+- 每 cycle 開頭 flushReceiveBuffer()：語意=排空舊回覆（F5 acks），兩後端皆保留。TWAI RX queue 64 深，MCP2515 時代的 2-buffer 塞爆問題已消失（該限制僅餘 fallback 路徑）
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
+- main.cpp 的 MCP 暫存器深診斷指令（rawReadReg/rawSetMode 路徑）在 TWAI 後端是 no-op stub，回值無意義——只在 fallback 硬體上有效
 
 ## 編碼器與校正
 

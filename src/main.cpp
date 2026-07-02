@@ -1100,7 +1100,11 @@ static void emitTelemetry(const TelemetrySnapshot& s) {
                   "\"per\":[%u,%u,%u,%u,%u,%u],\"ovr\":%u,\"f5us\":%u,\"mxd\":%u},"
                   "\"tim\":{\"cycles\":%u,\"dtMin\":%u,\"dtMax\":%u,\"dtAvg\":%.2f,"
                   "\"teleMs\":%u,\"f5us\":%u,\"f5max\":%u,\"canReadUs\":%u},"
+#ifdef USE_TWAI_CAN
+                  "\"can\":{\"backend\":\"twai\",\"bitrate\":500000,\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+#else
                   "\"can\":{\"backend\":\"mcp2515\",\"bitrate\":500000,\"ef\":%u,\"tx\":%u,\"rx\":%u,"
+#endif
                   "\"rxDrop\":%u,\"txFail\":%u,\"qDepth\":0,\"qMax\":0},"
                   "\"ctl\":{\"mode\":\"%s\",\"ikFail\":%u,\"fkFail\":%u,\"coordLimit\":%u,\"coordMax\":%d,"
                   "\"fkStreak\":%d,\"profile\":\"%s\"},"
@@ -1212,11 +1216,14 @@ void setup() {
     delay(200); // 給 FreeRTOS / SPI mutex 完全初始化的時間，避免 paramLock NULL
     netSetOtaStartCallback(requestOtaSafetyStop);
 
+#ifndef USE_TWAI_CAN
     // 明確 init SPI bus（VSPI 預設腳位 SCK=18 MISO=19 MOSI=23 SS=5）
     // 必須在任何 MCP_CAN SPI 操作前呼叫，確保 SPI 的 paramLock mutex 已建立
+    // （TWAI 現役路徑不用 SPI；本段僅 MCP2515 fallback）
     SPI.begin(18, 19, 23, 5);
     SPI.setFrequency(10000000);
     delay(50);
+#endif
 
     loadRuntimeTuningFromNVS();
     loadHoldIntFromNVS();            // HOLD 積分組態：有保存值則載入，否則維持 BOOT 預設（Ki=0）

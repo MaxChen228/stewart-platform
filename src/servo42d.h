@@ -1,21 +1,35 @@
 #pragma once
+// ===== CAN 後端雙軌 =====
+// USE_TWAI_CAN（現役，2026-07-02 實機 6/6 驗證）：ESP32 原生 TWAI + SN65HVD230(VP230)，
+//   TX=GPIO21 RX=GPIO22 500k（見 can_twai_compat.h）。無 SPI、無 2-buffer 瓶頸。
+// 未定義（退役備援）：MCP2515(SPI) + TJA1050。回退：pio run -e esp32_mcp2515。
+#ifdef USE_TWAI_CAN
+#include "can_twai_compat.h"
+#else
 #include <SPI.h>
 #include <mcp2515.h>
+#endif
 #include <freertos/semphr.h>
 #include "net_transport.h"   // DualPrint Out：warn/diag 鏡像 TCP（WiFi 操作時 disable/enable 失敗才看得見）
 
-// SPI 腳位
+// SPI 腳位（MCP2515 fallback 專用；TWAI 路徑下 CS 參數無作用、INT 未接）
 constexpr uint8_t CAN_CS_PIN  = 5;
 constexpr uint8_t CAN_INT_PIN = 17;
 
-// ===== Compat shim: 把 autowp/arduino-mcp2515 包成原 coryjfowler/mcp_can API =====
-// 原因：coryjfowler 在 ESP32 arduino-core 2.x 有 SPI lifecycle bug（spi_t* 損壞）
-// 換 lib 後保持上層 sendMsgBuf / checkReceive / readMsgBuf 介面不動
+// 上層回傳碼（兩後端數值一致：TWAI_CAN_* 同值）
 #define CAN_OK        0
 #define CAN_FAIL      1
 #define CAN_MSGAVAIL  3
 #define CAN_NOMSG     1
 
+#ifdef USE_TWAI_CAN
+// TWAI 後端 API 與 MCP_CAN 同形（sendMsgBuf/checkReceive/readMsgBuf/raw*…），直接別名。
+using MCP_CAN  = TwaiCanCompat;
+using CanGuard = TwaiCanGuard;
+#else
+// ===== Compat shim: 把 autowp/arduino-mcp2515 包成原 coryjfowler/mcp_can API =====
+// 原因：coryjfowler 在 ESP32 arduino-core 2.x 有 SPI lifecycle bug（spi_t* 損壞）
+// 換 lib 後保持上層 sendMsgBuf / checkReceive / readMsgBuf 介面不動
 class MCP_CAN;
 
 struct CanGuard {
@@ -227,6 +241,7 @@ public:
 
 inline CanGuard::CanGuard(MCP_CAN& c) : can(c) { can.lock(); }
 inline CanGuard::~CanGuard() { can.unlock(); }
+#endif  // USE_TWAI_CAN（MCP2515 fallback 區塊結束）
 
 // 馬達數量與位址
 constexpr uint8_t NUM_MOTORS = 6;
