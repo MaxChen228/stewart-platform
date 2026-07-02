@@ -75,6 +75,13 @@ async function main() {
     return false;
   };
 
+  // ---- bus 健康預檢:6/6 讀得到且 TEC 健康才開跑(對壞 bus 開戰役=餵絞肉機)----
+  const pre = await httpGet('/api/latest');
+  if (!pre || pre.ok !== 6 || (pre.can && pre.can.tx >= 96)) {
+    console.error(JSON.stringify({ abort: 'preflight', ok: pre && pre.ok, tec: pre && pre.can && pre.can.tx }));
+    ws.terminate(); log.end(); process.exit(3);
+  }
+
   // ---- 配置 ----
   if (FE != null) { send(`FE ${FE}`); if (!await waitAck('follow tight')) console.error('⚠ FE ack timeout'); }
   if (PREDICT != null) { send(`PREDICT ${PREDICT}`); if (!await waitAck('"predict"')) console.error('⚠ PREDICT ack timeout'); }
