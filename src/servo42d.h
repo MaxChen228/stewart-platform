@@ -255,6 +255,25 @@ public:
     MCP_CAN can;
     bool initialized = false;
 
+    // ── 同 ID 相剋殘餘窗口防護（L1，2026-07-02）──
+    // 42D 協議缺陷：回覆幀 ID == 指令幀 ID（馬達地址）。讀取逾時＝該馬達的回覆可能仍在
+    // 路上/重傳中，此刻再對同一顆發任何幀就是同 ID 對撞 → error 螺旋 → 馬達 bus-off。
+    // 逾時後對該顆 TX 靜默 5ms（遲到回覆在空 bus 自然發完）：F5 跳過（每 cycle 重發無害）、
+    // 讀取回失敗（上層保持上次角度）。安全類指令（stop/disable/enable）不擋。
+    uint32_t motorQuietUntilMs[NUM_MOTORS] = {0};
+    static int addrIndex(uint8_t motorId) {
+        for (int i = 0; i < NUM_MOTORS; i++) if (MOTOR_ADDR[i] == motorId) return i;
+        return -1;
+    }
+    bool motorQuiet(uint8_t motorId) {
+        int i = addrIndex(motorId);
+        return i >= 0 && (int32_t)(motorQuietUntilMs[i] - millis()) > 0;
+    }
+    void noteReadTimeout(uint8_t motorId) {
+        int i = addrIndex(motorId);
+        if (i >= 0) motorQuietUntilMs[i] = millis() + 5;
+    }
+
     Servo42D() : can(CAN_CS_PIN) {}
 
     bool begin() {
@@ -267,6 +286,7 @@ public:
     // 回傳 -1 表示通訊失敗，-2 表示 CRC 錯誤
     int32_t readEncoderRaw(uint8_t motorId) {
         CanGuard _g(can);
+        if (motorQuiet(motorId)) return -1;   // L1：遲到回覆可能在途，不與同 ID 對撞
         uint8_t cmd[2];
         cmd[0] = 0x30;
         cmd[1] = (motorId + 0x30) & 0xFF;
@@ -294,6 +314,7 @@ public:
                 return value & 0x3FFF;
             }
         }
+        noteReadTimeout(motorId);   // L1：回覆沒到＝可能仍在途/重傳中 → 該顆 TX 靜默 5ms
         return -1;
     }
 
@@ -301,6 +322,7 @@ public:
     // 回傳 INT32_MIN 表示失敗
     int32_t readCoordinate(uint8_t motorId) {
         CanGuard _g(can);
+        if (motorQuiet(motorId)) return INT32_MIN;
         uint8_t cmd[3];
         cmd[0] = 0x31;
         cmd[1] = 0x00; // 校正後的值
@@ -326,6 +348,7 @@ public:
                 }
             }
         }
+        noteReadTimeout(motorId);
         return INT32_MIN;
     }
 
@@ -355,6 +378,7 @@ public:
     // 回傳 INT64_MIN 表示失敗
     int64_t readRawEncoderValue(uint8_t motorId, uint32_t timeoutMs = 10) {
         CanGuard _g(can);
+        if (motorQuiet(motorId)) return INT64_MIN;
         uint8_t cmd[2];
         cmd[0] = 0x35;
         cmd[1] = (motorId + 0x35) & 0xFF;
@@ -388,6 +412,7 @@ public:
                 return val;
             }
         }
+        noteReadTimeout(motorId);
         return INT64_MIN;
     }
 
@@ -489,7 +514,8 @@ public:
     int readAllRawEncoders(int64_t rawValues[NUM_MOTORS]) {
         CanGuard _g(can);
         for (int i = 0; i < NUM_MOTORS; i++) rawValues[i] = INT64_MIN;
-        int got = 0;
+        int got = 0, sent = 0;
+        bool queried[NUM_MOTORS] = {false};
 
         // 每 cycle 輪轉查詢起始順序：最後查詢的那顆回覆最易撞滿 2-buffer MCP2515 而掉，
         // 輪轉讓 staleness 公平分攤到 6 顆，不讓固定某顆一直變舊（實測掉幀隨位置走非馬達身分）。
@@ -497,15 +523,20 @@ public:
         rot = (rot + 1) % NUM_MOTORS;
         for (int k = 0; k < NUM_MOTORS; k++) {
             int i = (rot + k) % NUM_MOTORS;
+            if (motorQuiet(MOTOR_ADDR[i])) continue;   // L1：上輪回覆可能仍在途，本輪跳過該顆
             uint8_t cmd[2] = { 0x35, (uint8_t)((MOTOR_ADDR[i] + 0x35) & 0xFF) };
             can.sendMsgBuf(MOTOR_ADDR[i], 0, 2, cmd);
+            queried[i] = true; sent++;
             got += drainEncoderReplies(rawValues);   // 每送一個就清一次
         }
 
         uint32_t start = millis();
-        while (got < NUM_MOTORS && (millis() - start) < 8) {
+        while (got < sent && (millis() - start) < 8) {
             got += drainEncoderReplies(rawValues);
         }
+        // L1：有查詢但沒等到回覆 → 該顆 TX 靜默 5ms（遲到回覆與下一幀同 ID 對撞是螺旋的點火點）
+        for (int i = 0; i < NUM_MOTORS; i++)
+            if (queried[i] && rawValues[i] == INT64_MIN) noteReadTimeout(MOTOR_ADDR[i]);
         return got;
     }
 
@@ -633,6 +664,7 @@ public:
     // speed: 0-3000 RPM（最大移動速度）, acc: 0-255, coord: int24_t 絕對坐標值 (16384 counts/turn)
     void setAbsoluteCoord(uint8_t motorId, uint16_t speed, uint8_t acc, int32_t coord) {
         CanGuard _g(can);
+        if (motorQuiet(motorId)) return;   // L1：F5 每 cycle 重發，跳過一輪無害；同 ID 對撞是致命的
         if (speed > 3000) speed = 3000;
         if (coord > 8388607) coord = 8388607;
         if (coord < -8388607) coord = -8388607;

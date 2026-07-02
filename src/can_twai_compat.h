@@ -53,6 +53,9 @@ class TwaiCanCompat {
     uint32_t recoveryCount = 0;
     uint32_t txStuckSinceMs = 0;
     uint32_t txPurgeCount = 0;
+    uint32_t busQuietUntilMs = 0;   // 熔斷後全域 TX 靜默窗：讓對方（馬達）的重傳在空 bus 完成，絞肉機斷燃料
+    uint32_t lastTecTripMs = 0;
+    uint32_t tecTripCount = 0;
 
     void ensureMutex() {
         if (!canMux) canMux = xSemaphoreCreateRecursiveMutex();
@@ -79,23 +82,35 @@ class TwaiCanCompat {
             twai_start();                      // recovery 完成落 STOPPED → 重啟回 RUNNING
             Serial.printf("{\"info\":\"twai running again after recovery #%u\"}\n", recoveryCount);
         } else if (st.state == TWAI_STATE_RUNNING) {
-            // ── error-passive TX 死鎖斬斷（2026-07-02 實症）──
-            // 42D 主動上報幀 ID == 指令幀 ID（馬達地址）→ 同 ID 仲裁不分 → bit error；
+            // ── error-passive TX 死鎖斬斷（2026-07-02 實症；2026-07-02 晚二修）──
+            // 42D 主動上報/讀取回覆幀 ID == 指令幀 ID（馬達地址）→ 同 ID 仲裁不分 → bit error；
             // error passive 後 TEC 凍結（CAN spec 特例）+ TWAI 無限重傳 → 一幀卡死 TX queue，
-            // 每 5ms 與上報再撞 → RX 全滅（REC 爆）→ bus 永久死鎖，state 仍 RUNNING 故
-            // bus-off recovery 抓不到。正常 500k 下 32 幀 queue ~7ms 清空；持續 500ms
-            // 有貨 = 死鎖 → stop/start 清 TX queue 斬斷卡死幀（丟該幀，上層有重試）。
+            // 反覆與對方重傳互撞 → 對方 TEC 被磨向 255 → 馬達 bus-off（只能斷電救）。
+            // 初版缺陷（實症 564 次 purge 未能救回）：①500ms 門檻 = 每輪先絞 500ms；②斬幀後
+            // 立即恢復 TX → 再撞上對方仍在重傳的回覆 → 再絞。二修：門檻 50ms + 斬後靜默 50ms
+            // （sendMsgBuf 直接回 FAIL，上層 F5 每 cycle 重發/讀取保持上次值，皆無害）。
             if (st.msgs_to_tx > 0) {
                 if (!txStuckSinceMs) txStuckSinceMs = now;
-                else if (now - txStuckSinceMs > 500) {
+                else if (now - txStuckSinceMs > 50) {
                     twai_stop();               // 清 TX queue（含卡死幀）
                     twai_start();
                     txPurgeCount++;
                     txStuckSinceMs = 0;
-                    Serial.printf("{\"warn\":\"twai tx-deadlock purge #%u (dropped stuck frame)\"}\n", txPurgeCount);
+                    busQuietUntilMs = now + 50;   // 靜默窗：讓對方重傳在空 bus 完成，絞肉機斷燃料
+                    Serial.printf("{\"warn\":\"twai tx-deadlock purge #%u (dropped stuck frame, quiet 50ms)\"}\n", txPurgeCount);
                 }
             } else {
                 txStuckSinceMs = 0;
+            }
+            // ── error-passive 早期熔斷 ──：TEC≥128（error-passive）＝絞肉機已啟動的直接證據，
+            // 不等 TX 卡滿門檻，立即靜默讓在途回覆消散（rate-limit 200ms 防 thrash；
+            // TEC 靠恢復後的成功幀 −1/幀 自然消退）。
+            if (st.tx_error_counter >= 128 && now - lastTecTripMs > 200) {
+                lastTecTripMs = now;
+                tecTripCount++;
+                busQuietUntilMs = now + 50;
+                Serial.printf("{\"warn\":\"twai error-passive trip #%u (tec=%u, quiet 50ms)\"}\n",
+                              tecTripCount, (unsigned)st.tx_error_counter);
             }
         }
     }
@@ -159,6 +174,8 @@ public:
     uint8_t sendMsgBuf(uint32_t id, uint8_t /*ext*/, uint8_t len, const uint8_t* buf) {
         TwaiCanGuard _g(*this);
         serviceBusHealth();
+        // 熔斷靜默窗內拒發（回 FAIL）：上層語意皆容忍（F5 每 cycle 重發、讀取保持上次角度）
+        if ((int32_t)(busQuietUntilMs - millis()) > 0) return TWAI_CAN_FAIL;
         twai_message_t msg = {};
         msg.identifier = id & 0x7FF;
         msg.extd = 0;

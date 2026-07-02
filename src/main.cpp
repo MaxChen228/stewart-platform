@@ -2233,6 +2233,28 @@ static void controlTick() {
     }
     if (encUpdated) enc.updateAngles(raw);
 
+    // ── 全聾看門狗（L3，2026-07-02）──：驅動中 6 顆全讀失敗持續 >1.5s = bus 已死
+    // （同 ID 螺旋/馬達 bus-off）。停止對死 bus 盲轟 F5——每一幀都在與對方重傳互撞、
+    // 把馬達 TEC 磨向 255（實症：磨了 564 輪 purge 直到六顆全 bus-off 只能斷電救）。
+    // 凍結驅動即可（不發 disable：bus 已死發不出去；馬達自帶保持力矩不落架）。
+    // 恢復 = 排查後重新 E/H（重拉 posEnabled 即解除）。
+    {
+        static uint32_t allDeafSinceMs = 0;
+        static bool allDeafLatched = false;
+        if (posEnabled && ok == 0) {
+            if (!allDeafSinceMs) allDeafSinceMs = millis();
+            else if (!allDeafLatched && millis() - allDeafSinceMs > 1500) {
+                allDeafLatched = true;
+                posEnabled = false;
+                followMode = false;
+                Out.println("{\"fatal\":\"can bus deaf >1.5s (ok=0), drive halted; if bus stays dead: power-cycle motors, then reboot ESP32\"}");
+            }
+        } else {
+            allDeafSinceMs = 0;
+            if (ok > 0) allDeafLatched = false;
+        }
+    }
+
     float motorTargets[NUM_MOTORS] = {0};
     int32_t coords[NUM_MOTORS] = {0};
 
