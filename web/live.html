@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>模擬手機 — 工作空間累積 + 三軸波形</title>
+<title>串流台 — 工作空間 + 三軸波形</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap" rel="stylesheet">
@@ -88,10 +88,11 @@
     </span>
   </span>
   <span class="sep"></span>
+  <!-- 清除軌跡：三來源通用（意圖軌跡累積對三來源一視同仁）-->
+  <button id="clr" class="chip" title="清空累積意圖軌跡 + 波形">清除軌跡</button>
   <!-- 模擬來源控制 -->
   <span id="ctl-sim" class="grp" style="gap:10px">
     <button id="btn" class="chip" title="不接板子、純跑產生器累積點雲做工作空間覆蓋研究；驅動板子請按右上「串接板子」">▶ 預覽產生器</button>
-    <button id="clr" class="chip" title="清空累積點雲 + 波形">清除軌跡</button>
     <span class="grp"><span class="lbl">seed</span><input id="seed" class="input" type="number" value="0" title="0=隨機"></span>
     <span class="grp"><span class="lbl">速度</span><input id="speed" type="range" min="0" max="1000" value="270" title="log ×0.1～×500"><b id="speedv" class="mono" style="color:var(--contra);min-width:46px;display:inline-block">×1</b></span>
   </span>
@@ -109,24 +110,26 @@
 <div class="split">
   <div class="pane" id="paneW">
     <canvas id="cws"></canvas>
-    <div class="cap">工作空間 · roll / pitch / yaw（度）· 原點 = home</div>
+    <div class="cap" id="wscap">工作空間 · roll / pitch / yaw（度）· 中心 = 意圖 (x,y,z)</div>
     <div class="float" id="legend">
       <div class="hd">顯示圖層</div>
-      <label class="ck"><input type="checkbox" id="ck-ws" checked><span class="sw" style="background:#6f8fb0"></span>工作空間殼（IK 可解）</label>
+      <label class="ck"><input type="checkbox" id="ck-ws" checked><span class="sw" style="background:#6f8fb0"></span>工作空間（物理可達）</label>
       <label class="ck"><input type="checkbox" id="ck-safe" checked><span class="sw" style="background:#3f9e63"></span>安全（徑向裕度 ∧ Type-II）</label>
       <label class="ck"><input type="checkbox" id="ck-phone" checked><span class="sw" style="background:#D35400"></span>手機歷史 PF</label>
-      <label class="ck"><input type="checkbox" id="ck-accum" checked><span class="sw" style="background:#0d8aa0"></span>即時生成（累積）</label>
+      <label class="ck"><input type="checkbox" id="ck-accum" checked><span class="sw" style="background:#0d8aa0"></span>意圖軌跡（累積）</label>
+      <div class="ck" style="cursor:default"><span class="sw" style="background:#2e9c5b"></span>意圖 PF（當前點）</div>
+      <div class="ck" style="cursor:default"><span class="sw" style="background:#C0392B"></span>板子實際（當前點）</div>
     </div>
     <div class="float" id="conv">
       <div class="hd" style="color:var(--contra)">收斂監測：生成累積 → 手機歷史</div>
       <div class="grid" id="convgrid"></div>
     </div>
-    <div class="float" id="sliders" style="display:none; top:12px; left:12px; width:212px">
+    <div class="float" id="sliders" style="display:none; top:12px; right:12px; width:212px">
       <div class="hd">拖滑桿驅動 · 相對 home</div>
       <div id="sl-rows" class="sl-rows"></div>
       <button id="sl-center" class="chip" style="width:100%; margin-top:9px; font-size:11px">↺ 回中位</button>
     </div>
-    <div class="float" id="phonepanel" style="display:none; top:12px; left:12px; width:236px; text-align:center">
+    <div class="float" id="phonepanel" style="display:none; top:12px; right:12px; width:236px; text-align:center">
       <div class="hd">手機配對 · 掃 QR 開手機頁</div>
       <img id="phone-qr" alt="QR" style="width:200px; height:200px; background:#fff; border:1px solid var(--borderL); border-radius:6px">
       <div id="phone-url" class="mono" style="font-size:10px; color:var(--sub); margin-top:8px; word-break:break-all">—</div>
@@ -147,7 +150,7 @@
 
 <div id="wave">
   <div class="leg">三軸時域波形
-    <span><span class="ln" style="border-top:2px solid var(--ink)"></span>意圖 PF（送出）</span>
+    <span><span class="ln" style="border-top:2px solid var(--ink)"></span>意圖 PF</span>
     <span><span class="ln" style="border-top:2px dashed var(--ink)"></span>板子實際（FK）</span>
     <span style="margin-left:auto"><b style="color:#C0392B">■</b> roll &nbsp;<b style="color:#2e7d46">■</b> pitch &nbsp;<b style="color:#4A6B8C">■</b> yaw</span>
   </div>
@@ -161,6 +164,7 @@
 } }
 </script>
 <script src="/sysid/kin.js"></script>
+<script src="/sysid/workspace_envelope.js"></script>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -168,9 +172,19 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { createStewartModel, createStewartRig, createGhostRig, StewartStyle } from '/shared/stewart-renderer.js';
 
 const Kin = window.Kin;
+const WE = window.WorkspaceEnvelope;
 const HOMEPOSE = [0, 0, 133, 0, 0, 0];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const WS = await (await fetch('/workspace_data.json')).json();
+const WS = await (await fetch('/workspace_data.json')).json();   // 手機歷史雲 + 軸範圍 + pfStd（收斂監測）；殼改由 worker 動態算
+
+// home / landing 絕對姿態（與主控頁同源 /api/platform-config）：滑桿基準、rig 無遙測 fallback、起飛目標
+// 全用同一份（先前滑桿/rig 硬用 HOMEPOSE、起飛卻用 homeAbs → 基準可能錯配）。非阻塞 fetch，回退 HOMEPOSE。
+let homeAbs = HOMEPOSE.slice(), landingAbs = null;
+fetch('/api/platform-config').then(r => r.json()).then(cfg => {
+  if (Array.isArray(cfg.homePose) && cfg.homePose.length === 6) homeAbs = cfg.homePose.map(Number);
+  if (Array.isArray(cfg.landingPose) && cfg.landingPose.length === 6) landingAbs = cfg.landingPose.map(Number);
+  if (!ghostActive) { prevG = homeAbs.slice(); targetG = homeAbs.slice(); dispG = homeAbs.slice(); scheduleEnvelope(); }   // 殼中心對齊真 home
+}).catch(() => {});
 
 // ============ 左：工作空間場景（淺底，與主畫面一致；roll=X pitch=Y yaw=Z 度）============
 const hostW = document.getElementById('cws');
@@ -187,9 +201,10 @@ function staticCloud(pts, color, size, op) {
   g.setAttribute('position', new THREE.BufferAttribute(a, 3));
   return new THREE.Points(g, new THREE.PointsMaterial({ color, size, transparent: true, opacity: op, sizeAttenuation: true, depthWrite: false }));
 }
-const cloudWS = staticCloud(WS.workspace, 0x6f8fb0, 1.8, 0.35); sceneW.add(cloudWS);
-const cloudSafe = staticCloud(WS.safe, 0x3f9e63, 2.0, 0.4); sceneW.add(cloudSafe);
 const cloudPhone = staticCloud(WS.phone, 0xD35400, 3.0, 0.7); sceneW.add(cloudPhone);
+// 工作空間/安全殼：不用靜態 workspace_data（center 死在 home、無物理閘）→ Web Worker 以「當前意圖平移
+// (x,y,z)」即時重算（與 geometry.html 同母函數、同門檻、含 J1/J2/J3/曲柄四閘）。拖滑桿動 x/y/z → 殼跟著變。
+let cloudWS = null, cloudSafe = null;
 
 function axis(dir, len, color) {
   const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), dir.clone().multiplyScalar(len)]);
@@ -224,8 +239,47 @@ function accumPush(roll, pitch, yaw) {
   accumArr[accHead * 3] = roll; accumArr[accHead * 3 + 1] = pitch; accumArr[accHead * 3 + 2] = yaw;
   accHead = (accHead + 1) % MAXPTS; if (accCount < MAXPTS) accCount++; accGeoDirty = true;
 }
-const layers = { ws: cloudWS, safe: cloudSafe, phone: cloudPhone, accum: accumPts };
-for (const [id, obj] of Object.entries(layers)) document.getElementById('ck-' + id).addEventListener('change', e => { obj.visible = e.target.checked; });
+// 圖層開關：ws/safe 每次重算會換新物件 → 用 getter + layerOn 記住勾選，rebuild 時套回
+const layerObjs = { ws: () => cloudWS, safe: () => cloudSafe, phone: () => cloudPhone, accum: () => accumPts };
+const layerOn = { ws: true, safe: true, phone: true, accum: true };
+for (const id of Object.keys(layerObjs)) document.getElementById('ck-' + id).addEventListener('change', e => {
+  layerOn[id] = e.target.checked; const o = layerObjs[id](); if (o) o.visible = e.target.checked;
+});
+
+// 當前點雙 marker（與右 pane 同色語意）：綠 = 意圖 PF、紅 = 板子實際（FK）。roll→X pitch→Y yaw→Z（度）
+const markInt = new THREE.Mesh(new THREE.SphereGeometry(2.2, 16, 16), new THREE.MeshBasicMaterial({ color: 0x2e9c5b }));
+const markAct = new THREE.Mesh(new THREE.SphereGeometry(2.2, 16, 16), new THREE.MeshBasicMaterial({ color: 0xC0392B }));
+markInt.visible = false; markAct.visible = false; sceneW.add(markInt, markAct);
+
+// ============ 工作空間殼 Web Worker：中心 = 當前意圖平移（三來源通用）============
+const wsWorker = new Worker('/shared/workspace-worker.js');
+const WS_GRID = { roll: [-42, 42, 3], pitch: [-42, 42, 3], yaw: [-92, 92, 4] };
+const WS_THR = { radialMargin: 1.25, epsT2: 0.15, kappaThr: 12, phys: true };   // 與 geometry.html 同門檻 + 物理四閘
+const geoKin = WE.geoFromKin(Kin);   // 現役幾何（kin.js SoT），純資料直傳 worker
+let wsReqId = 0, envCenter = null, envTimer = null, envInflight = false, envDirty = false;
+function runEnvelope() {
+  if (envInflight) { envDirty = true; return; }
+  envInflight = true; envCenter = [targetG[0], targetG[1], targetG[2]];
+  wsWorker.postMessage({ id: ++wsReqId, geo: geoKin, center: envCenter.map(v => v / Kin.BASE_RADIUS), grid: WS_GRID, thr: WS_THR });
+}
+function scheduleEnvelope() {   // 意圖平移離上次計算中心 <1mm 不重算；拖曳中 160ms debounce 取尾值
+  if (envCenter && Math.hypot(targetG[0] - envCenter[0], targetG[1] - envCenter[1], targetG[2] - envCenter[2]) < 1.0) return;
+  if (envTimer) return;
+  envTimer = setTimeout(() => { envTimer = null; runEnvelope(); }, 160);
+}
+function disposeCloud(o) { if (o) { sceneW.remove(o); o.geometry.dispose(); o.material.dispose(); } }
+wsWorker.onmessage = (e) => {
+  envInflight = false;
+  const d = e.data;
+  if (d.ok && d.id === wsReqId) {
+    disposeCloud(cloudWS); disposeCloud(cloudSafe);
+    cloudWS = staticCloud(d.physical || [], 0x6f8fb0, 1.8, 0.35); cloudWS.visible = layerOn.ws; sceneW.add(cloudWS);
+    cloudSafe = staticCloud(d.safe || [], 0x3f9e63, 2.0, 0.4); cloudSafe.visible = layerOn.safe; sceneW.add(cloudSafe);
+    document.getElementById('wscap').textContent =
+      `工作空間 · roll / pitch / yaw（度）· 中心 x=${envCenter[0].toFixed(0)} y=${envCenter[1].toFixed(0)} z=${envCenter[2].toFixed(0)} mm`;
+  }
+  if (envDirty) { envDirty = false; runEnvelope(); }   // 計算期間中心又動了 → 立刻補算最新
+};
 
 // ============ 右：rig 場景（淺底，與主畫面同慣例）。紅實心 rig=板子實際，綠 ghost=模擬 PF 意圖 ============
 const hostR = document.getElementById('crig');
@@ -307,6 +361,7 @@ function ghostArrive(pose) {
   const now = performance.now();
   if (recvAtG) intervalG = intervalG * 0.7 + Math.max(1, Math.min(1000, now - recvAtG)) * 0.3;
   prevG = dispG.slice(); targetG = pose.slice(); recvAtG = now; ghostActive = true;
+  scheduleEnvelope();   // 意圖 x/y/z 變 → 殼跟著該平移中心重算（三來源通用）
 }
 function resize() {
   for (const [host, cam, rdr] of [[hostW, camW, rdrW], [hostR, camR, rdrR]]) {
@@ -325,8 +380,14 @@ function loop() {
     const frac = recvAtG ? Math.min(1, (performance.now() - recvAtG) / intervalG) : 1;
     for (let i = 0; i < 6; i++) dispG[i] = prevG[i] + (targetG[i] - prevG[i]) * frac;
     ghost.update(Kin.ik(dispG).angles, dispG);
+    // 意圖波形 + readout + 左圖綠 marker：統一從顯示中的意圖取樣（三來源一致，滑桿不動也不斷線）
+    pushWave(simWave, [dispG[3], dispG[4], dispG[5]]); elSim.textContent = fmt3(dispG);
+    markInt.position.set(dispG[3], dispG[4], dispG[5]);
   }
-  rig.update(Kin.ik(actPose || HOMEPOSE).angles, actPose || HOMEPOSE);   // 紅 rig：板子實際（無遙測→home）
+  markInt.visible = ghostActive;                                       // 換來源 ghost 熄 → 綠 marker 同步熄
+  rig.update(Kin.ik(actPose || homeAbs).angles, actPose || homeAbs);   // 紅 rig：板子實際（無遙測→home）
+  markAct.visible = !!(boardConnected && actPose);                     // 左圖紅 marker：板子實際在 r/p/y 空間的即時位置
+  if (actPose) markAct.position.set(actPose[3], actPose[4], actPose[5]);
   drawWave();
   rdrW.render(sceneW, camW); rdrR.render(sceneR, camR); labelRdr.render(sceneR, camR);
 }
@@ -346,13 +407,6 @@ let lastTele = null;         // 最近一幀完整遙測（pos/hold 給起飛狀
 let sessionActive = false;   // server workspace session 進行中 → 控制被 gate，禁止串接（否則假成功）
 let lastDropAt = 0;          // 最近一次 server cmd_dropped 時刻；起飛期間更新=指令被丟→中止
 let modeWaiter = null;       // 交棒確認：MODE 送出後等 server 廣播 evt:mode owner===本來源
-
-// home / landing 絕對姿態（與主控頁同源；起飛目標）。非阻塞 fetch，回退 HOMEPOSE。
-let homeAbs = HOMEPOSE.slice(), landingAbs = null;
-fetch('/api/platform-config').then(r => r.json()).then(cfg => {
-  if (Array.isArray(cfg.homePose) && cfg.homePose.length === 6) homeAbs = cfg.homePose.map(Number);
-  if (Array.isArray(cfg.landingPose) && cfg.landingPose.length === 6) landingAbs = cfg.landingPose.map(Number);
-}).catch(() => {});
 
 function setBoard(conn) { boardConnected = conn; bdot.classList.toggle('on', conn); bstat.textContent = conn ? '已連線' : '未連線'; if (!conn) { actPose = null; elAct.textContent = '—'; } }
 function declareRole() { if (wsReady()) ws3.send(JSON.stringify({ role: currentSource })); }   // server 接 'sim'/'phone'，'desktop' 落預設
@@ -409,7 +463,7 @@ function onLatency(d) {
 // 手機來源：server 廣播 evt:'followtgt'（手機即時陀螺儀目標，25Hz）→ 綠 ghost 鏡像手機意圖（本頁不串 PF，phone.html 自串）。
 function onFollowTgt(pose) {
   if (currentSource !== 'phone' || !Array.isArray(pose) || pose.length !== 6 || !pose.every(Number.isFinite)) return;
-  ghostArrive(pose); pushWave(simWave, [pose[3], pose[4], pose[5]]); elSim.textContent = fmt3(pose);
+  ghostArrive(pose); accumPush(pose[3], pose[4], pose[5]);   // 手機意圖同樣累積軌跡（與模擬一致）
 }
 // 手機配對面板（QR → phone.html；netinfo 給 URL/mkcert CA）。
 async function openPhonePanel() {
@@ -450,7 +504,7 @@ function openStream() {
   es.onmessage = e => {
     const f = JSON.parse(e.data);
     for (const p of f.pts) accumPush(p[0], p[1], p[2]);
-    ghostArrive(f.last); pushWave(simWave, [f.last[3], f.last[4], f.last[5]]); elSim.textContent = fmt3(f.last);
+    ghostArrive(f.last);   // 波形/readout/綠 marker 統一由 render loop 從 dispG 取樣
     if (driving && currentSource === 'sim') streamPFBoard(f.last);
     lastN = f.n; lastIk = f.ikDrop; fpsAcc += f.pts.length;
     const now = performance.now();
@@ -497,13 +551,13 @@ const slEls = {};
   }
 })();
 function desktopPose() {
-  const p = HOMEPOSE.slice();
-  for (const a of SL_AXES) { const v = Number(slEls[a.k].value); p[a.i] = HOMEPOSE[a.i] + v; document.getElementById('slv-' + a.k).textContent = a.i >= 3 ? v.toFixed(1) : v.toFixed(0); }
+  const p = homeAbs.slice();   // 基準 = server 權威 home（與起飛目標同源，不用硬編碼 HOMEPOSE）
+  for (const a of SL_AXES) { const v = Number(slEls[a.k].value); p[a.i] = homeAbs[a.i] + v; document.getElementById('slv-' + a.k).textContent = a.i >= 3 ? v.toFixed(1) : v.toFixed(0); }
   return p;
 }
 function onSlider() {
   const pose = desktopPose();
-  ghostArrive(pose); pushWave(simWave, [pose[3], pose[4], pose[5]]); elSim.textContent = fmt3(pose);
+  ghostArrive(pose); accumPush(pose[3], pose[4], pose[5]);   // 滑桿意圖同樣累積軌跡（與模擬一致）
   if (driving && currentSource === 'desktop') streamPFBoard(pose);
 }
 document.getElementById('sl-center').onclick = () => { for (const a of SL_AXES) slEls[a.k].value = 0; onSlider(); };
@@ -522,12 +576,10 @@ function showSourceControls() {
   document.getElementById('ctl-sim').style.display = sim ? '' : 'none';
   document.getElementById('ctl-follow').style.display = '';   // 緊度+延遲：三來源都串 PF 過 followStep → 恆顯
   document.getElementById('ctl-phone').style.display = phone ? '' : 'none';
-  document.getElementById('legend').style.display = sim ? '' : 'none';
-  document.getElementById('conv').style.display = sim ? '' : 'none';
+  // 圖層 legend 恆顯、圖層可見性只聽勾選（不再因來源強制隱藏 — 軌跡/殼對三來源是同一套心智模型）
+  document.getElementById('conv').style.display = sim ? '' : 'none';   // 收斂監測 = 生成器 vs 手機語料，僅 sim 有意義
   document.getElementById('sliders').style.display = desk ? '' : 'none';
   document.getElementById('phonepanel').style.display = phone ? '' : 'none';
-  accumPts.visible = sim && document.getElementById('ck-accum').checked;
-  cloudPhone.visible = sim && document.getElementById('ck-phone').checked;
   for (const [id, on] of [['src-sim', sim], ['src-desktop', desk], ['src-phone', phone]]) document.getElementById(id).classList.toggle('active', on);
 }
 function setSource(src) {
@@ -610,6 +662,7 @@ function exitDrive() {
 }
 driveBtn.onclick = () => (driving ? exitDrive() : enterDrive());
 showSourceControls();
+runEnvelope();   // 初始殼：中心 = home（config fetch 回來若不同會再排程重算）
 addEventListener('beforeunload', () => { if (driving && wsReady()) ws3.send(JSON.stringify({ cmd: 'MODE off' })); });
 </script>
 <script src="/shared/app-nav.js" defer></script>
