@@ -22,7 +22,7 @@ Options:
   --home-ms N         Move duration to home, ms (default 1500)
   --land-ms N         Move duration to landing pose, ms (default 1500)
   --home POSE         Fallback relative home if server has none (default 0,0,28,0,0,0)
-  --landing POSE      Relative support landing pose (default 0,0,10,0,0,0)
+  --landing POSE      Relative support landing pose (default 0,0,-64,0,0,64)
 
 Sequence:
   P <server home pose> <home-ms>   # to home

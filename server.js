@@ -2731,6 +2731,7 @@ function safeLandSequence(reason) {
   if (safeLandTimer) return;   // 已在降落中
   console.log(`[SAFE-LAND] ${reason} → 緊急降落序列（home→landing→斷電）`);
   if (controlOwner) { controlOwner = null; broadcast(JSON.stringify({ evt: 'mode', owner: null })); }
+  phoneCapClose('safe-land');   // 同 startSessionState：清 owner 就收 phone 語料檔，維持 controlOwner==='phone' 邊界不變式
   // session 進行中 P 會被 commandAllowed gate 丟（僅 D 豁免）→ 用權威 token 過 gate，
   // 否則 rig 死在 session 中會退化成裸 D 從任意姿態塌落。token 在發送當下讀（session 可能中途結束）。
   const send = (c) => sendCommand(c, activeSession ? activeSession.token : null);

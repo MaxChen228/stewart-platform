@@ -113,7 +113,7 @@
     <div class="float" id="legend">
       <div class="hd">顯示圖層</div>
       <label class="ck"><input type="checkbox" id="ck-ws" checked><span class="sw" style="background:#6f8fb0"></span>工作空間殼（IK 可解）</label>
-      <label class="ck"><input type="checkbox" id="ck-safe" checked><span class="sw" style="background:#3f9e63"></span>安全（25% 裕度）</label>
+      <label class="ck"><input type="checkbox" id="ck-safe" checked><span class="sw" style="background:#3f9e63"></span>安全（徑向裕度 ∧ Type-II）</label>
       <label class="ck"><input type="checkbox" id="ck-phone" checked><span class="sw" style="background:#D35400"></span>手機歷史 PF</label>
       <label class="ck"><input type="checkbox" id="ck-accum" checked><span class="sw" style="background:#0d8aa0"></span>即時生成（累積）</label>
     </div>
@@ -343,6 +343,9 @@ let ws3 = null, ws3Timer = null;
 let currentSource = 'sim';   // 'sim'(SSE generator) | 'desktop'(拖滑桿) | 'phone'(陀螺儀)
 let driving = false;         // 板子正被本頁所選來源驅動
 let lastTele = null;         // 最近一幀完整遙測（pos/hold 給起飛狀態機）
+let sessionActive = false;   // server workspace session 進行中 → 控制被 gate，禁止串接（否則假成功）
+let lastDropAt = 0;          // 最近一次 server cmd_dropped 時刻；起飛期間更新=指令被丟→中止
+let modeWaiter = null;       // 交棒確認：MODE 送出後等 server 廣播 evt:mode owner===本來源
 
 // home / landing 絕對姿態（與主控頁同源；起飛目標）。非阻塞 fetch，回退 HOMEPOSE。
 let homeAbs = HOMEPOSE.slice(), landingAbs = null;
@@ -360,6 +363,8 @@ function connect3000() {
     let d; try { d = JSON.parse(e.data); } catch { return; }
     if (d.evt === 'transport') { setBoard(d.state === 'connected'); return; }
     if (d.evt === 'mode') { onModeBroadcast(d.owner); return; }
+    if (d.evt === 'session') { sessionActive = !!d.active; onSessionState(); return; }
+    if (d.evt === 'cmd_dropped') { lastDropAt = Date.now(); return; }   // 指令被 server gate 丟（多半 session active）
     if (d.evt === 'latency') { onLatency(d); return; }
     if (d.evt === 'followtgt') { onFollowTgt(d.pose); return; }
     if (Array.isArray(d.a)) {
@@ -377,7 +382,22 @@ connect3000();
 
 // server 權威 owner 廣播：若被其他端接管（owner 變成別的非本來源）→ 復原本頁串接 UI（板子已不歸我）。
 function onModeBroadcast(owner) {
+  if (modeWaiter) modeWaiter(owner);   // 交棒確認（enterDrive 等這個）
   if (driving && owner && owner !== currentSource) stopDriveLocal('其他端已接管');
+}
+// session 進行中：控制被 server gate，串接必假成功 → 禁用按鈕並顯示鎖定原因。
+function onSessionState() {
+  if (sessionActive && driving) stopDriveLocal('session 執行中：控制已被接管');
+  driveBtn.disabled = sessionActive;   // session 期間禁串接（結束即恢復）；起飛中的 disable 由 enterDrive 自管
+  if (sessionActive && !driving) statEl.innerHTML = '<b style="color:var(--dual)">session 執行中：串接鎖定</b>';
+}
+// 交棒確認：MODE 送出後等 server 廣播 evt:mode。owner===本來源=成功；null（session 拒）或逾時=失敗。
+function waitForMode(want, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; modeWaiter = null; resolve(null); } }, timeoutMs);
+    modeWaiter = (owner) => { if (!done) { done = true; clearTimeout(t); modeWaiter = null; resolve(owner); } };
+  });
 }
 // 跟隨延遲（server evt:'latency'，真實量測）：e2e=指令→實際 felt-lag；tele=板→server 遙測新鮮度。
 function onLatency(d) {
@@ -536,9 +556,12 @@ async function armSegP(pose, label) {
   if (!wsReady()) return false;
   if (!Kin.ik(pose).valid) { statEl.innerHTML = `<b style="color:var(--dev)">起飛中止：${label}超工作空間</b>`; return false; }
   const ms = 1500;
+  const sentAt = Date.now();
   ws3.send(JSON.stringify({ cmd: `P ${pose.map(v => v.toFixed(2)).join(' ')} ${ms}` }));
   driveBtn.textContent = `⤴ 起飛 → ${label}…`;
   await sleep(ms + 220);
+  // session 若在起飛中途啟動，P 被 server 丟棄（cmd_dropped）→ 平台沒動，別假裝到位
+  if (lastDropAt > sentAt) { statEl.innerHTML = `<b style="color:var(--dev)">起飛中止：${label} 指令被拒（session 接管？）</b>`; return false; }
   return wsReady();
 }
 async function armToHome() {
@@ -559,14 +582,22 @@ function setDriveBtn(on) { driveBtn.classList.toggle('active', on); driveBtn.tex
 function stopDriveLocal(why) { driving = false; setDriveBtn(false); lockSourceUI(false); if (currentSource === 'sim') speedEl.disabled = false; if (why) statEl.innerHTML = `<b style="color:var(--dev)">${why}</b>`; }
 async function enterDrive() {
   if (!boardConnected || !wsReady()) { statEl.innerHTML = '<b style="color:var(--dev)">需先連線板子才能串接</b>'; return; }
+  if (sessionActive) { statEl.innerHTML = '<b style="color:var(--dual)">session 執行中：無法串接</b>'; return; }
   driveBtn.disabled = true; lockSourceUI(true); if (currentSource === 'sim') btn.disabled = true;
   driveBtn.textContent = '⤴ 起飛回 home…';
   const ok = await armToHome();
   driveBtn.disabled = false; if (currentSource === 'sim') btn.disabled = false;
   if (!ok || !boardConnected || !wsReady()) { setDriveBtn(false); lockSourceUI(false); if (ok) statEl.innerHTML = '<b style="color:var(--dev)">起飛中斷線</b>'; return; }
+  // 到 home 才交棒：送 MODE 後等 server 廣播 evt:mode 確認接管（session 拒絕會廣播 owner=null）→ 不假裝已串接
+  driveBtn.textContent = '⤳ 交棒中…';
+  ws3.send(JSON.stringify({ cmd: 'MODE ' + currentSource }));
+  const owner = await waitForMode(currentSource);
+  if (!wsReady() || owner !== currentSource) {
+    stopDriveLocal(sessionActive ? 'session 執行中：串接被拒' : '交棒未確認（逾時），未串接');
+    return;
+  }
   driving = true; setDriveBtn(true);
   if (currentSource === 'sim') { speedEl.disabled = true; setSpeed(1); if (es) { es.close(); es = null; } startSim(); }   // 驅動一律重開流從 ×1：generator 速度烤在 SSE URL，非重開不生效（防 auto-preview 高速殘留→板子靜默超速）
-  ws3.send(JSON.stringify({ cmd: 'MODE ' + currentSource }));   // 到 home 才交棒：FOLLOW 1 從 home 起、PF 平滑串
 }
 function exitDrive() {
   driving = false; setDriveBtn(false); lockSourceUI(false);

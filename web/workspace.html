@@ -417,7 +417,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 let config = PlatformSoT.mergeConfig({});
 let homePose = [0, 0, NEUTRAL_Z + 28, 0, 0, 0];
-let landingPose = [0, 0, NEUTRAL_Z - 10, 0, 0, 34];
+let landingPose = [0, 0, NEUTRAL_Z - 64, 0, 0, 64];   // 佔位，loadConfig() 會以 config 覆寫；對齊實教值不誤導
 let selectedId = 'helix';
 let draftParams = {};
 let blocks = [];
