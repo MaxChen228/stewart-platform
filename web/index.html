@@ -627,6 +627,9 @@ body.dragging .chart-wrap:not(.phase) canvas { cursor: grabbing; }
       <div id="state-hmax" style="font-family:var(--font-mono);font-size:13px;text-align:center;color:var(--sub);margin-bottom:14px">—</div>
       <button id="btn-hold" class="chip zbtn" onclick="toggleHold()" disabled
         style="display:block;width:100%;font-size:14px;padding:10px;letter-spacing:1px">HOLD HERE</button>
+      <button id="btn-land" class="chip" onclick="requestLand()" disabled
+        style="display:block;width:100%;margin-top:6px;letter-spacing:1px"
+        title="一鍵安全降落：server 權威序列 home→landing→斷電（session 進行中亦可用）">LAND ⤓</button>
     </div>
 
     <!-- 1.5 POSE 姿態操作（G 指令；滑桿即時驅動綠色 ghost 目標預覽）-->
@@ -1502,11 +1505,13 @@ document.getElementById('ps-speed')?.addEventListener('input', savePlatformConfi
 
 
 // ===== 更新視覺化 =====
+let lastActualPose = null;   // 最近一次 FK 實際 pose（絕對座標）；DISABLE 前的距離檢查用
 function updateViz(motorAngles) {
   const Apt = computeA(motorAngles);
   const pose = solveFK(motorAngles);
   const Q = platformPointsFromPose(pose, stewartModel);
   stewartRig.updateFromPoints(Apt, Q);
+  if (Array.isArray(pose) && pose.length === 6 && pose.every(Number.isFinite)) lastActualPose = pose;
 
   setPoseErrorLive(pose);
 
@@ -1592,6 +1597,9 @@ function sessionBlocksCommand(cmd) {
 function refreshCommandLocks() {
   const manualEnabled = wsConnected && !sessionState.active;
   document.querySelectorAll('.zbtn').forEach(b => b.disabled = !manualEnabled);
+  // LAND 是安全動作：與 D/S 同級豁免 session 鎖，只要 server 在就可按
+  const landBtn = document.getElementById('btn-land');
+  if (landBtn) landBtn.disabled = !wsConnected;
   const poseStatus = document.getElementById('pose-ctl-status');
   if (poseStatus && sessionState.active) {
     poseStatus.textContent = 'session 執行中：即時控制鎖定';
@@ -1915,7 +1923,8 @@ function setHoldingUI(holding, hmax) {
     card.style.borderColor = 'var(--contra)';
     sub.textContent = `max |err|: ${(hmax||0).toFixed(2)}°`;
     sub.style.color = (hmax||0) > 5 ? 'var(--dev)' : (hmax||0) > 1 ? 'var(--contra)' : 'var(--sub)';
-    btn.textContent = 'RELEASE';
+    btn.textContent = 'DISABLE';   // 原名 RELEASE 與姿態卡「移動至 release 姿態」撞名——這顆是原地斷電
+    btn.title = '直接斷電（不移動，平台自由塌落）。要先回支撐位請用 LAND';
     btn.classList.add('danger');
   } else {
     label.textContent = 'IDLE';
@@ -1924,6 +1933,7 @@ function setHoldingUI(holding, hmax) {
     sub.textContent = '—';
     sub.style.color = 'var(--sub)';
     btn.textContent = 'HOLD HERE';
+    btn.title = '';
     btn.classList.remove('danger');
   }
 }
@@ -1942,7 +1952,33 @@ function setEncoderHealthUI(data) {
 }
 
 window.toggleHold = function() {
-  sendCmd(isHolding ? 'D' : 'H');
+  if (!isHolding) { sendCmd('H'); return; }
+  // DISABLE＝原地斷電（自由塌落）。距 landing 支撐位太遠時先確認，高位/大傾角誤按不再直接摔落。
+  const far = Array.isArray(lastActualPose) && Array.isArray(releasePose) && releasePose.length === 6 &&
+    ([0, 1, 2].some((i) => Math.abs(lastActualPose[i] - releasePose[i]) > 5) ||
+     [3, 4, 5].some((i) => Math.abs(lastActualPose[i] - releasePose[i]) > 3));
+  if (far && !confirm('平台不在 landing 支撐位附近，直接斷電會自由塌落。\n建議改用 LAND（home→landing→斷電）。仍要原地斷電？')) return;
+  sendCmd('D');
+};
+
+window.requestLand = async function() {
+  // 走 server 權威降落序列（與 rig 掉線 failsafe 同路徑）；session 中 server 端用權威 token 過 gate。
+  const btn = document.getElementById('btn-land');
+  const st = document.getElementById('pose-ctl-status');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/land', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (st) {
+      st.style.color = r.ok ? 'var(--sub)' : 'var(--dev)';
+      st.textContent = !r.ok ? `✗ LAND 失敗（HTTP ${r.status}）`
+        : d.already ? '⤓ 降落序列已在進行中' : '⤓ 安全降落中：home→landing→斷電';
+    }
+  } catch (e) {
+    if (st) { st.style.color = 'var(--dev)'; st.textContent = `✗ LAND 失敗：${e.message}`; }
+  } finally {
+    setTimeout(refreshCommandLocks, 1500);   // 降落序列排入後恢復按鈕（冪等，重按無害）
+  }
 };
 
 window.updateMotionParams = function() {
