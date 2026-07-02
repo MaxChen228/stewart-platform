@@ -47,7 +47,7 @@ const releaseMs = Number(process.env.OTA_RELEASE_MS) || 90000;
 console.log(`OTA upload target: ${host}`);
 console.log('Safety: firmware will disable motors when OTA starts.');
 
-const curl = spawnSync('curl', ['-fsS', `http://localhost:3000/api/release?ms=${releaseMs}`], {
+const curl = spawnSync('curl', ['-fsS', '-X', 'POST', `http://localhost:3000/api/release?ms=${releaseMs}`], {
   stdio: 'pipe',
   encoding: 'utf8',
   timeout: 3000,

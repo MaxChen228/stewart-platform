@@ -120,21 +120,23 @@ function wsUrl(host) {
   return u.toString();
 }
 
-function getJson(host, apiPath) {
+function getJson(host, apiPath, method = 'GET') {
   return new Promise((resolve, reject) => {
-    http.get(new URL(apiPath, httpBase(host)), (res) => {
+    const req = http.request(new URL(apiPath, httpBase(host)), { method }, (res) => {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => {
         try { resolve(JSON.parse(data || '{}')); }
         catch (e) { reject(e); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
   });
 }
 
-async function rest(host, apiPath) {
-  return getJson(host, apiPath.startsWith('/api/') ? apiPath : `/api/${apiPath}`);
+async function rest(host, apiPath, method = 'GET') {
+  return getJson(host, apiPath.startsWith('/api/') ? apiPath : `/api/${apiPath}`, method);
 }
 
 async function openWs(host) {
@@ -293,7 +295,7 @@ async function liveRun(opts, ctx, plan) {
   let recPath = null;
   let started = false;
   try {
-    const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`);
+    const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`, 'POST');
     recPath = rec.path;
     started = true;
     console.log(`Recording: ${recPath}`);
@@ -303,7 +305,7 @@ async function liveRun(opts, ctx, plan) {
       await sleep(step.wait);
     }
     if (opts.recordMainOnly && started) {
-      const stopped = await rest(opts.host, '/api/rec/stop');
+      const stopped = await rest(opts.host, '/api/rec/stop', 'POST');
       recPath = stopped.path || recPath;
       started = false;
       console.log(`Stopped recording before safe landing: ${recPath} (${stopped.lines ?? '?'} lines)`);
@@ -316,7 +318,7 @@ async function liveRun(opts, ctx, plan) {
   } finally {
     if (ws.readyState === WebSocket.OPEN) ws.close();
     if (started) {
-      const stopped = await rest(opts.host, '/api/rec/stop');
+      const stopped = await rest(opts.host, '/api/rec/stop', 'POST');
       recPath = stopped.path || recPath;
       console.log(`Stopped recording: ${recPath} (${stopped.lines ?? '?'} lines)`);
     }

@@ -2112,6 +2112,28 @@ function genStartStream(req, res, u) {
   req.on('close', () => clearInterval(iv));
 }
 
+// 瀏覽器跨站來源白名單（WS 與帶副作用 REST 端點共用）：
+// 放行本機 + RFC1918 私網來源（保住站機台旁用手機/平板從 LAN IP 控制）；
+// 跨站攻擊頁的 Origin 是攻擊者公網域名、不符此段 → 擋掉。無 Origin 的 curl/Node 放行。
+const LAN_ORIGIN_ALLOW = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/;
+
+// 帶副作用端點的守門：僅 POST（擋 <img>/超連結 GET-CSRF），且瀏覽器跨站 Origin 一律拒
+// （HTML form 可跨站 POST 不經 CORS preflight，故 method gate 之外還要驗 Origin）。
+function mutationAllowed(req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' });
+    res.end(JSON.stringify({ error: 'use POST' }));
+    return false;
+  }
+  const origin = req.headers.origin;
+  if (origin && !LAN_ORIGIN_ALLOW.test(origin)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'origin not allowed' }));
+    return false;
+  }
+  return true;
+}
+
 const requestHandler = (req, res) => {
   // REST: 最新資料
   if (req.url === '/api/latest') {
@@ -2145,6 +2167,7 @@ const requestHandler = (req, res) => {
     return;
   }
   if (req.url.split('?')[0] === '/api/transport/reconnect') {
+    if (!mutationAllowed(req, res)) return;
     transport.forceReconnect('api');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ reconnecting: true, transport: transport.getState() }));
@@ -2304,6 +2327,7 @@ const requestHandler = (req, res) => {
 
   // 系統辨識記錄器控制
   if (req.url.startsWith('/api/rec/start')) {
+    if (!mutationAllowed(req, res)) return;
     if (activeSession) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'session active; use /api/session/rec/start', session: publicSessionState(), recorder: publicRecState() }));
@@ -2321,6 +2345,7 @@ const requestHandler = (req, res) => {
     return;
   }
   if (req.url === '/api/rec/stop') {
+    if (!mutationAllowed(req, res)) return;
     if (recOwner && recOwner.type === 'session') {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'recorder is owned by active session', recorder: publicRecState() }));
@@ -2529,12 +2554,24 @@ const requestHandler = (req, res) => {
 
   // 釋放傳輸（供韌體上傳用，暫停重連）。語意 transport-aware（見 transport.release）。
   if (req.url.split('?')[0] === '/api/release') {
+    if (!mutationAllowed(req, res)) return;
     const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const requestedMs = Number(u.searchParams.get('ms')) || RELEASE_HOLD_MS;
     const holdMs = Math.max(1000, Math.min(RELEASE_HOLD_MAX_MS, requestedMs));
     transport.release(holdMs);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ released: true, holdMs }));
+    return;
+  }
+
+  // 一鍵安全降落：與 rig 掉線 failsafe 同一條 server 權威序列（home→landing→斷電）。
+  // 冪等：已在降落中回 already=true，不重複排程。
+  if (req.url.split('?')[0] === '/api/land') {
+    if (!mutationAllowed(req, res)) return;
+    const already = !!safeLandTimer;
+    if (!already) safeLandSequence('manual /api/land');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ landing: true, already }));
     return;
   }
 
@@ -2550,6 +2587,7 @@ const requestHandler = (req, res) => {
     return;
   }
   if (req.url.split('?')[0] === '/api/ota/http') {
+    if (!mutationAllowed(req, res)) return;
     const info = transport.otaPullInfo();
     if (info.state !== 'connected') {
       res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -2681,17 +2719,24 @@ function safeLandSequence(reason) {
   if (safeLandTimer) return;   // 已在降落中
   console.log(`[SAFE-LAND] ${reason} → 緊急降落序列（home→landing→斷電）`);
   if (controlOwner) { controlOwner = null; broadcast(JSON.stringify({ evt: 'mode', owner: null })); }
-  sendCommand('FOLLOW 0');                       // 先凍結跟隨
+  // session 進行中 P 會被 commandAllowed gate 丟（僅 D 豁免）→ 用權威 token 過 gate，
+  // 否則 rig 死在 session 中會退化成裸 D 從任意姿態塌落。token 在發送當下讀（session 可能中途結束）。
+  const send = (c) => sendCommand(c, activeSession ? activeSession.token : null);
+  send('FOLLOW 0');                              // 先凍結跟隨
+  // 姿態在觸發當下讀 config：landing 是隨支撐治具重教的活值（safe_land.js CLI 同語意），
+  // 硬編碼快照會在重教後把緊急降落砸在錯的位置。
+  const cfg = loadPlatformConfig();
+  const poseLine = (rel, ms) => `P ${relativeToAbsolutePose(rel).map((v) => Number(v.toFixed(3))).join(' ')} ${ms}`;
   const seq = [
-    [200,  'P 0 0 133 0 0 0 1200'],              // → home（min-jerk）
-    [1500, 'P 0 0 40 0 0 65 1200'],              // → landing 支撐位
+    [200,  poseLine(cfg.homeRelative, 1200)],     // → home（min-jerk）
+    [1500, poseLine(cfg.landingRelative, 1200)],  // → landing 支撐位
     [1500, 'D'],                                  // 斷電釋放
   ];
   let i = 0;
   const step = () => {
     if (i >= seq.length) { safeLandTimer = null; console.log('[SAFE-LAND] 完成（已斷電）'); return; }
     const [delay, c] = seq[i++];
-    safeLandTimer = setTimeout(() => { sendCommand(c); step(); }, delay);
+    safeLandTimer = setTimeout(() => { send(c); step(); }, delay);
   };
   step();
 }
@@ -2717,11 +2762,9 @@ function setControlMode(arg) {
 
 function handleWsConnection(ws, req) {
   // 安全：拒絕跨站瀏覽器連線（惡意網頁經 DNS rebinding / CSWSH 可直送指令驅動實體馬達）。
-  // 放行本機 + RFC1918 私網來源（保住站機台旁用手機/平板從 LAN IP 控制）；
-  // 跨站攻擊頁的 Origin 是攻擊者公網域名、不符此段 → 擋掉。無 Origin 的 Node 腳本放行。
+  // 白名單與帶副作用 REST 端點共用（LAN_ORIGIN_ALLOW，見 requestHandler 前）。
   const origin = req.headers.origin;
-  const ALLOW_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/;
-  if (origin && !ALLOW_ORIGIN.test(origin)) {
+  if (origin && !LAN_ORIGIN_ALLOW.test(origin)) {
     console.warn(`[WS] rejected cross-origin connection: ${origin}`);
     ws.close(1008, 'origin not allowed');
     return;

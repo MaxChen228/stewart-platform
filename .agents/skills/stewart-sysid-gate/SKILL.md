@@ -16,9 +16,9 @@ Use this workflow for system-identification and agent-operated Workspace tasks.
    Prefer `npm run workspace:session` for Workspace sessions and `npm run research:trial` for legacy turnkey trials.
 5. For manual recording outside Workspace, use the documented flow:
    - `npm start` for the server.
-   - `curl "localhost:3000/api/rec/start?name=NAME"` to start.
+   - `curl -X POST "localhost:3000/api/rec/start?name=NAME"` to start.
    - Run the motion/test.
-   - `curl localhost:3000/api/rec/stop` to stop.
+   - `curl -X POST localhost:3000/api/rec/stop` to stop.
    Do not use global recorder endpoints while a Workspace session is active; session-owned runs use `/api/session/rec/start` and `/api/session/rec/stop` through the Workspace runner.
 6. Hardware safety gates for live experiments and live Workspace sessions:
    - A human must be at the hardware.

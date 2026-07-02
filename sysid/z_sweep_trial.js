@@ -81,8 +81,8 @@ function wsUrl(host) {
   return u.toString();
 }
 
-async function rest(host, api) {
-  const r = await fetch(new URL(api.startsWith('/api/') ? api : `/api/${api}`, httpBase(host)));
+async function rest(host, api, method = 'GET') {
+  const r = await fetch(new URL(api.startsWith('/api/') ? api : `/api/${api}`, httpBase(host)), { method });
   return r.json();
 }
 
@@ -131,7 +131,7 @@ async function waitForTransport(host, timeoutMs = 20000) {
     last = await rest(host, '/api/transport').catch((err) => ({ error: err.message }));
     if (last.state === 'connected') return last;
     if (last.state === 'down' || last.state === 'connecting') {
-      await rest(host, '/api/transport/reconnect').catch(() => {});
+      await rest(host, '/api/transport/reconnect', 'POST').catch(() => {});
     }
     await sleep(700);
   }
@@ -271,7 +271,7 @@ async function main() {
     }
     await waitForFreshTelemetry(opts.host);
     const recName = `${safeName(opts.name)}_z${opts.low}-${opts.high}_c${opts.cycles}_ms${opts.ms}`;
-    const startedRec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`);
+    const startedRec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`, 'POST');
     recPath = startedRec.path;
     started = true;
     console.log(`Recording: ${recPath}`);
@@ -281,7 +281,7 @@ async function main() {
       await sleep(step.wait);
       await waitForFreshTelemetry(opts.host);
     }
-    const stopped = await rest(opts.host, '/api/rec/stop');
+    const stopped = await rest(opts.host, '/api/rec/stop', 'POST');
     recPath = stopped.path || recPath;
     started = false;
     console.log(`Stopped recording before safe landing: ${recPath} (${stopped.lines ?? '?'} lines)`);
@@ -292,7 +292,7 @@ async function main() {
       await sleep(step.wait);
     }
   } finally {
-    if (started) await rest(opts.host, '/api/rec/stop').catch(() => {});
+    if (started) await rest(opts.host, '/api/rec/stop', 'POST').catch(() => {});
     if (originalPid && opts.pid && ws.readyState === WebSocket.OPEN) {
       await sendChecked(ws, opts.host, `K ${originalPid.join(' ')}`).catch(() => {});
       await sleep(800);

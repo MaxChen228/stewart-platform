@@ -97,17 +97,19 @@ function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
-function rest(base, path) {
+function rest(base, path, method = 'GET') {
   const url = new URL(path, base);
   return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
+    const req = http.request(url, { method }, (res) => {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => {
         try { resolve(JSON.parse(data || '{}')); }
         catch (e) { reject(e); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -223,7 +225,7 @@ async function liveRun(opts) {
   const axes = opts.axis === 'all' ? AXES : [opts.axis];
   const ws = await openWs(opts.host);
   const recName = `${opts.name}_${axes.join('')}_amp${opts.amp}`;
-  const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`);
+  const rec = await rest(opts.host, `/api/rec/start?name=${encodeURIComponent(recName)}`, 'POST');
   console.log(`Recording: ${rec.path}`);
 
   try {
@@ -258,7 +260,7 @@ async function liveRun(opts) {
       try { await safeLand(ws, opts); } catch (err) { console.error(`[warn] safe landing failed: ${err.message}`); }
     }
     ws.close();
-    const stopped = await rest(opts.host, '/api/rec/stop');
+    const stopped = await rest(opts.host, '/api/rec/stop', 'POST');
     console.log(`Stopped recording: ${stopped.path} (${stopped.lines} lines)`);
   }
 }
