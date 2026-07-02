@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Stewart platform server 常駐（僅 felix 載入）。
+     傳輸自動偵測：felix 無 USB → 走 WiFi TCP（候選 = .esp32-ip 快取 → stewart.local）。
+     裝法：cp 到 ~/Library/LaunchAgents/ → launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.butler.stewart.plist
+     停用：launchctl bootout gui/$(id -u)/com.butler.stewart -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.butler.stewart</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/chenliangyu/project/stewart-platform/server.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/chenliangyu/project/stewart-platform</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd PATH 很窄；npm/pio（OTA 建置鏈）須顯式補上 -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/Users/chenliangyu/.platformio/penv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/chenliangyu/Library/Logs/stewart.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/chenliangyu/Library/Logs/stewart.err.log</string>
+</dict>
+</plist>

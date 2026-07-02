@@ -224,6 +224,13 @@ FK 連續失敗 5 次自動 fallback 到 mode 0。
 - heave→yaw 運動學疑點：heave+ 實體微順時針旋轉（使用者判 `MOTOR_SIGN` 標定無誤、暫不糾結）
 - 終極目標：無支架推擾回正（pose 調節），見記憶 `project_control_plan`
 
+## 部署（felix 常駐，2026-07-02 起）
+
+- **felix（常駐機，Tailscale `100.118.39.104`）跑 launchd 服務 `com.butler.stewart`**（plist 正本 `deploy/com.butler.stewart.plist`），無 USB → 自動走 WiFi TCP 連 ESP32。出國遙控入口：tailnet 內 `http://100.118.39.104:3000`。**Web UI 無認證，絕不掛 Cloudflare Tunnel 公網**。
+- gitignored 檔兩機各自持有：`sysid/config/secrets.json`（NETKEY+OTA 密碼）、`.esp32-ip`、`sysid/data/`（採集資料就地累積，不進 git）。輪換 secrets 記得兩機都更新（scp，勿 rsync push）。
+- **雙 master 紀律**：oscar 在家開發（USB serial）時 felix 服務可並存（韌體 TCP/USB 雙路由設計），但同時下指令會互踩——現場開發期間建議 felix 端 `launchctl bootout gui/501/com.butler.stewart` 暫停，離家再 bootstrap 回來。
+- 遠端韌體更新（felix 上）：`npm run upload:http`（pio build + server HTTP OTA）。`Z` 校正僅 USB、僅現場。馬達 power-cycle 後 ESP32 須重開機（見 CAN 注意事項）→ 無人在場靠智慧插座斷電順序：馬達 PSU → ESP32。
+
 ## 建置與燒錄
 
 ```bash
