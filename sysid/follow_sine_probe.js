@@ -45,6 +45,20 @@ const STEP_AT = parseFloat(arg('stepAt', '1.5'));   // when the step fires (s)
 const W = 2 * Math.PI * FREQ;
 const peakVel = W * AMP;
 const log = (...a) => { if (!JSON_OUT) console.log(...a); };
+
+// Safety gate: this probe drives the platform (FOLLOW 1 + z-sine PF stream) the
+// instant the socket opens. Same contract as research_trial: a live run needs
+// both --live and --i-am-at-rig so nothing moves hardware by accident.
+const LIVE = process.argv.includes('--live');
+const AT_RIG = process.argv.includes('--i-am-at-rig');
+if (!LIVE) {
+  console.log('[probe] dry-run (no hardware). Re-run with --live --i-am-at-rig to drive the rig.');
+  console.log(`[probe] would stream z-sine amp=${AMP}mm freq=${FREQ}Hz peakVel=${peakVel.toFixed(1)}mm/s secs=${SECS} intent=${INTENT_HZ}Hz`);
+  if (peakVel > 58) console.log(`[probe] ⚠️ peakVel ${peakVel.toFixed(1)} near/over VF limit (60mm/s) → would slew-clip`);
+  process.exit(0);
+}
+if (LIVE && !AT_RIG) { console.error('[probe] --live requires --i-am-at-rig (human supervision + reachable power cut)'); process.exit(1); }
+
 log(`[probe] z-sine amp=${AMP}mm freq=${FREQ}Hz peakVel=${peakVel.toFixed(1)}mm/s secs=${SECS} intent=${INTENT_HZ}Hz settle=${SETTLE}s`);
 if (peakVel > 58) log(`[probe] ⚠️ peakVel ${peakVel.toFixed(1)} near/over VF limit (60mm/s) → expect slew clipping, not pure tracking`);
 
@@ -57,7 +71,15 @@ let finished = false;
 
 const send = (cmd) => ws.send(JSON.stringify({ cmd }));
 
-ws.on('open', () => { send('FOLLOW 1'); });
+ws.on('open', () => {
+  // Crash safety net: if this probe dies (throw / SIGKILL) mid-stream, the board
+  // stays in FOLLOW with motors enabled. Declaring autoLandOnClose hands the
+  // WS-close to the server's authoritative safe-land (home->landing->power-cut),
+  // which survives even SIGKILL. Safe here because the probe is one-shot (no batch
+  // race) and its normal finish() ends by landing anyway.
+  ws.send(JSON.stringify({ autoLandOnClose: true }));
+  send('FOLLOW 1');
+});
 
 ws.on('message', (m) => {
   let d; try { d = JSON.parse(m.toString()); } catch { return; }
