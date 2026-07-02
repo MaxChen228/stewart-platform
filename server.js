@@ -10,6 +10,8 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const QRCode = require('qrcode');
 const { NEUTRAL_Z, solveFK, resetFK, ik } = require('./sysid/kin');
+const Kin = require('./sysid/kin');
+const WE = require('./sysid/workspace_envelope');   // 安全殼門檻/soft-knee 投影（PF 主閘）
 const PlatformSoT = require('./sysid/platform_sot');
 const WorkspaceExecutor = require('./sysid/workspace_executor');
 const fwHash = require('./sysid/fw_hash');  // 韌體源碼身分（與 build 端同一演算法）
@@ -115,6 +117,18 @@ const PF_MAILBOX_MIN_MS = Math.max(0, numberEnv('PF_MAILBOX_MIN_MS', 10));
 const PF_RESAMPLE_HZ = Math.max(1, Math.min(200, Math.round(numberEnv('PF_RESAMPLE_HZ', 100))));
 const PF_RESAMPLE_MS = Math.max(1, Math.round(1000 / PF_RESAMPLE_HZ));
 const MANUAL_PF_MODE = `server-resample-${PF_RESAMPLE_HZ}hz`;
+// PF 安全殼投影（soft-knee）：manualPfUpdateTarget 是三來源(desktop/phone/sim)唯一咽喉點，在此
+// 沿「home→目標」6D 射線做無記憶投影 → 目標恆在綠殼（徑向1.25 ∧ σmin≥0.15 ∧ κ≤12 ∧ 物理四閘）內，
+// 零時域延遲（純靜態映射，殼內恆等）。knee=1 即硬牆；session executor 路徑刻意不經此（實驗可探邊界）。
+const PF_SAFE_CLAMP = process.env.PF_SAFE_CLAMP !== '0';
+const PF_SAFE_KNEE = Math.min(1, Math.max(0.1, numberEnv('PF_SAFE_KNEE', 0.8)));
+const pfSafeProject = WE.makeSafeProjector(Kin, { knee: PF_SAFE_KNEE });
+let pfSafeHomePose = null, pfSafeHomeAt = 0;
+function pfSafeHome() {   // home 讀檔 2s TTL 快取（loadHomePose 每次讀磁碟，100Hz 熱路徑不可）
+  const now = Date.now();
+  if (!pfSafeHomePose || now - pfSafeHomeAt > 2000) { pfSafeHomePose = loadHomePose(); pfSafeHomeAt = now; }
+  return pfSafeHomePose;
+}
 let followDiagStream = null;
 let followDiagPath = null;
 let followDiagT0 = performance.now();
@@ -181,6 +195,11 @@ const manualPf = {
   transportSkip: 0,
   emitErrors: 0,   // manualPfEmit() threw (unexpected); persistent so a recovered one-shot stays visible
   emitDtMaxSession: 0,
+  // 安全殼投影統計（PF_SAFE_CLAMP 主閘）
+  clampCount: 0,
+  lastClampAt: 0,
+  lastClampDiagAt: 0,   // followDiag 'manual_pf_clamp' 節流時鐘（≥200ms/筆）
+  lastClampRho: 0,
 };
 
 // Manual PF emission scheduler (server is the fixed-rate reference clock).
@@ -724,6 +743,10 @@ function manualPfSummary(now = Date.now()) {
     transportSkip: manualPf.transportSkip,
     emitErrors: manualPf.emitErrors,
     lastReason: manualPf.lastReason,
+    safeClamp: PF_SAFE_CLAMP
+      ? { knee: PF_SAFE_KNEE, count: manualPf.clampCount, lastRho: manualPf.lastClampRho,
+          msSinceClamp: manualPf.lastClampAt ? now - manualPf.lastClampAt : null }
+      : { enabled: false },
   };
 }
 
@@ -937,18 +960,42 @@ setInterval(() => {
 }, 300);
 
 function manualPfUpdateTarget(cmd) {
-  const pose = parsePoseCommand(cmd, 'PF');
-  if (!pose) {
+  const rawPose = parsePoseCommand(cmd, 'PF');
+  if (!rawPose) {
     markPfMailboxDrop('invalid manual PF target', 'invalid');
     return { ok: false, reason: 'invalid PF pose' };
   }
   const now = Date.now();
+  // 安全殼 soft-knee 投影（主閘）：resampler 以降全部用投影後 pose；語料庫保留原始意圖。
+  // 投影拋錯絕不擋 PF——守界失效寧可退回無投影，不可凍結控制流。
+  let pose = rawPose, clampInfo = null, clampErr = null;
+  if (PF_SAFE_CLAMP) {
+    try {
+      const r = pfSafeProject(rawPose, pfSafeHome());
+      pose = r.pose;
+      if (r.clamped) {
+        clampInfo = r;
+        manualPf.clampCount++;
+        manualPf.lastClampAt = now;
+        manualPf.lastClampRho = round(r.rho, 3);
+        if (now - manualPf.lastClampDiagAt >= 200) {
+          manualPf.lastClampDiagAt = now;
+          followDiagWrite('manual_pf_clamp', { raw: rawPose, pose, s: round(r.s, 4), rho: round(r.rho, 3), knee: PF_SAFE_KNEE });
+        }
+      }
+    } catch (err) {
+      clampInfo = null;
+      clampErr = `safe clamp error: ${err && err.message ? err.message : err}`;
+    }
+  }
   manualPf.target = pose;
   manualPf.lastInputAt = now;
   manualPf.targetUpdates++;
-  manualPf.lastReason = null;
+  manualPf.lastReason = clampErr;
   pushWindow(manualPf.inputWindow, { at: now, pose }, now);
-  phoneCapWrite('pf', { pose });   // 原始 PF intent（僅在 phone-capture 已開檔時落盤）
+  // 原始 PF intent（僅在 phone-capture 已開檔時落盤）：pose 欄恆為人手真實輸出（generator 語料），
+  // 被夾持時另附投影後值供對照
+  phoneCapWrite('pf', clampInfo ? { pose: rawPose, clamped: pose, s: round(clampInfo.s, 4), rho: round(clampInfo.rho, 3) } : { pose: rawPose });
   followDiagWrite('manual_pf_target', {
     pose,
     targetUpdates: manualPf.targetUpdates,

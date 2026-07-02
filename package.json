@@ -4,7 +4,7 @@
   "scripts": {
     "start": "node server.js",
     "build": "~/.platformio/penv/bin/pio run",
-    "test": "node sysid/check_kin_sync.js && node sysid/validate_motion_library.js",
+    "test": "node sysid/check_kin_sync.js && node sysid/check_safe_projection.js && node sysid/validate_motion_library.js",
     "check:kin-sync": "node sysid/check_kin_sync.js",
     "fw:id": "node sysid/fw_hash.js --json",
     "fw:check": "curl -s localhost:3000/api/firmware",

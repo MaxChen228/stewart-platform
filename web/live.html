@@ -254,8 +254,11 @@ markInt.visible = false; markAct.visible = false; sceneW.add(markInt, markAct);
 // ============ 工作空間殼 Web Worker：中心 = 當前意圖平移（三來源通用）============
 const wsWorker = new Worker('/shared/workspace-worker.js');
 const WS_GRID = { roll: [-42, 42, 3], pitch: [-42, 42, 3], yaw: [-92, 92, 4] };
-const WS_THR = { radialMargin: 1.25, epsT2: 0.15, kappaThr: 12, phys: true };   // 與 geometry.html 同門檻 + 物理四閘
+const WS_THR = { ...WE.SAFE_THR, phys: true };   // 門檻 SoT = workspace_envelope.SAFE_THR（殼顯示與投影同一組）
 const geoKin = WE.geoFromKin(Kin);   // 現役幾何（kin.js SoT），純資料直傳 worker
+// 安全殼 soft-knee 投影：desktop/sim 兩來源的意圖在本地（進 ghost/軌跡/PF 前）夾持 → 顯示 = 實際下發。
+// phone 來源不經此（其意圖走 server followtgt echo，server 主閘已投影）。knee 與 server PF_SAFE_KNEE 預設對齊。
+const safeProject = WE.makeSafeProjector(Kin, { knee: 0.8 });
 let wsReqId = 0, envCenter = null, envInflight = false, envDirty = false;
 function runEnvelope() {
   if (envInflight) { envDirty = true; return; }   // 計算中 → 一結束立刻補算最新 targetG
@@ -511,9 +514,17 @@ function openStream() {
   es.addEventListener('meta', e => { curSeed = JSON.parse(e.data).seed; seedEl.value = curSeed; });
   es.onmessage = e => {
     const f = JSON.parse(e.data);
-    for (const p of f.pts) accumPush(p[0], p[1], p[2]);
-    ghostArrive(f.last);   // 波形/readout/綠 marker 統一由 render loop 從 dispG 取樣
-    if (driving && currentSource === 'sim') streamPFBoard(f.last);
+    // 安全殼夾持後才進顯示與 PF（pts 借 f.last 的 xyz 當投影中心；>40 點/批 stride 抽樣，
+    // 投影 ~0.2ms/點，極速預覽不拖主執行緒——accum 本就是視覺密度非完整記錄）
+    const last = safeProject(f.last, homeAbs).pose;
+    const stride = Math.max(1, Math.ceil(f.pts.length / 40));
+    for (let i = 0; i < f.pts.length; i += stride) {
+      const p = f.pts[i];
+      const q = safeProject([f.last[0], f.last[1], f.last[2], p[0], p[1], p[2]], homeAbs).pose;
+      accumPush(q[3], q[4], q[5]);
+    }
+    ghostArrive(last);   // 波形/readout/綠 marker 統一由 render loop 從 dispG 取樣
+    if (driving && currentSource === 'sim') streamPFBoard(last);
     lastN = f.n; lastIk = f.ikDrop; fpsAcc += f.pts.length;
     const now = performance.now();
     if (now - lastFpsT >= 500) { pps = fpsAcc / (now - lastFpsT) * 1000; fpsAcc = 0; lastFpsT = now;
@@ -564,7 +575,7 @@ function desktopPose() {
   return p;
 }
 function onSlider() {
-  const pose = desktopPose();
+  const pose = safeProject(desktopPose(), homeAbs).pose;   // 安全殼夾持後才進顯示與 PF（顯示=下發）
   ghostArrive(pose); accumPush(pose[3], pose[4], pose[5]);   // 滑桿意圖同樣累積軌跡（與模擬一致）
   if (driving && currentSource === 'desktop') streamPFBoard(pose);
 }

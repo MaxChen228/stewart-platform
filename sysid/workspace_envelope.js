@@ -161,6 +161,73 @@ function legPhysics(geo, pose, angles, phys, thetaLim) {
   return { j1, j2, j3, crankMin, okJ1, okJ2, okJ3, okCrank, ok: okJ1 && okJ2 && okJ3 && okCrank };
 }
 
+// ================= 即時安全投影（soft-knee）=================
+// 綠殼四門檻的單點成員判定 + 沿「home→目標」6D 射線的無記憶投影。純靜態映射 → 時域延遲嚴格為零。
+// 門檻常數 SoT：與 live.html / geometry.html 殼顯示同一組（改門檻時一起改）。
+const SAFE_THR = { radialMargin: 1.25, epsT2: 0.15, kappaThr: 12 };
+
+// 工廠：預解 thetaLim（poseMargins 每次重解 60 迭代二分，熱路徑外提），門檻短路序＝便宜先行。
+// 回 isSafe(poseN)：poseN=[x,y,z(R_b 單位),roll,pitch,yaw(度)] 是否為綠殼成員
+// （Type-I ∧ 物理四閘 ∧ 徑向裕度 ∧ Type-II）。實測 ~8µs/call（node，內點全門檻）。
+function makeSafeChecker(geo, thr = SAFE_THR) {
+  const phys = _physOf(thr.phys == null ? true : thr.phys);
+  const thetaLim = solveThetaLim(geo, phys);
+  const rm = thr.radialMargin == null ? SAFE_THR.radialMargin : thr.radialMargin;
+  const eps = thr.epsT2 == null ? SAFE_THR.epsT2 : thr.epsT2;
+  const kap = thr.kappaThr == null ? SAFE_THR.kappaThr : thr.kappaThr;
+  return (pose) => {
+    const sol = ikN(geo, pose);
+    if (!sol.valid) return false;
+    if (!legPhysics(geo, pose, sol.angles, phys, thetaLim).ok) return false;
+    if (!ikN(geo, [pose[0], pose[1], pose[2], pose[3]*rm, pose[4]*rm, pose[5]*rm]).valid) return false;
+    const J = jacN(geo, pose, sol.angles), sx = singv(J.Jx), sa = singv(J.Ja);
+    return sx[0] >= eps && sa[5] / (sa[0] || 1e-12) <= kap;
+  };
+}
+
+// 工廠：mm 域 soft-knee 投影（server 主閘 / phone.html / live.html 三處同一實作，不分叉）。
+// project(poseMm, homeMm) → { pose, s, rho, clamped }
+//   沿 d = pose−home 的 6D 射線找「第一連通安全段」末端 s*（輸入尺度）：先均勻粗掃 [0, 1/knee]
+//   再 bracket 內二分——安全集 ~6% 射線非星形（safe→unsafe→safe 孤島），純二分可能跳進外側孤島。
+//   soft-knee（邊界單位 ρ=1/s*）：g(ρ)=ρ (ρ≤knee)；knee+(1−knee)·tanh((ρ−knee)/(1−knee)) (ρ>knee)。
+//   輸出 = home + d·g(ρ)/ρ。g<1 恆成立 → 輸出嚴格在第一安全段內、恆 safe；knee=1 精確退化硬牆。
+//   已知殘餘：掃描步寬 (1/knee)/scanSteps 可能跳過更薄的 unsafe 薄片——指令點仍 safe，
+//   僅路徑暫態穿薄片（薄片是裕度違規非 Type-I 硬牆，藍區仍成立），可接受。
+function makeSafeProjector(Kin, opts = {}) {
+  const knee = Math.min(1, Math.max(0.1, opts.knee == null ? 0.8 : opts.knee));
+  const scanSteps = opts.scanSteps || 24, bisectIters = opts.bisectIters || 10;
+  const geo = geoFromKin(Kin), Rb = Kin.BASE_RADIUS;
+  const isSafe = makeSafeChecker(geo, opts.thr || SAFE_THR);
+  return function project(poseMm, homeMm) {
+    const d = [0, 0, 0, 0, 0, 0];
+    let mag = 0;
+    for (let i = 0; i < 6; i++) { d[i] = poseMm[i] - homeMm[i]; mag = Math.max(mag, Math.abs(d[i])); }
+    const at = (s) => [ (homeMm[0]+d[0]*s)/Rb, (homeMm[1]+d[1]*s)/Rb, (homeMm[2]+d[2]*s)/Rb,
+                        homeMm[3]+d[3]*s, homeMm[4]+d[4]*s, homeMm[5]+d[5]*s ];
+    if (!(mag > 1e-9)) return { pose: poseMm.slice(), s: 1, rho: 0, clamped: false };
+    if (!isSafe(at(0))) return { pose: homeMm.slice(), s: 0, rho: Infinity, clamped: false };  // home 不安全（不應發生）→ 回 home
+    const sMax = 1 / knee;
+    let lo = 0, hi = null;
+    for (let i = 1; i <= scanSteps; i++) {
+      const s = sMax * i / scanSteps;
+      if (isSafe(at(s))) lo = s; else { hi = s; break; }
+    }
+    if (hi == null) return { pose: poseMm.slice(), s: 1, rho: knee, clamped: false };  // [0,1/knee] 全 safe → 恆等
+    for (let i = 0; i < bisectIters; i++) { const m = (lo + hi) / 2; if (isSafe(at(m))) lo = m; else hi = m; }
+    const sStar = lo;
+    const rho = sStar > 1e-9 ? 1 / sStar : Infinity;
+    if (rho <= knee) return { pose: poseMm.slice(), s: 1, rho, clamped: false };  // 二分收斂到掃描域邊角 → 恆等
+    const g = knee >= 1 ? Math.min(rho, 1)
+      : knee + (1 - knee) * Math.tanh((rho - knee) / (1 - knee));
+    const f = Math.min(1, g / rho);
+    // f≈1（剛進 knee 區）snap 回輸入：保證 !clamped ⇔ 輸出===輸入；不連續量 <0.05% 偏移，低於感測噪音
+    if (f >= 0.9995) return { pose: poseMm.slice(), s: sStar, rho, clamped: false };
+    const out = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < 6; i++) out[i] = homeMm[i] + d[i] * f;
+    return { pose: out, s: sStar, rho, clamped: true };
+  };
+}
+
 // ---------- 幾何 provider ----------
 const SPOKES = [210, 90, -30], SIGN = [1, -1, 1, -1, 1, -1];
 // 任意幾何（無量綱參數，與 web/geometry.html 同義）：r=R_p/R_b, alphaB/alphaP(度), l=L/R_b, u=U/R_b, beta(度), clocking(度)
@@ -273,6 +340,6 @@ function computeEnvelope(geo, opts = {}) {
 }
 
 const _M = { DEG, Rmat, eigSym6, singv, ikN, jacN, poseMargins, geoFromParams, geoFromKin, computeEnvelope, ax, samp,
-  PHYS_DEFAULT, crankTip, solveThetaLim, legPhysics };
+  PHYS_DEFAULT, crankTip, solveThetaLim, legPhysics, SAFE_THR, makeSafeChecker, makeSafeProjector };
 if (typeof module !== 'undefined' && module.exports) module.exports = _M;
 if (typeof self !== 'undefined') self.WorkspaceEnvelope = _M;   // 瀏覽器 window 或 Web Worker（self 兩者皆涵蓋）

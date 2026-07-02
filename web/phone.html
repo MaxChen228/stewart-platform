@@ -58,16 +58,21 @@ button:active{transform:translateY(1px);}
 </main>
 
 <script src="/sysid/kin.js"></script>
+<script src="/sysid/workspace_envelope.js"></script>
 <script>
 // 手機陀螺儀 = 獨立的「手機模式」來源（與電腦滑桿互斥，server owner 仲裁）。讀 IMU → 相對姿態旋轉
 // 矩陣 → 平台 rpy 增量 → 串 PF。驅動 on/off 由 server evt:'mode'(owner==='phone') 權威控制。
 const Kin = window.Kin, NEUTRAL_Z = Kin.NEUTRAL_Z;
 const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+// 安全殼 soft-knee 投影（與 server PF_SAFE_KNEE 預設 0.8 對齊；server 主閘同一實作，此處讓
+// dot 顯示 = 實際下發、邊界行為 = 滑牆而非凍結）。殼內恆等 → 零時域延遲。
+const safeProject = window.WorkspaceEnvelope.makeSafeProjector(Kin, { knee: 0.8 });
+let lastClamped = false;
 const byId = (id)=>document.getElementById(id);
 const fmt = (v)=>Number.isFinite(v)?v.toFixed(1):'--';
 
 // 映射：手機相對校正姿態的傾斜/轉動 → 平台 rpy 增量（線性增益，無人為 cap）。
-// 邊界 = 實際工作空間：算出的 pose 不可達就維持上一可達點（IK valid 守，等同滑桿 reach-band）。
+// 邊界 = 綠色安全殼（soft-knee 投影）：超界沿 home 射線壓回殼內滑牆，殼內 1:1 恆等（零延遲）。
 // headingDeg：旋轉傾斜向量讓「手機頭 = M1,2(@210°)」；實測現況手機頭→M3,4(@90°) → 需 +120°。
 // tiltGain/yawGain = 平台度 / 手機度。yaw 工作空間大（滑桿±70）→ gain 大、不再被死 cap 在 10。
 const MAP = { tiltGain:0.5, yawGain:1.4, headingDeg:120, deadband:0.4, rollSign:1, pitchSign:1, yawSign:1 };
@@ -183,13 +188,15 @@ function computePose(force=false){
     cmdRpy[i] = r.x + p;                                   // 1€ 平滑 + clamp 角速度預測抵消下游 lag
   }
   const cand=basePose.slice(); cand[3]+=cmdRpy[0]; cand[4]+=cmdRpy[1]; cand[5]+=cmdRpy[2];
-  if(Kin.ik(cand).valid||force) cmdPose=cand;   // 工作空間守界：不可達則維持上一可達 cmdPose
+  // 安全殼守界：soft-knee 投影（滑牆）取代舊 IK-valid 凍結——超界時沿 home 射線壓回綠殼邊界，
+  // 持續跟手不卡死。force=校正路徑直設（cand=basePose，恆 safe）。
+  if(force){ cmdPose=cand; lastClamped=false; }
+  else { const r=safeProject(cand, basePose); cmdPose=r.pose; lastClamped=r.clamped; }
   render();
   return Kin.ik(cmdPose).valid;
 }
 function render(){
-  const valid=Kin.ik(cmdPose).valid;
-  byId('dot').classList.toggle('bad',!valid);
+  byId('dot').classList.toggle('bad',lastClamped);   // 紅 dot 語意：已夾持在安全殼邊界（壓縮生效中）
   const DISP=18;   // dot 視覺尺度（°）；顯示數字＝平台實際 rpy
   const x=clamp(cmdPose[3]/DISP,-1,1)*40, y=clamp(cmdPose[4]/DISP,-1,1)*40;
   byId('dot').style.transform=`translate(calc(-50% + ${x}%),calc(-50% + ${y}%))`;
