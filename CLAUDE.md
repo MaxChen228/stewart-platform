@@ -93,7 +93,10 @@ CRC = `(CAN_ID + 所有 data bytes) & 0xFF`
 
 ### CAN 後端注意事項
 
-- 每 cycle 開頭 flushReceiveBuffer()：語意=排空舊回覆（F5 acks），兩後端皆保留。TWAI RX queue 64 深，MCP2515 時代的 2-buffer 塞爆問題已消失（該限制僅餘 fallback 路徑）
+- ⚠️ **同 ID 相剋鐵律（2026-07-02 實症定案）**：42D 的指令幀、回覆 ack 幀、0x35 主動上報幀**全部同 ID（=馬達地址）**。CAN 仲裁對同 ID 同時發送=保證 bit error；TWAI 無限重傳下 TEC 破表→bus-off，曾把六顆馬達全轟進 bus-off（只能斷電馬達救）。**BOOT 定案 = no-ack（0x8C XX=0，讀取類 0x30/0x35 不受影響仍回）+ 輪詢（不 arm 上報）**→ TX 恆零錯。`C 1 0`/`A<hz>` 可 runtime 切回實驗，但高頻上報/ack + 驅動流必炸。實測：ack 開 12 幀 TX = TEC+134；no-ack+輪詢 = 恆 0
+- 防護（`can_twai_compat.h`）：bus-off 自動 recovery + error-passive TX 死鎖斬斷（TX queue 卡 >500ms → stop/start 清卡死幀）。TWAI 進 bus-off 不自動恢復（MCP2515 硬體會），缺防護會一次瞬態永久卡死
+- **馬達 power-cycle 後 ESP32 必須重開機**（sessionZeroRaw/座標映射建立於 boot；馬達重啟後映射失效 → F5 有 ack 但不動）
+- 每 cycle 開頭 flushReceiveBuffer()：語意=排空舊回覆，兩後端皆保留。TWAI RX queue 64 深，MCP2515 的 2-buffer 塞爆問題已消失（僅餘 fallback 路徑）
 - encoder 讀取失敗時保持上一次角度值（不回退到 neutralAngle）
 - main.cpp 的 MCP 暫存器深診斷指令（rawReadReg/rawSetMode 路徑）在 TWAI 後端是 no-op stub，回值無意義——只在 fallback 硬體上有效
 

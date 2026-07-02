@@ -1255,8 +1255,12 @@ void setup() {
     }
     // 之後恢復一般流程
     servos.disableAll();
+    // 回應模式 BOOT 預設 = (0,0) 全不回應（2026-07-02 TWAI 定案，可 runtime `C 1 0` 切回）：
+    // 42D 指令幀與馬達回覆幀同 ID（馬達地址）→ 高頻 F5 流與其 ack 同 ID 迎頭相撞（CAN
+    // 仲裁不分勝負=保證 bit error）→ TWAI 無限重傳下 TEC 破表 bus-off。no-ack 單向流根治；
+    // 讀取類（0x30/0x35）不受影響仍回。實測：ack 開 12 幀 TX TEC+134，no-ack 恆 0。
     for (int i = 0; i < NUM_MOTORS; i++) {
-        servos.setResponseMode(MOTOR_ADDR[i], 1, 0);
+        servos.setResponseMode(MOTOR_ADDR[i], 0, 0);
         delay(10);
     }
 
@@ -1272,9 +1276,11 @@ void setup() {
     delay(200);
     servos.flushReceiveBuffer();
 
-    // 預設啟用 auto-return：MCP2515/500K 下保守用 20ms(50Hz)，避免 6 顆 streaming + F5 壓爆 2 格 RX buffer。
-    // ESP32 連續排空、控制環只取最新快照 → cus≈0、無輪詢 8ms backstop（runtime A0 可切回輪詢）。
-    armAutoReturn(false);
+    // BOOT 預設 = 輪詢（2026-07-02 TWAI 定案；runtime `A<hz>` 可切回上報實驗）：
+    // 上報幀 ID == 指令幀 ID（馬達地址）→ 與我方 TX 同 ID 相撞（實測 200Hz 上報下 12 幀
+    // TX TEC+134、驅動 burst 直接 bus-off 並曾把六顆馬達全轟進 bus-off）。輪詢一問一答
+    // 時序天然錯開 → TX 恆零錯。5 輪 to-home⇄land 驗收即以「no-ack + 輪詢」PASS。
+    // armAutoReturn(false);   // 退役預設，保留 runtime 路徑
     startCanRxTask();
 
     // WiFi bring-up（P1）：載入 NVS 憑證，若已啟用則自動連線並印 IP。

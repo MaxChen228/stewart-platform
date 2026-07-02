@@ -49,19 +49,70 @@ class TwaiCanCompat {
     bool installed = false;
     SemaphoreHandle_t canMux = nullptr;
     uint32_t bitrate = TWAI_DEFAULT_BITRATE;
+    uint32_t lastHealthMs = 0;
+    uint32_t recoveryCount = 0;
+    uint32_t txStuckSinceMs = 0;
+    uint32_t txPurgeCount = 0;
 
     void ensureMutex() {
         if (!canMux) canMux = xSemaphoreCreateRecursiveMutex();
     }
 
-    static twai_timing_config_t timingFor(uint32_t bps) {
-        switch (bps) {
-            case 1000000: return TWAI_TIMING_CONFIG_1MBITS();
-            case 500000:  return TWAI_TIMING_CONFIG_500KBITS();
-            case 250000:  return TWAI_TIMING_CONFIG_250KBITS();
-            case 125000:  return TWAI_TIMING_CONFIG_125KBITS();
-            default:      return TWAI_TIMING_CONFIG_500KBITS();
+    // ── bus-off 自動恢復（2026-07-02 實症修）──
+    // MCP2515 硬體 bus-off 後自動重入（CAN spec 128×11 recessive）；ESP-IDF TWAI driver
+    // 則停在 BUS_OFF 等 host 主動 recovery——缺這段會一次瞬態永久卡死
+    // （實症：server 重啟 DTR reset 瞬態 → TEC 飽和 → BUS_OFF；rx 全停、TEC 凍 128、ef=0x94）。
+    // 呼叫點：sendMsgBuf / checkReceive 入口，50ms throttle（400Hz 迴圈下 ~20Hz 檢查）。
+    // 若物理層真故障會反覆 recovery→bus-off，serial 每次轉換各印一行 warn/info 可辨識。
+    void serviceBusHealth() {
+        uint32_t now = millis();
+        if (now - lastHealthMs < 50) return;
+        lastHealthMs = now;
+        twai_status_info_t st = {};
+        if (twai_get_status_info(&st) != ESP_OK) return;
+        if (st.state == TWAI_STATE_BUS_OFF) {
+            twai_initiate_recovery();          // → RECOVERING（driver 清 TX queue，等 128×11 recessive）
+            recoveryCount++;
+            txStuckSinceMs = 0;
+            Serial.printf("{\"warn\":\"twai bus-off, recovery #%u initiated\"}\n", recoveryCount);
+        } else if (st.state == TWAI_STATE_STOPPED) {
+            twai_start();                      // recovery 完成落 STOPPED → 重啟回 RUNNING
+            Serial.printf("{\"info\":\"twai running again after recovery #%u\"}\n", recoveryCount);
+        } else if (st.state == TWAI_STATE_RUNNING) {
+            // ── error-passive TX 死鎖斬斷（2026-07-02 實症）──
+            // 42D 主動上報幀 ID == 指令幀 ID（馬達地址）→ 同 ID 仲裁不分 → bit error；
+            // error passive 後 TEC 凍結（CAN spec 特例）+ TWAI 無限重傳 → 一幀卡死 TX queue，
+            // 每 5ms 與上報再撞 → RX 全滅（REC 爆）→ bus 永久死鎖，state 仍 RUNNING 故
+            // bus-off recovery 抓不到。正常 500k 下 32 幀 queue ~7ms 清空；持續 500ms
+            // 有貨 = 死鎖 → stop/start 清 TX queue 斬斷卡死幀（丟該幀，上層有重試）。
+            if (st.msgs_to_tx > 0) {
+                if (!txStuckSinceMs) txStuckSinceMs = now;
+                else if (now - txStuckSinceMs > 500) {
+                    twai_stop();               // 清 TX queue（含卡死幀）
+                    twai_start();
+                    txPurgeCount++;
+                    txStuckSinceMs = 0;
+                    Serial.printf("{\"warn\":\"twai tx-deadlock purge #%u (dropped stuck frame)\"}\n", txPurgeCount);
+                }
+            } else {
+                txStuckSinceMs = 0;
+            }
         }
+    }
+
+    static twai_timing_config_t timingFor(uint32_t bps) {
+        twai_timing_config_t t;
+        switch (bps) {
+            case 1000000: t = TWAI_TIMING_CONFIG_1MBITS();   break;
+            case 500000:  t = TWAI_TIMING_CONFIG_500KBITS(); break;
+            case 250000:  t = TWAI_TIMING_CONFIG_250KBITS(); break;
+            case 125000:  t = TWAI_TIMING_CONFIG_125KBITS(); break;
+            default:      t = TWAI_TIMING_CONFIG_500KBITS(); break;
+        }
+        // 三重取樣（≤500k 合法）：2026-07-02 實測 VP230 TX 路徑邊際——每幀平均重傳 1–2 次
+        // 才成功（TEC 12 幀即衝 ~134、RX 恆完美），多數決取樣压 bit error 率。
+        if (bps <= 500000) t.triple_sampling = true;
+        return t;
     }
 
 public:
@@ -107,6 +158,7 @@ public:
 
     uint8_t sendMsgBuf(uint32_t id, uint8_t /*ext*/, uint8_t len, const uint8_t* buf) {
         TwaiCanGuard _g(*this);
+        serviceBusHealth();
         twai_message_t msg = {};
         msg.identifier = id & 0x7FF;
         msg.extd = 0;
@@ -118,6 +170,7 @@ public:
 
     uint8_t checkReceive() {
         TwaiCanGuard _g(*this);
+        serviceBusHealth();
         if (hasCached) return TWAI_CAN_MSGAVAIL;
         if (twai_receive(&cached, 0) == ESP_OK) {
             hasCached = true;
