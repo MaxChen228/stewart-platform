@@ -979,36 +979,22 @@ static void clearBump() {
     bumpUntilMs = 0;
 }
 
-void posStop() {
+// 停止控制的單一真相：清所有模式旗標 + 停位置環；disable=true 再斷電釋放。
+// 三個語意入口（軟停 / 斷電 / OTA 安全停）委派此處，重置邏輯不再散成三份手抄
+// （加模式旗標時只需改這一處，不會漏清殘留 windup/followMode）。
+static void stopControl(bool disable) {
     posEnabled = false;
     holdMode = false;
     followMode = false;
     holdDampInit = false;
     holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
     servos.stopAllPosition(5);
+    if (disable) { delay(50); servos.disableAll(); }
 }
 
-void posDisable() {
-    posEnabled = false;
-    holdMode = false;
-    followMode = false;
-    holdDampInit = false;
-    holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
-    servos.stopAllPosition(5);
-    delay(50);
-    servos.disableAll();
-}
-
-static void otaSafetyStop() {
-    posEnabled = false;
-    holdMode = false;
-    followMode = false;
-    holdDampInit = false;
-    holdIntInit = false;          // 下次進 HOLD 由 applyHoldIntegral lazy-reset，不殘留 windup
-    servos.stopAllPosition(5);
-    delay(50);
-    servos.disableAll();
-}
+void posStop() { stopControl(false); }           // S：軟停（清模式 + 停位置環，馬達保持使能有保持力矩）
+void posDisable() { stopControl(true); }          // D：斷電釋放（可自由轉動）
+static void otaSafetyStop() { stopControl(true); } // OTA 前禁能（flash 期間 limp 屬預期）
 
 static void requestOtaSafetyStop() {
     otaStopRequested = true;
